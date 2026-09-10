@@ -22,15 +22,20 @@ FOX-Toolkit-Muster wie `mmc/devmgmt` im ice2k-Repo.
 - **Zonen-Assistent** ("Neue Zone..."): Auswahl Forward-/
   Reverse-Lookupzone mit Live-Vorschau des berechneten
   `in-addr.arpa`-Namens, Button "Fertig stellen" wie im Original
-- **Neuer-Host-Dialog**: legt Hosts per "Host hinzufügen" sofort an und
-  bleibt für weitere offen (mit Erfolgsmeldung "Der Hostdatensatz für
-  ... wurde erfolgreich erstellt."), "Fertig stellen" schließt ihn --
-  genauso wie im Original-Assistenten
-- Kontextmenüs:
-  - Rechtsklick auf "Forward-Lookupzonen" -> **Neue Zone...**
-  - Rechtsklick auf eine Zone -> **Neuer Host (A)...** / **Löschen**
+- **Neuer-Host-, Neuer-Alias- (CNAME) und Neuer-Mailserver-Dialog (MX)**:
+  legen Einträge per "... hinzufügen" sofort an und bleiben für weitere
+  offen (mit Erfolgsmeldung, Felder-Reset), "Fertig stellen" schließt sie
+  -- genauso wie im Original-Assistenten
+- Kontextmenüs wie im Original:
+  - Rechtsklick auf "Forward-/Reverse-Lookupzonen" -> **Neue Zone...** /
+    **Aktualisieren**
+  - Rechtsklick auf eine Zone -> **Neuer Host (A)...** / **Neuer Alias
+    (CNAME)...** / **Neuer Mailserver (MX)...** / **Aktualisieren** /
+    **Eigenschaften** / **Löschen**
   - Rechtsklick auf einen Eintrag in der Listenansicht -> **Eigenschaften**
     (nur Host/A) / **Löschen**
+- **Zonen-Eigenschaften**: zeigt Zonenname/-typ/-datei sowie die rohen
+  SOA-Werte (Serial/Refresh/Retry/Expire/Minimum)
 - Toolbar "Löschen"/"Eigenschaften" wirken auf den markierten Eintrag
 - Doppelklick auf einen Host-(A)-Eintrag öffnet den Eigenschaften-Dialog;
   IP-Änderungen werden in die Zonendatei geschrieben, `rndc reload`
@@ -49,11 +54,14 @@ make
 ```
 
 ## Bekannte Grenzen / mögliche nächste Schritte
+- "Liste exportieren..." (Export der Zone/Ansicht) ist noch offen -- geplant.
 - "Neue Zone"/"Zone löschen" rufen `rndc reconfig` auf -- bei BIND9 mit
   AppArmor muss der Zonendatei-Ordner im `named`-Profil freigegeben sein.
 - PTR-Erstellung ist best-effort: nur klassische `/24`-Reverse-Zonen
   (`c.b.a.in-addr.arpa`) werden erkannt; beim Löschen eines Hosts wird
   der zugehörige PTR-Eintrag noch nicht automatisch mitgelöscht.
-- NS/CNAME/MX sind im Eigenschaften-Dialog noch nicht editierbar
-  (Löschen funktioniert für alle Typen außer SOA).
+- CNAME/MX sind im Eigenschaften-Dialog noch nicht editierbar, nur beim
+  Anlegen setzbar (Löschen funktioniert für alle Typen außer SOA).
+- Zonen-Eigenschaften sind nur eine Anzeige (SOA-Werte lassen sich noch
+  nicht direkt darin bearbeiten).
 - Kein Undo für Löschaktionen.
