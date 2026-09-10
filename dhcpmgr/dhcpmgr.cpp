@@ -646,6 +646,51 @@ FXDEFMAP(NewReservationDialog) NewReservationDialogMap[] = {
 FXIMPLEMENT(NewReservationDialog, FXDialogBox, NewReservationDialogMap, ARRAYNUMBER(NewReservationDialogMap))
 
 // ---------------------------------------------------------------------
+// Dialog "Eigenschaften" einer bestehenden Reservierung -- klassisches
+// OK/Abbrechen (kein Add-Schleifenmuster, das gibt es im Original nur
+// beim Anlegen), vorbelegt mit den aktuellen Werten.
+// ---------------------------------------------------------------------
+class ReservationPropertiesDialog : public FXDialogBox {
+	FXDECLARE(ReservationPropertiesDialog)
+private:
+	IpQuad ip;
+	FXTextField *macField, *nameField;
+protected:
+	ReservationPropertiesDialog() {}
+public:
+	ReservationPropertiesDialog(FXWindow* owner, const FXString& scopeName, const Reservation& r)
+		: FXDialogBox(owner, "Eigenschaften von " + r.ip, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,380,0, 0,0,0,0) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Reservierung in Bereich: " + scopeName);
+
+		new FXLabel(main, "IP-Adresse:");
+		ip.build(main);
+		ip.set(r.ip);
+
+		new FXLabel(main, "MAC-Adresse:");
+		macField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		macField->setText(r.mac);
+
+		new FXLabel(main, "Name:");
+		nameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		nameField->setText(r.hostname);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getIp() const { return ip.get(); }
+	FXString getMac() const { return macField->getText().trim(); }
+	FXString getName() const { return nameField->getText().trim(); }
+	virtual ~ReservationPropertiesDialog() {}
+};
+FXIMPLEMENT(ReservationPropertiesDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
 // Dialog "Neuer Ausschlussbereich" -- entspricht dem Original: schliesst
 // eine Teilspanne (auch eine einzelne Adresse, wenn Start == Ende) aus
 // dem Adresspool aus. "Hinzufügen" wendet den Ausschluss sofort an und
@@ -727,13 +772,14 @@ private:
 	NodeKind currentNodeKind; // Art des aktuell in der Liste angezeigten Knotens
 	int currentScopeForList;  // zugehoeriger Bereichs-Index fuer die Liste
 	FXString contextExclStart, contextExclEnd; // fuer "Ausschlussbereich loeschen" gemerkt
+	FXString contextResIp, contextResMac;      // fuer Reservierung Eigenschaften/Loeschen gemerkt
 
 protected:
 	DhcpManager() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWSCOPE,
 	       ID_NEWRESERVATION, ID_CONFIGOPTIONS, ID_DELETESCOPE, ID_SCOPEPROPS, ID_NEWEXCLUSION,
-	       ID_DELETEEXCLUSION };
+	       ID_DELETEEXCLUSION, ID_RESPROPS, ID_DELETERESERVATION };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -744,6 +790,8 @@ public:
 	long onNewReservation(FXObject*, FXSelector, void*);
 	long onNewExclusion(FXObject*, FXSelector, void*);
 	long onDeleteExclusion(FXObject*, FXSelector, void*);
+	long onReservationProperties(FXObject*, FXSelector, void*);
+	long onDeleteReservation(FXObject*, FXSelector, void*);
 	long onConfigureOptions(FXObject*, FXSelector, void*);
 	long onDeleteScope(FXObject*, FXSelector, void*);
 	long onScopeProperties(FXObject*, FXSelector, void*);
@@ -752,6 +800,8 @@ public:
 	void loadScopes();
 	void showListFor(NodeKind kind, int scopeIdx);
 	bool createReservation(int scopeIdx, const FXString& ip, const FXString& mac, const FXString& hostname, FXString& errorMsg);
+	bool updateReservation(int scopeIdx, const FXString& oldIp, const FXString& oldMac, const FXString& newIp, const FXString& newMac, const FXString& newName, FXString& errorMsg);
+	bool deleteReservationEntry(int scopeIdx, const FXString& ip, const FXString& mac, FXString& errorMsg);
 	bool createExclusion(int scopeIdx, const FXString& start, const FXString& end, FXString& errorMsg);
 	bool deleteExclusion(int scopeIdx, const FXString& start, const FXString& end, FXString& errorMsg);
 	virtual void create();
@@ -768,6 +818,8 @@ FXDEFMAP(DhcpManager) DhcpManagerMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWRESERVATION, DhcpManager::onNewReservation),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWEXCLUSION, DhcpManager::onNewExclusion),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETEEXCLUSION, DhcpManager::onDeleteExclusion),
+	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_RESPROPS, DhcpManager::onReservationProperties),
+	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETERESERVATION, DhcpManager::onDeleteReservation),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_CONFIGOPTIONS, DhcpManager::onConfigureOptions),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETESCOPE, DhcpManager::onDeleteScope),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_SCOPEPROPS, DhcpManager::onScopeProperties),
@@ -1018,7 +1070,8 @@ long DhcpManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 
 long DhcpManager::onListRightClick(FXObject*, FXSelector, void* ptr) {
 	FXEvent* ev = (FXEvent*)ptr;
-	if (currentNodeKind != NK_POOL || currentScopeForList < 0) return 1;
+	if (currentScopeForList < 0) return 1;
+	if (currentNodeKind != NK_POOL && currentNodeKind != NK_RESERVATIONS) return 1;
 
 	FXint idx = list->getItemAt(ev->win_x, ev->win_y);
 	if (idx < 0) return 1;
@@ -1029,17 +1082,25 @@ long DhcpManager::onListRightClick(FXObject*, FXSelector, void* ptr) {
 	int t1 = txt.find('\t');
 	int t2 = txt.find('\t', t1 + 1);
 	if (t1 < 0 || t2 < 0) return 1;
-	FXString start = txt.left(t1);
-	FXString end = txt.mid(t1 + 1, t2 - t1 - 1);
-	FXString type = txt.mid(t2 + 1, txt.length() - t2 - 1);
-	if (type != "Ausschlussbereich") return 1; // Adresspool-Bloecke selbst sind nicht direkt loeschbar
-
-	contextScopeIdx = currentScopeForList;
-	contextExclStart = start;
-	contextExclEnd = end;
+	FXString col1 = txt.left(t1);
+	FXString col2 = txt.mid(t1 + 1, t2 - t1 - 1);
+	FXString col3 = txt.mid(t2 + 1, txt.length() - t2 - 1);
 
 	FXMenuPane menu(this);
-	new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEEXCLUSION);
+	contextScopeIdx = currentScopeForList;
+
+	if (currentNodeKind == NK_POOL) {
+		if (col3 != "Ausschlussbereich") return 1; // Adresspool-Bloecke selbst sind nicht direkt loeschbar
+		contextExclStart = col1;
+		contextExclEnd = col2;
+		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEEXCLUSION);
+	} else { // NK_RESERVATIONS: Spalten sind IP-Adresse, MAC-Adresse, Name
+		contextResIp = col1;
+		contextResMac = col2;
+		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_RESPROPS);
+		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETERESERVATION);
+	}
+
 	menu.create();
 	menu.popup(NULL, ev->root_x, ev->root_y);
 	getApp()->runModalWhileShown(&menu);
@@ -1164,6 +1225,46 @@ long DhcpManager::onNewReservation(FXObject*, FXSelector, void*) {
 	}
 	NewReservationDialog dlg(this, this, contextScopeIdx, scopes[contextScopeIdx].name);
 	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long DhcpManager::onReservationProperties(FXObject*, FXSelector, void*) {
+	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
+	Reservation* found = NULL;
+	for (auto& r : scopes[contextScopeIdx].reservations) {
+		if (r.ip == contextResIp && r.mac == contextResMac) { found = &r; break; }
+	}
+	if (!found) return 1;
+	FXString scopeName = scopes[contextScopeIdx].name;
+
+	ReservationPropertiesDialog dlg(this, scopeName, *found);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts geändert werden.");
+		return 1;
+	}
+
+	FXString errorMsg;
+	if (!updateReservation(contextScopeIdx, contextResIp, contextResMac, dlg.getIp(), dlg.getMac(), dlg.getName(), errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	return 1;
+}
+
+long DhcpManager::onDeleteReservation(FXObject*, FXSelector, void*) {
+	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
+		return 1;
+	}
+	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	        "Reservierung \"%s\" wirklich löschen?", contextResIp.text()) != MBOX_CLICKED_YES) {
+		return 1;
+	}
+	FXString errorMsg;
+	if (!deleteReservationEntry(contextScopeIdx, contextResIp, contextResMac, errorMsg)) {
+		statuslbl->setText(errorMsg);
+	}
 	return 1;
 }
 
@@ -1383,6 +1484,79 @@ bool DhcpManager::deleteExclusion(int scopeIdx, const FXString& start, const FXS
 	bool restarted = restartKeaService();
 	onRefresh(NULL, 0, NULL);
 	statuslbl->setText("Ausschlussbereich " + start + " - " + end + " gelöscht."
+		+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
+	return true;
+}
+
+// Findet innerhalb von scopes[scopeIdx] die Reservierung mit
+// oldIp+oldMac (eindeutiger Schluessel) und ersetzt sie durch die
+// neuen Werte. Aufgerufen von onReservationProperties.
+bool DhcpManager::updateReservation(int scopeIdx, const FXString& oldIp, const FXString& oldMac,
+                                     const FXString& newIp, const FXString& newMac, const FXString& newName,
+                                     FXString& errorMsg) {
+	if (scopeIdx < 0 || scopeIdx >= (int)scopes.size()) { errorMsg = "Ungültiger Bereich."; return false; }
+	FXString cidr = scopes[scopeIdx].subnetCidr;
+
+	json::value conf = loadKeaConfig();
+	if (!isValidConfig(conf)) { errorMsg = "Konfiguration nicht gefunden."; return false; }
+
+	bool found = false;
+	for (auto& sv : conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array()) {
+		if (!sv.is_object() || jsonStr(sv.as_object(), "subnet") != cidr) continue;
+		if (!sv.as_object().if_contains("reservations") || !sv.as_object().at("reservations").is_array()) break;
+		auto& resArr = sv.as_object().at("reservations").as_array();
+		for (auto& rv : resArr) {
+			if (!rv.is_object()) continue;
+			if (jsonStr(rv.as_object(), "ip-address") == oldIp && jsonStr(rv.as_object(), "hw-address") == oldMac) {
+				rv.as_object()["ip-address"] = newIp.text();
+				rv.as_object()["hw-address"] = newMac.text();
+				rv.as_object()["hostname"] = newName.text();
+				found = true;
+				break;
+			}
+		}
+		break;
+	}
+	if (!found) { errorMsg = "Reservierung nicht gefunden."; return false; }
+
+	if (!saveKeaConfig(conf)) { errorMsg = "Fehler beim Schreiben der Konfiguration."; return false; }
+	bool restarted = restartKeaService();
+	onRefresh(NULL, 0, NULL);
+	statuslbl->setText("Reservierung " + newIp + " (" + newName + ") aktualisiert."
+		+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
+	return true;
+}
+
+// Entfernt die Reservierung mit ip+mac aus scopes[scopeIdx].
+// Aufgerufen von onDeleteReservation.
+bool DhcpManager::deleteReservationEntry(int scopeIdx, const FXString& ip, const FXString& mac, FXString& errorMsg) {
+	if (scopeIdx < 0 || scopeIdx >= (int)scopes.size()) { errorMsg = "Ungültiger Bereich."; return false; }
+	FXString cidr = scopes[scopeIdx].subnetCidr;
+
+	json::value conf = loadKeaConfig();
+	if (!isValidConfig(conf)) { errorMsg = "Konfiguration nicht gefunden."; return false; }
+
+	bool found = false;
+	for (auto& sv : conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array()) {
+		if (!sv.is_object() || jsonStr(sv.as_object(), "subnet") != cidr) continue;
+		if (!sv.as_object().if_contains("reservations") || !sv.as_object().at("reservations").is_array()) break;
+		auto& resArr = sv.as_object().at("reservations").as_array();
+		for (size_t i = 0; i < resArr.size(); ++i) {
+			if (!resArr[i].is_object()) continue;
+			if (jsonStr(resArr[i].as_object(), "ip-address") == ip && jsonStr(resArr[i].as_object(), "hw-address") == mac) {
+				resArr.erase(resArr.begin() + i);
+				found = true;
+				break;
+			}
+		}
+		break;
+	}
+	if (!found) { errorMsg = "Reservierung nicht gefunden."; return false; }
+
+	if (!saveKeaConfig(conf)) { errorMsg = "Fehler beim Schreiben der Konfiguration."; return false; }
+	bool restarted = restartKeaService();
+	onRefresh(NULL, 0, NULL);
+	statuslbl->setText("Reservierung " + ip + " gelöscht."
 		+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
 	return true;
 }
