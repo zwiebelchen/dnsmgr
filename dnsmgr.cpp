@@ -403,8 +403,100 @@ public:
 FXIMPLEMENT(HostPropertiesDialog, FXDialogBox, NULL, 0)
 
 // ---------------------------------------------------------------------
-// Dialog "Neuer Host" -- Kontextmenue auf einer Zone
+// Assistent fuer "Neue Zone" -- angelehnt an den Original-Zonen-Assistenten:
+// Zonentyp (nur Primär/Standard wird unterstuetzt), dann Auswahl
+// Forward-/Reverse-Lookupzone, je nachdem Domänenname oder Netzwerk-ID.
 // ---------------------------------------------------------------------
+
+class NewZoneWizardDialog : public FXDialogBox {
+	FXDECLARE(NewZoneWizardDialog)
+private:
+	FXRadioButton *rbForward, *rbReverse;
+	FXSwitcher *switcher;
+	FXTextField *domainField;
+	FXTextField *net1, *net2, *net3;
+	FXLabel *reverseNamePreview;
+protected:
+	NewZoneWizardDialog() {}
+public:
+	enum { ID_FWD = FXDialogBox::ID_LAST, ID_REV, ID_NETOCT };
+
+	long onScope(FXObject* sender, FXSelector, void*) {
+		bool rev = (sender == rbReverse);
+		rbForward->setCheck(!rev);
+		rbReverse->setCheck(rev);
+		switcher->setCurrent(rev ? 1 : 0);
+		return 1;
+	}
+	long onNetOct(FXObject*, FXSelector, void*) {
+		reverseNamePreview->setText("Zonenname: " + getReverseZoneName() + ".in-addr.arpa");
+		return 1;
+	}
+
+	NewZoneWizardDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Assistent für neue Zone", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0, 0,0,0,0) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+
+		new FXLabel(main,
+			"Dieser Assistent legt eine neue DNS-Zone an.\n"
+			"Zonentyp: Primäre Zone (Standard) -- Active-Directory-Integration\n"
+			"wird von diesem Prototyp nicht unterstützt.",
+			NULL, JUSTIFY_LEFT);
+
+		FXGroupBox* scopeBox = new FXGroupBox(main, "Zone", FRAME_GROOVE | LAYOUT_FILL_X);
+		FXVerticalFrame* scopeFrame = new FXVerticalFrame(scopeBox, LAYOUT_FILL_X, 0,0,0,0, 6,6,6,6);
+		rbForward = new FXRadioButton(scopeFrame, "&Forward-Lookupzone", this, ID_FWD);
+		rbReverse = new FXRadioButton(scopeFrame, "&Reverse-Lookupzone", this, ID_REV);
+		rbForward->setCheck(TRUE);
+
+		switcher = new FXSwitcher(main, LAYOUT_FILL_X);
+
+		FXVerticalFrame* fwdPage = new FXVerticalFrame(switcher, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		new FXLabel(fwdPage, "Zonenname (z.B. beispiel.org):");
+		domainField = new FXTextField(fwdPage, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+
+		FXVerticalFrame* revPage = new FXVerticalFrame(switcher, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		new FXLabel(revPage, "Netzwerk-ID (die ersten drei Oktette, z.B. 10.10.10):");
+		FXHorizontalFrame* netf = new FXHorizontalFrame(revPage, 0,0,0,0,0, 0,0,0,0, 1,1);
+		net1 = new FXTextField(netf, 3, this, ID_NETOCT, FRAME_SUNKEN | JUSTIFY_CENTER_X); net1->setText("10");
+		new FXLabel(netf, ".");
+		net2 = new FXTextField(netf, 3, this, ID_NETOCT, FRAME_SUNKEN | JUSTIFY_CENTER_X); net2->setText("10");
+		new FXLabel(netf, ".");
+		net3 = new FXTextField(netf, 3, this, ID_NETOCT, FRAME_SUNKEN | JUSTIFY_CENTER_X); net3->setText("10");
+		new FXLabel(netf, ".x");
+		reverseNamePreview = new FXLabel(revPage, "Zonenname: 10.10.10.in-addr.arpa");
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Fertig stellen", NULL, this, FXDialogBox::ID_ACCEPT,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "&Abbrechen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+
+	FXbool isReverse() const { return rbReverse->getCheck(); }
+	FXString getDomainName() const { return domainField->getText().trim(); }
+	FXString getReverseZoneName() const {
+		return net3->getText() + "." + net2->getText() + "." + net1->getText() + ".in-addr.arpa";
+	}
+
+	virtual ~NewZoneWizardDialog() {}
+};
+FXDEFMAP(NewZoneWizardDialog) NewZoneWizardDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, NewZoneWizardDialog::ID_FWD, NewZoneWizardDialog::onScope),
+	FXMAPFUNC(SEL_COMMAND, NewZoneWizardDialog::ID_REV, NewZoneWizardDialog::onScope),
+	FXMAPFUNC(SEL_CHANGED, NewZoneWizardDialog::ID_NETOCT, NewZoneWizardDialog::onNetOct),
+};
+FXIMPLEMENT(NewZoneWizardDialog, FXDialogBox, NewZoneWizardDialogMap, ARRAYNUMBER(NewZoneWizardDialogMap))
+
+// ---------------------------------------------------------------------
+// Dialog "Neuer Host" -- Kontextmenue auf einer Zone.
+// Wie im Original: "Host hinzufügen" legt den Host sofort an und laesst
+// den Dialog fuer weitere Hosts offen; "Fertig stellen" schliesst ihn.
+// ---------------------------------------------------------------------
+
+class DnsManager; // vorwaertsdeklariert, echte Definition folgt weiter unten
 
 class NewHostDialog : public FXDialogBox {
 	FXDECLARE(NewHostDialog)
@@ -412,17 +504,24 @@ private:
 	FXTextField *hostField;
 	FXTextField *ip1, *ip2, *ip3, *ip4;
 	FXCheckButton *ptrCheck;
+	DnsManager* mgr;
+	int zoneIdx;
 protected:
 	NewHostDialog() {}
 public:
-	NewHostDialog(FXWindow* owner, const FXString& zone)
-		: FXDialogBox(owner, "Neuer Host", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0, 0, 380, 0, 0,0,0,0) {
+	enum { ID_ADDHOST = FXDialogBox::ID_LAST };
+
+	long onAddHost(FXObject*, FXSelector, void*); // Implementierung folgt nach DnsManager
+
+	NewHostDialog(FXWindow* owner, DnsManager* m, int zIdx, const FXString& zone)
+		: FXDialogBox(owner, "Neuer Host", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0, 0, 380, 0, 0,0,0,0),
+		  mgr(m), zoneIdx(zIdx) {
 
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
 
 		new FXLabel(main, "Neuer Host in Zone: " + zone);
 
-		new FXLabel(main, "Name:");
+		new FXLabel(main, "Name (bei Nichtangabe wird der übergeordnete Domänenname verwendet):");
 		hostField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
 
 		new FXLabel(main, "IP-Adresse:");
@@ -440,21 +539,24 @@ public:
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT,
+		new FXButton(btnf, "&Host hinzufügen", NULL, this, ID_ADDHOST,
 		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL,
+		new FXButton(btnf, "&Fertig stellen", NULL, this, FXDialogBox::ID_CANCEL,
 		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
 	}
 
-	FXString getHostName() const { return hostField->getText(); }
-	FXString getIp() const {
-		return ip1->getText() + "." + ip2->getText() + "." + ip3->getText() + "." + ip4->getText();
+	void resetFields() {
+		hostField->setText("");
+		ip1->setText("0"); ip2->setText("0"); ip3->setText("0"); ip4->setText("0");
+		hostField->setFocus();
 	}
-	FXbool getCreatePtr() const { return ptrCheck->getCheck(); }
 
 	virtual ~NewHostDialog() {}
 };
-FXIMPLEMENT(NewHostDialog, FXDialogBox, NULL, 0)
+FXDEFMAP(NewHostDialog) NewHostDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, NewHostDialog::ID_ADDHOST, NewHostDialog::onAddHost),
+};
+FXIMPLEMENT(NewHostDialog, FXDialogBox, NewHostDialogMap, ARRAYNUMBER(NewHostDialogMap))
 
 // ---------------------------------------------------------------------
 // Hauptfenster
@@ -513,6 +615,7 @@ public:
 	void showZoneRecords(int idx);
 	void openHostProperties(int zoneIdx, int recIdx);
 	int currentZoneIdxFromTree();
+	bool createHostRecord(int zoneIdx, const FXString& host, const FXString& ip, bool wantPtr, FXString& errorMsg);
 	virtual void create();
 	virtual ~DnsManager() {}
 };
@@ -741,9 +844,11 @@ long DnsManager::onNewZone(FXObject*, FXSelector, void*) {
 		return 1;
 	}
 
-	FXString zoneName;
-	if (!FXInputDialog::getString(zoneName, this, "Neue Zone",
-	        "Domänenname der neuen Zone (z.B. beispiel.org):")) return 1;
+	NewZoneWizardDialog dlg(this);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+	FXbool reverse = dlg.isReverse();
+	FXString zoneName = reverse ? dlg.getReverseZoneName() : dlg.getDomainName();
 	zoneName = zoneName.trim();
 	if (zoneName.empty()) return 1;
 
@@ -770,6 +875,9 @@ long DnsManager::onNewZone(FXObject*, FXSelector, void*) {
 	in.close();
 	FXString newConf = FXString(existing.c_str()) + confBlock;
 
+	// Reverse-Zonen bekommen nur SOA+NS (keine A-Records); Forward-Zonen
+	// zusaetzlich einen A-Record fuer den eigenen Host, wie im Original
+	// bei der ersten Zone ueblich.
 	FXString zoneContent =
 		FXString("$TTL\t604800\n") +
 		"@\tIN\tSOA\t" + hostnameStr + ". admin." + zoneName + ". (\n" +
@@ -795,13 +903,6 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
 
-	NewHostDialog dlg(this, z.name);
-	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-
-	FXString host = dlg.getHostName().trim();
-	FXString ip = dlg.getIp();
-	if (host.empty()) return 1;
-
 	if (z.file.empty()) {
 		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei",
 			"Für diese Zone ist keine Zonendatei bekannt (Demo-Modus?).");
@@ -812,6 +913,21 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 			"Ohne Root-Rechte kann kein Host angelegt werden.");
 		return 1;
 	}
+
+	// Der Dialog bleibt offen und legt bei jedem Klick auf "Host hinzufügen"
+	// sofort einen weiteren Host an -- genau wie im Original-Assistenten.
+	NewHostDialog dlg(this, this, contextZoneIdx, z.name);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+// Legt einen A-Record in der Zonendatei von zones[zoneIdx] an, erhoeht die
+// SOA-Serial, ergaenzt best-effort einen PTR-Eintrag und aktualisiert die
+// Oberflaeche. Wird von NewHostDialog::onAddHost aufgerufen (siehe unten).
+bool DnsManager::createHostRecord(int zoneIdx, const FXString& host, const FXString& ip, bool wantPtr, FXString& errorMsg) {
+	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
+	ZoneInfo z = zones[zoneIdx];
+	if (z.file.empty()) { errorMsg = "Für diese Zone ist keine Zonendatei bekannt."; return false; }
 
 	// Zonendatei einlesen, Serial-Nummer der SOA um 1 erhoehen, neuen
 	// A-Record am Ende anhaengen.
@@ -845,11 +961,14 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 	for (auto& l : lines) newContent += l + "\n";
 	newContent += std::string(host.text()) + "\tIN\tA\t" + ip.text() + "\n";
 
-	bool ok = writeFileAsRoot(z.file, newContent.c_str());
+	if (!writeFileAsRoot(z.file, newContent.c_str())) {
+		errorMsg = "Fehler beim Schreiben der Zonendatei.";
+		return false;
+	}
 
 	// PTR-Eintrag best-effort: nur falls gewuenscht und eine passende
 	// klassische /24-Reverse-Zone (c.b.a.in-addr.arpa) bereits existiert.
-	if (ok && dlg.getCreatePtr()) {
+	if (wantPtr) {
 		std::vector<std::string> octs;
 		std::istringstream iss(std::string(ip.text()));
 		std::string o;
@@ -871,12 +990,29 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 		}
 	}
 
-	if (ok) {
-		runAsRoot({ FXString("rndc"), FXString("reload"), z.name });
-		onRefresh(NULL, 0, NULL);
-		statuslbl->setText("Host " + host + " (" + ip + ") in Zone " + z.name + " angelegt.");
+	runAsRoot({ FXString("rndc"), FXString("reload"), z.name });
+	onRefresh(NULL, 0, NULL);
+	statuslbl->setText("Host " + host + " (" + ip + ") in Zone " + z.name + " angelegt.");
+	return true;
+}
+
+// Muss nach der vollstaendigen DnsManager-Definition stehen, da sie auf
+// DnsManager::createHostRecord() zugreift (NewHostDialog kennt DnsManager
+// bis hierher nur als Vorwaertsdeklaration).
+long NewHostDialog::onAddHost(FXObject*, FXSelector, void*) {
+	FXString host = hostField->getText().trim();
+	FXString ip = ip1->getText() + "." + ip2->getText() + "." + ip3->getText() + "." + ip4->getText();
+	if (host.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Name fehlt", "Bitte einen Hostnamen eingeben.");
+		return 1;
+	}
+	FXString errorMsg;
+	if (mgr->createHostRecord(zoneIdx, host, ip, ptrCheck->getCheck(), errorMsg)) {
+		FXMessageBox::information(this, MBOX_OK, "Neuer Host",
+			"Der Hostdatensatz für \"%s\" wurde erfolgreich erstellt.", host.text());
+		resetFields();
 	} else {
-		statuslbl->setText("Fehler beim Anlegen des Hosts " + host + ".");
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
