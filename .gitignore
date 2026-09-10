@@ -1,3 +1,5 @@
 *.o
-res/foxres.h
-dnsmgr
+dnsmgr/res/foxres.h
+dnsmgr/dnsmgr
+dhcpmgr/res/foxres.h
+dhcpmgr/dhcpmgr
