@@ -123,6 +123,16 @@ static bool saveKeaConfig(const json::value& v) {
 	return writeFileAsRoot(KEA_CONF, content);
 }
 
+// Startet kea-dhcp4-server neu, damit gespeicherte Aenderungen wirksam
+// werden (Kea hat -- anders als BINDs "rndc reload" -- ohne den
+// separaten Control-Agent keinen Live-Reload-Mechanismus). Gibt true
+// zurueck, wenn der Neustart erfolgreich war; sonst false, damit der
+// Aufrufer das dem Benutzer sichtbar zurueckmelden kann statt es
+// stillschweigend zu verschlucken.
+static bool restartKeaService() {
+	return runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("kea-dhcp4-server") }) == 0;
+}
+
 // ---------------------------------------------------------------------
 // IP-Hilfsfunktionen
 // ---------------------------------------------------------------------
@@ -344,7 +354,7 @@ static bool seedDemoScopeOnDisk() {
 	conf.as_object()["Dhcp4"].as_object()["subnet4"].as_array().push_back(subnet);
 
 	bool ok = saveKeaConfig(conf);
-	if (ok) runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("kea-dhcp4-server") });
+	if (ok) restartKeaService();
 	return ok;
 }
 
@@ -934,9 +944,10 @@ long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 	conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array().push_back(subnet);
 
 	if (saveKeaConfig(conf)) {
-		runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("kea-dhcp4-server") });
+		bool restarted = restartKeaService();
 		onRefresh(NULL, 0, NULL);
-		statuslbl->setText("Bereich " + name + " (" + cidr + ") angelegt.");
+		statuslbl->setText("Bereich " + name + " (" + cidr + ") angelegt."
+			+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
 	} else {
 		statuslbl->setText("Fehler beim Anlegen des Bereichs " + name + ".");
 	}
@@ -975,9 +986,10 @@ long DhcpManager::onDeleteScope(FXObject*, FXSelector, void*) {
 	}
 
 	if (saveKeaConfig(conf)) {
-		runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("kea-dhcp4-server") });
+		bool restarted = restartKeaService();
 		onRefresh(NULL, 0, NULL);
-		statuslbl->setText("Bereich " + sc.name + " gelöscht.");
+		statuslbl->setText("Bereich " + sc.name + " gelöscht."
+			+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
 	} else {
 		statuslbl->setText("Fehler beim Löschen des Bereichs " + sc.name + ".");
 	}
@@ -1035,9 +1047,10 @@ long DhcpManager::onConfigureOptions(FXObject*, FXSelector, void*) {
 	}
 
 	if (saveKeaConfig(conf)) {
-		runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("kea-dhcp4-server") });
+		bool restarted = restartKeaService();
 		onRefresh(NULL, 0, NULL);
-		statuslbl->setText("Bereichsoptionen für " + scopeName + " aktualisiert.");
+		statuslbl->setText("Bereichsoptionen für " + scopeName + " aktualisiert."
+			+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
 	} else {
 		statuslbl->setText("Fehler beim Speichern der Bereichsoptionen.");
 	}
@@ -1070,9 +1083,10 @@ bool DhcpManager::createReservation(int scopeIdx, const FXString& ip, const FXSt
 	if (!found) { errorMsg = "Bereich nicht gefunden."; return false; }
 
 	if (!saveKeaConfig(conf)) { errorMsg = "Fehler beim Schreiben der Konfiguration."; return false; }
-	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("kea-dhcp4-server") });
+	bool restarted = restartKeaService();
 	onRefresh(NULL, 0, NULL);
-	statuslbl->setText("Reservierung " + ip + " (" + hostname + ") angelegt.");
+	statuslbl->setText("Reservierung " + ip + " (" + hostname + ") angelegt."
+		+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
 	return true;
 }
 
