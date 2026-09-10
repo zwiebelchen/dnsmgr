@@ -173,7 +173,8 @@ struct ScopeInfo {
 	FXString name;         // aus "user-context"."name" (Kea kennt selbst keinen Bereichsnamen)
 	FXString description;  // aus "user-context"."description"
 	long validLifetime = 86400;
-	std::vector<PoolRange> pools;
+	std::vector<PoolRange> pools;       // tatsaechlich vergebbare Bloecke (nach Abzug der Ausschluesse)
+	std::vector<PoolRange> exclusions;  // aus "user-context"."exclusions" -- Kea kennt den Begriff selbst nicht
 	std::vector<Reservation> reservations;
 	std::vector<ScopeOption> options;
 };
@@ -182,6 +183,51 @@ static FXString jsonStr(const json::object& o, const char* key, const FXString& 
 	auto* v = o.if_contains(key);
 	if (!v || !v->is_string()) return def;
 	return FXString(v->as_string().c_str());
+}
+
+// Wandelt Keas "pools"-Array ([{"pool":"a - b"}, ...]) in unser
+// PoolRange-Vektor-Modell um -- und zurueck. Wird sowohl beim Parsen
+// als auch beim Neuberechnen nach einem Ausschluss gebraucht.
+static std::vector<PoolRange> jsonPoolsToVector(const json::array& poolsArr) {
+	std::vector<PoolRange> out;
+	for (auto& pv : poolsArr) {
+		if (!pv.is_object()) continue;
+		FXString poolStr = jsonStr(pv.as_object(), "pool");
+		int dash = poolStr.find('-');
+		PoolRange pr;
+		if (dash >= 0) {
+			pr.start = poolStr.left(dash).trim();
+			pr.end = poolStr.mid(dash+1, poolStr.length()-dash-1).trim();
+		} else {
+			pr.start = pr.end = poolStr.trim();
+		}
+		out.push_back(pr);
+	}
+	return out;
+}
+static json::array poolsVectorToJson(const std::vector<PoolRange>& pools) {
+	json::array arr;
+	for (auto& p : pools) arr.push_back(json::object{ {"pool", (p.start + " - " + p.end).text()} });
+	return arr;
+}
+
+// Zieht einen Ausschlussbereich von einer Liste von Pool-Bloecken ab --
+// splittet einen Block in zwei, wenn der Ausschluss mittendrin liegt,
+// kappt ihn an einem Rand, oder entfernt ihn ganz, wenn er den
+// Ausschluss komplett umfasst (auch fuer den Sonderfall "eine einzelne
+// Adresse ausschliessen", bei dem start == ende ist).
+static std::vector<PoolRange> subtractExclusion(const std::vector<PoolRange>& pools, const PoolRange& excl) {
+	std::vector<PoolRange> out;
+	uint32_t exS = ipToUint(excl.start), exE = ipToUint(excl.end);
+	for (auto& p : pools) {
+		uint32_t pS = ipToUint(p.start), pE = ipToUint(p.end);
+		if (exE < pS || exS > pE) { out.push_back(p); continue; } // keine Ueberschneidung
+		if (exS > pS) out.push_back(PoolRange{ p.start, uintToIp(exS - 1) });
+		if (exE < pE) out.push_back(PoolRange{ uintToIp(exE + 1), p.end });
+		// liegt der Ausschluss genau ueber dem ganzen Block (exS<=pS && exE>=pE),
+		// wird hier nichts angehaengt -- der Block faellt komplett weg.
+	}
+	return out;
 }
 
 static std::vector<ScopeInfo> parseScopes(const json::value& conf) {
@@ -199,27 +245,24 @@ static std::vector<ScopeInfo> parseScopes(const json::value& conf) {
 			if (uc->is_object()) {
 				sc.name = jsonStr(uc->as_object(), "name", sc.subnetCidr);
 				sc.description = jsonStr(uc->as_object(), "description");
+				if (auto* excl = uc->as_object().if_contains("exclusions")) {
+					if (excl->is_array()) {
+						for (auto& ev : excl->as_array()) {
+							if (!ev.is_object()) continue;
+							PoolRange pr;
+							pr.start = jsonStr(ev.as_object(), "start");
+							pr.end = jsonStr(ev.as_object(), "end");
+							sc.exclusions.push_back(pr);
+						}
+					}
+				}
 			}
 		}
 		if (sc.name.empty()) sc.name = sc.subnetCidr;
 		if (auto* vl = so.if_contains("valid-lifetime")) sc.validLifetime = vl->to_number<int64_t>();
 
 		if (auto* pools = so.if_contains("pools")) {
-			if (pools->is_array()) {
-				for (auto& pv : pools->as_array()) {
-					if (!pv.is_object()) continue;
-					FXString poolStr = jsonStr(pv.as_object(), "pool");
-					int dash = poolStr.find('-');
-					PoolRange pr;
-					if (dash >= 0) {
-						pr.start = poolStr.left(dash).trim();
-						pr.end = poolStr.mid(dash+1, poolStr.length()-dash-1).trim();
-					} else {
-						pr.start = pr.end = poolStr.trim();
-					}
-					sc.pools.push_back(pr);
-				}
-			}
+			if (pools->is_array()) sc.pools = jsonPoolsToVector(pools->as_array());
 		}
 		if (auto* res = so.if_contains("reservations")) {
 			if (res->is_array()) {
@@ -579,6 +622,53 @@ FXDEFMAP(NewReservationDialog) NewReservationDialogMap[] = {
 FXIMPLEMENT(NewReservationDialog, FXDialogBox, NewReservationDialogMap, ARRAYNUMBER(NewReservationDialogMap))
 
 // ---------------------------------------------------------------------
+// Dialog "Neuer Ausschlussbereich" -- entspricht dem Original: schliesst
+// eine Teilspanne (auch eine einzelne Adresse, wenn Start == Ende) aus
+// dem Adresspool aus. "Hinzufügen" wendet den Ausschluss sofort an und
+// haelt den Dialog fuer weitere Ausschluesse offen, "Schließen" beendet.
+// ---------------------------------------------------------------------
+class NewExclusionDialog : public FXDialogBox {
+	FXDECLARE(NewExclusionDialog)
+private:
+	IpQuad startIp, endIp;
+	DhcpManager* mgr;
+	int scopeIdx;
+protected:
+	NewExclusionDialog() {}
+public:
+	enum { ID_ADDEXCL = FXDialogBox::ID_LAST };
+	long onAddExclusion(FXObject*, FXSelector, void*);
+
+	NewExclusionDialog(FXWindow* owner, DhcpManager* m, int sIdx, const FXString& scopeName)
+		: FXDialogBox(owner, "Neuer Ausschlussbereich", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,380,0, 0,0,0,0),
+		  mgr(m), scopeIdx(sIdx) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Neuer Ausschlussbereich in Bereich: " + scopeName);
+		new FXLabel(main, "(Für eine einzelne Adresse Start- und End-Adresse gleich lassen.)");
+
+		new FXLabel(main, "Start-IP-Adresse:");
+		startIp.build(main);
+		new FXLabel(main, "End-IP-Adresse:");
+		endIp.build(main);
+		endIp.set("0.0.0.0");
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Hinzufügen", NULL, this, ID_ADDEXCL,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "&Schließen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	void resetFields() { startIp.set("0.0.0.0"); endIp.set("0.0.0.0"); }
+	virtual ~NewExclusionDialog() {}
+};
+FXDEFMAP(NewExclusionDialog) NewExclusionDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, NewExclusionDialog::ID_ADDEXCL, NewExclusionDialog::onAddExclusion),
+};
+FXIMPLEMENT(NewExclusionDialog, FXDialogBox, NewExclusionDialogMap, ARRAYNUMBER(NewExclusionDialogMap))
+
+// ---------------------------------------------------------------------
 // Hauptfenster
 // ---------------------------------------------------------------------
 
@@ -617,7 +707,7 @@ protected:
 	DhcpManager() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWSCOPE,
-	       ID_NEWRESERVATION, ID_CONFIGOPTIONS, ID_DELETESCOPE, ID_SCOPEPROPS };
+	       ID_NEWRESERVATION, ID_CONFIGOPTIONS, ID_DELETESCOPE, ID_SCOPEPROPS, ID_NEWEXCLUSION };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -625,6 +715,7 @@ public:
 	long onAbout(FXObject*, FXSelector, void*);
 	long onNewScope(FXObject*, FXSelector, void*);
 	long onNewReservation(FXObject*, FXSelector, void*);
+	long onNewExclusion(FXObject*, FXSelector, void*);
 	long onConfigureOptions(FXObject*, FXSelector, void*);
 	long onDeleteScope(FXObject*, FXSelector, void*);
 	long onScopeProperties(FXObject*, FXSelector, void*);
@@ -633,6 +724,7 @@ public:
 	void loadScopes();
 	void showListFor(NodeKind kind, int scopeIdx);
 	bool createReservation(int scopeIdx, const FXString& ip, const FXString& mac, const FXString& hostname, FXString& errorMsg);
+	bool createExclusion(int scopeIdx, const FXString& start, const FXString& end, FXString& errorMsg);
 	virtual void create();
 	virtual ~DhcpManager() {}
 };
@@ -644,6 +736,7 @@ FXDEFMAP(DhcpManager) DhcpManagerMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_ABOUT, DhcpManager::onAbout),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWSCOPE, DhcpManager::onNewScope),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWRESERVATION, DhcpManager::onNewReservation),
+	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWEXCLUSION, DhcpManager::onNewExclusion),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_CONFIGOPTIONS, DhcpManager::onConfigureOptions),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETESCOPE, DhcpManager::onDeleteScope),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_SCOPEPROPS, DhcpManager::onScopeProperties),
@@ -802,10 +895,14 @@ void DhcpManager::showListFor(NodeKind kind, int scopeIdx) {
 	ScopeInfo& sc = scopes[scopeIdx];
 
 	if (kind == NK_POOL) {
-		setListColumns(list, { {"Startadresse", 180}, {"Endadresse", 180} });
+		setListColumns(list, { {"Startadresse", 160}, {"Endadresse", 160}, {"Typ", 140} });
 		for (auto& p : sc.pools) {
-			FXString txt = p.start + "\t" + p.end;
+			FXString txt = p.start + "\t" + p.end + "\tAdresspool";
 			list->appendItem(txt, icoFolder, icoFolder);
+		}
+		for (auto& e : sc.exclusions) {
+			FXString txt = e.start + "\t" + e.end + "\tAusschlussbereich";
+			list->appendItem(txt, icoDelete, icoDelete);
 		}
 	} else if (kind == NK_LEASES) {
 		setListColumns(list, { {"IP-Adresse", 140}, {"MAC-Adresse", 140}, {"Hostname", 140}, {"Ablauf (Unixzeit)", 140} });
@@ -871,12 +968,14 @@ long DhcpManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 		// Unter-Knoten eines Bereichs (Adresspool/Reservierungen/Bereichsoptionen) finden
 		int scopeIdx = -1; NodeKind kind = NK_NONE;
 		for (size_t i = 0; i < scopeItems.size(); ++i) {
-			if (resItems[i] == item) { scopeIdx = (int)i; kind = NK_RESERVATIONS; }
+			if (poolItems[i] == item) { scopeIdx = (int)i; kind = NK_POOL; }
+			else if (resItems[i] == item) { scopeIdx = (int)i; kind = NK_RESERVATIONS; }
 			else if (optItems[i] == item) { scopeIdx = (int)i; kind = NK_OPTIONS; }
 		}
 		if (scopeIdx < 0) return 1;
 		contextScopeIdx = scopeIdx;
-		if (kind == NK_RESERVATIONS) new FXMenuCommand(&menu, "&Neue Reservierung...", NULL, this, ID_NEWRESERVATION);
+		if (kind == NK_POOL) new FXMenuCommand(&menu, "&Neuer Ausschlussbereich...", NULL, this, ID_NEWEXCLUSION);
+		else if (kind == NK_RESERVATIONS) new FXMenuCommand(&menu, "&Neue Reservierung...", NULL, this, ID_NEWRESERVATION);
 		else if (kind == NK_OPTIONS) new FXMenuCommand(&menu, "&Bereichsoptionen konfigurieren...", NULL, this, ID_CONFIGOPTIONS);
 		else return 1;
 	}
@@ -1007,6 +1106,17 @@ long DhcpManager::onNewReservation(FXObject*, FXSelector, void*) {
 	return 1;
 }
 
+long DhcpManager::onNewExclusion(FXObject*, FXSelector, void*) {
+	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Ausschlussbereich angelegt werden.");
+		return 1;
+	}
+	NewExclusionDialog dlg(this, this, contextScopeIdx, scopes[contextScopeIdx].name);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
 long DhcpManager::onConfigureOptions(FXObject*, FXSelector, void*) {
 	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
 	ScopeInfo& sc = scopes[contextScopeIdx];
@@ -1090,6 +1200,66 @@ bool DhcpManager::createReservation(int scopeIdx, const FXString& ip, const FXSt
 	return true;
 }
 
+// Legt einen Ausschlussbereich zu scopes[scopeIdx] an: berechnet die
+// verbleibenden Adresspool-Bloecke neu (subtractExclusion) und merkt
+// den Ausschluss zusaetzlich in user-context.exclusions vor, damit er
+// beim naechsten Laden wieder als eigene Zeile ("Ausschlussbereich")
+// angezeigt werden kann. Aufgerufen von NewExclusionDialog::onAddExclusion.
+bool DhcpManager::createExclusion(int scopeIdx, const FXString& startIn, const FXString& endIn, FXString& errorMsg) {
+	if (scopeIdx < 0 || scopeIdx >= (int)scopes.size()) { errorMsg = "Ungültiger Bereich."; return false; }
+	FXString cidr = scopes[scopeIdx].subnetCidr;
+
+	FXString start = startIn, end = endIn;
+	if (ipToUint(start) > ipToUint(end)) std::swap(start, end); // Start/Ende ggf. tauschen
+
+	json::value conf = loadKeaConfig();
+	if (!isValidConfig(conf)) { errorMsg = "Konfiguration nicht gefunden."; return false; }
+
+	bool found = false;
+	for (auto& sv : conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array()) {
+		if (!sv.is_object() || jsonStr(sv.as_object(), "subnet") != cidr) continue;
+		found = true;
+
+		std::vector<PoolRange> curPools;
+		if (auto* p = sv.as_object().if_contains("pools")) {
+			if (p->is_array()) curPools = jsonPoolsToVector(p->as_array());
+		}
+
+		// Pruefen, ob der Ausschluss ueberhaupt innerhalb eines vorhandenen
+		// Adresspool-Blocks liegt -- sonst waere er wirkungslos.
+		uint32_t exS = ipToUint(start), exE = ipToUint(end);
+		bool overlaps = false;
+		for (auto& p : curPools) {
+			if (exE >= ipToUint(p.start) && exS <= ipToUint(p.end)) { overlaps = true; break; }
+		}
+		if (!overlaps) {
+			errorMsg = "Der Ausschlussbereich liegt außerhalb des Adresspools.";
+			return false;
+		}
+
+		std::vector<PoolRange> newPools = subtractExclusion(curPools, PoolRange{ start, end });
+		sv.as_object()["pools"] = poolsVectorToJson(newPools);
+
+		if (!sv.as_object().if_contains("user-context") || !sv.as_object().at("user-context").is_object()) {
+			sv.as_object()["user-context"] = json::object{};
+		}
+		auto& uc = sv.as_object().at("user-context").as_object();
+		if (!uc.if_contains("exclusions") || !uc.at("exclusions").is_array()) {
+			uc["exclusions"] = json::array{};
+		}
+		uc.at("exclusions").as_array().push_back(json::object{ {"start", start.text()}, {"end", end.text()} });
+		break;
+	}
+	if (!found) { errorMsg = "Bereich nicht gefunden."; return false; }
+
+	if (!saveKeaConfig(conf)) { errorMsg = "Fehler beim Schreiben der Konfiguration."; return false; }
+	bool restarted = restartKeaService();
+	onRefresh(NULL, 0, NULL);
+	statuslbl->setText("Ausschlussbereich " + start + " - " + end + " angelegt."
+		+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
+	return true;
+}
+
 // Muss nach der vollstaendigen DhcpManager-Definition stehen.
 long NewReservationDialog::onAddReservation(FXObject*, FXSelector, void*) {
 	FXString ipVal = ip.get();
@@ -1103,6 +1273,20 @@ long NewReservationDialog::onAddReservation(FXObject*, FXSelector, void*) {
 	if (mgr->createReservation(scopeIdx, ipVal, macVal, nameVal, errorMsg)) {
 		FXMessageBox::information(this, MBOX_OK, "Neue Reservierung",
 			"Die Reservierung für \"%s\" wurde erfolgreich erstellt.", ipVal.text());
+		resetFields();
+	} else {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	return 1;
+}
+
+long NewExclusionDialog::onAddExclusion(FXObject*, FXSelector, void*) {
+	FXString startVal = startIp.get();
+	FXString endVal = endIp.get();
+	FXString errorMsg;
+	if (mgr->createExclusion(scopeIdx, startVal, endVal, errorMsg)) {
+		FXMessageBox::information(this, MBOX_OK, "Neuer Ausschlussbereich",
+			"Der Ausschlussbereich \"%s - %s\" wurde erfolgreich erstellt.", startVal.text(), endVal.text());
 		resetFields();
 	} else {
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
