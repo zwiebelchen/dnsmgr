@@ -19,7 +19,9 @@ FOX-Toolkit-Muster wie `dnsmgr` in diesem Repo. Backend: **Kea DHCPv4**
   Start-/End-IP-Adresse, Subnetzmaske -- Netz-CIDR wird automatisch
   berechnet
 - **Neue Reservierung...**: legt sofort an und bleibt für weitere
-  offen ("Hinzufügen"/"Schließen"), wie im Original
+  offen ("Hinzufügen"/"Schließen"), wie im Original. Rechtsklick auf
+  eine bestehende Reservierung -> **Eigenschaften** (IP/MAC/Name
+  bearbeiten) / **Löschen**.
 - **Neuer Ausschlussbereich...** (auch für einzelne Adressen, Start =
   Ende): berechnet die tatsächlich vergebbaren Pool-Blöcke automatisch
   neu, indem der Ausschluss aus dem Adresspool herausgeschnitten wird
