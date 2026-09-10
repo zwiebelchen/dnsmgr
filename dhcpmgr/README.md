@@ -20,6 +20,12 @@ FOX-Toolkit-Muster wie `dnsmgr` in diesem Repo. Backend: **Kea DHCPv4**
   berechnet
 - **Neue Reservierung...**: legt sofort an und bleibt für weitere
   offen ("Hinzufügen"/"Schließen"), wie im Original
+- **Neuer Ausschlussbereich...** (auch für einzelne Adressen, Start =
+  Ende): berechnet die tatsächlich vergebbaren Pool-Blöcke automatisch
+  neu, indem der Ausschluss aus dem Adresspool herausgeschnitten wird
+  (Kea kennt das Konzept selbst nicht -- wird über mehrere Pools
+  nachgebildet). Adresspool-Ansicht zeigt Pool-Blöcke und
+  Ausschlussbereiche nebeneinander mit Typ-Spalte, wie im Original.
 - **Bereichsoptionen konfigurieren...**: Router (003), DNS-Server (006),
   Domänenname (015), Verbindungsdauer (051)
 - **Eigenschaften**/**Löschen** je Bereich, **Aktualisieren** überall
@@ -41,9 +47,6 @@ Voraussetzung: `kea-dhcp4-server` und `libboost-json-dev` (+ das
 Boost-Header-Metapaket `libboost1.83-dev`) installiert.
 
 ## Bekannte Grenzen / mögliche nächste Schritte
-- Kein "Neuer Ausschlussbereich..." (Exclusion Range) -- Kea kennt das
-  Konzept nicht direkt, müsste über mehrere Pool-Bereiche um die
-  Lücke herum nachgebildet werden.
 - Kein Aktivieren/Deaktivieren eines Bereichs.
 - Bereichsoptionen sind auf Router/DNS-Server/Domänenname/
   Verbindungsdauer beschränkt (kein "Andere Optionen konfigurieren").
@@ -52,4 +55,6 @@ Boost-Header-Metapaket `libboost1.83-dev`) installiert.
   ausgeführt, siehe oben).
 - Adressleases sind reine Anzeige, kein manuelles Löschen/Freigeben
   einzelner Leases.
+- Ausschlussbereiche lassen sich aktuell nur anlegen, nicht wieder
+  über die Oberfläche entfernen (nur manuell in der Konfiguration).
 - Kein Server-Eigenschaften-Dialog (globale Optionen).

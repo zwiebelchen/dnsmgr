@@ -14,7 +14,7 @@ jeweiligen Unterordner.
 | Ordner | Dienst | Backend | Status |
 |---|---|---|---|
 | [`dnsmgr/`](dnsmgr/README.md) | DNS-Manager | BIND9 | umfangreich (Zonen, alle gängigen Record-Typen, Root via `i2ksudo`) |
-| [`dhcpmgr/`](dhcpmgr/README.md) | DHCP-Manager | Kea DHCP | Grundfunktionen (Bereiche, Reservierungen, Bereichsoptionen, Root via `i2ksudo`) |
+| [`dhcpmgr/`](dhcpmgr/README.md) | DHCP-Manager | Kea DHCP | Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen, Root via `i2ksudo` |
 
 ## Gemeinsame Bausteine
 
