@@ -688,6 +688,57 @@ FXDEFMAP(NewMxDialog) NewMxDialogMap[] = {
 FXIMPLEMENT(NewMxDialog, FXDialogBox, NewMxDialogMap, ARRAYNUMBER(NewMxDialogMap))
 
 // ---------------------------------------------------------------------
+// Dialog "Neuer Zeiger (PTR)" -- Kontextmenue auf einer Reverse-Lookupzone.
+// Wie im Original: "Host-IP-Nummer" ist die IP im Netz der Zone (bei uns
+// vereinfacht: nur das letzte Oktett, der Rest ergibt sich aus der Zone),
+// "Hostname" ist der voll qualifizierte Name, auf den gezeigt wird.
+// ---------------------------------------------------------------------
+
+class NewPtrDialog : public FXDialogBox {
+	FXDECLARE(NewPtrDialog)
+private:
+	FXLabel *ipPrefixLabel;
+	FXTextField *lastOctetField, *hostField;
+	DnsManager* mgr;
+	int zoneIdx;
+protected:
+	NewPtrDialog() {}
+public:
+	enum { ID_ADDPTR = FXDialogBox::ID_LAST };
+	long onAddPtr(FXObject*, FXSelector, void*);
+
+	NewPtrDialog(FXWindow* owner, DnsManager* m, int zIdx, const FXString& zone, const FXString& networkPrefix)
+		: FXDialogBox(owner, "Neuer Zeiger", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0, 0, 400, 0, 0,0,0,0),
+		  mgr(m), zoneIdx(zIdx) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Neuer Zeiger in Zone: " + zone);
+
+		new FXLabel(main, "Host-IP-Nummer:");
+		FXHorizontalFrame* ipf = new FXHorizontalFrame(main, 0,0,0,0,0, 0,0,0,0, 1,1);
+		ipPrefixLabel = new FXLabel(ipf, networkPrefix + ".");
+		lastOctetField = new FXTextField(ipf, 4, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X);
+
+		new FXLabel(main, "Hostname (voll qualifizierter Domänenname, FQDN):");
+		hostField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Zeiger hinzufügen", NULL, this, ID_ADDPTR,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "&Fertig stellen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+
+	void resetFields() { lastOctetField->setText(""); hostField->setText(""); lastOctetField->setFocus(); }
+	virtual ~NewPtrDialog() {}
+};
+FXDEFMAP(NewPtrDialog) NewPtrDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, NewPtrDialog::ID_ADDPTR, NewPtrDialog::onAddPtr),
+};
+FXIMPLEMENT(NewPtrDialog, FXDialogBox, NewPtrDialogMap, ARRAYNUMBER(NewPtrDialogMap))
+
+// ---------------------------------------------------------------------
 // Dialog "Eigenschaften" einer Zone -- angelehnt an den "Allgemein"-Tab
 // der Original-Zoneneigenschaften (reine Anzeige in diesem Prototyp).
 // ---------------------------------------------------------------------
@@ -698,7 +749,8 @@ protected:
 	ZonePropertiesDialog() {}
 public:
 	ZonePropertiesDialog(FXWindow* owner, const FXString& zoneName, const FXString& zoneFile,
-	                      long serial, long refresh, long retry, long expire, long minimum, bool soaOk)
+	                      long serial, long refresh, long retry, long expire, long minimum, bool soaOk,
+	                      bool isReverse, const FXString& networkId)
 		: FXDialogBox(owner, "Eigenschaften von " + zoneName, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,380,0, 0,0,0,0) {
 
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
@@ -711,7 +763,9 @@ public:
 			tf->disable();
 		};
 		addRow("Zonenname:", zoneName);
-		addRow("Zonentyp:", "Primär (Standard)");
+		addRow("Zonentyp:", isReverse ? "Primär (Standard) -- Reverse-Lookupzone"
+		                              : "Primär (Standard) -- Forward-Lookupzone");
+		if (isReverse) addRow("Netzwerk-ID:", networkId);
 		addRow("Zonendatei:", zoneFile.empty() ? FXString("(keine -- Demo-Modus)") : zoneFile);
 		if (soaOk) {
 			addRow("Seriennummer:", FXString(std::to_string(serial).c_str()));
@@ -768,7 +822,7 @@ protected:
 	DnsManager() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWZONE, ID_NEWHOST,
-	       ID_DELETEZONE, ID_DELETERECORD, ID_PROPERTIES, ID_NEWCNAME, ID_NEWMX, ID_ZONEPROPS };
+	       ID_DELETEZONE, ID_DELETERECORD, ID_PROPERTIES, ID_NEWCNAME, ID_NEWMX, ID_ZONEPROPS, ID_NEWPTR };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -780,6 +834,7 @@ public:
 	long onNewHost(FXObject*, FXSelector, void*);
 	long onNewCname(FXObject*, FXSelector, void*);
 	long onNewMx(FXObject*, FXSelector, void*);
+	long onNewPtr(FXObject*, FXSelector, void*);
 	long onZoneProperties(FXObject*, FXSelector, void*);
 	long onDeleteZone(FXObject*, FXSelector, void*);
 	long onDeleteRecord(FXObject*, FXSelector, void*);
@@ -794,6 +849,7 @@ public:
 	bool createHostRecord(int zoneIdx, const FXString& host, const FXString& ip, bool wantPtr, FXString& errorMsg);
 	bool createCnameRecord(int zoneIdx, const FXString& alias, const FXString& target, FXString& errorMsg);
 	bool createMxRecord(int zoneIdx, const FXString& name, const FXString& target, int priority, FXString& errorMsg);
+	bool createPtrRecord(int zoneIdx, const FXString& lastOctet, const FXString& hostFqdn, FXString& errorMsg);
 	virtual void create();
 	virtual ~DnsManager() {}
 };
@@ -809,6 +865,7 @@ FXDEFMAP(DnsManager) DnsManagerMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWHOST, DnsManager::onNewHost),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWCNAME, DnsManager::onNewCname),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWMX, DnsManager::onNewMx),
+	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWPTR, DnsManager::onNewPtr),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_ZONEPROPS, DnsManager::onZoneProperties),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_DELETEZONE, DnsManager::onDeleteZone),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_DELETERECORD, DnsManager::onDeleteRecord),
@@ -1014,6 +1071,8 @@ long DnsManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEZONE);
 	} else if (contextZoneIdx >= 0 && zones[contextZoneIdx].isReverse) {
+		new FXMenuCommand(&menu, "&Neuer Zeiger (PTR)...", NULL, this, ID_NEWPTR);
+		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
 		new FXMenuCommand(&menu, "E&igenschaften", NULL, this, ID_ZONEPROPS);
 		new FXMenuSeparator(&menu);
@@ -1144,6 +1203,33 @@ long DnsManager::onNewMx(FXObject*, FXSelector, void*) {
 	return 1;
 }
 
+long DnsManager::onNewPtr(FXObject*, FXSelector, void*) {
+	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
+	ZoneInfo z = zones[contextZoneIdx];
+	if (z.file.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		return 1;
+	}
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Zeiger angelegt werden.");
+		return 1;
+	}
+	// Netzwerk-Praefix aus dem Zonennamen ableiten: "c.b.a.in-addr.arpa" -> "a.b.c"
+	FXString netPrefix = z.name;
+	int p = netPrefix.find(".in-addr.arpa");
+	if (p >= 0) netPrefix = netPrefix.left(p);
+	std::vector<std::string> octs;
+	std::istringstream iss(std::string(netPrefix.text()));
+	std::string o;
+	while (std::getline(iss, o, '.')) octs.push_back(o);
+	FXString displayPrefix = netPrefix;
+	if (octs.size() == 3) displayPrefix = FXString(octs[2].c_str()) + "." + octs[1].c_str() + "." + octs[0].c_str();
+
+	NewPtrDialog dlg(this, this, contextZoneIdx, z.name, displayPrefix);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
 long DnsManager::onZoneProperties(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
@@ -1151,7 +1237,21 @@ long DnsManager::onZoneProperties(FXObject*, FXSelector, void*) {
 	long serial = 0, refresh = 0, retry = 0, expire = 0, minimum = 0;
 	bool soaOk = !z.file.empty() && parseSoaFields(z.file, serial, refresh, retry, expire, minimum);
 
-	ZonePropertiesDialog dlg(this, z.name, z.file, serial, refresh, retry, expire, minimum, soaOk);
+	FXString networkId;
+	if (z.isReverse) {
+		FXString netPrefix = z.name;
+		int p = netPrefix.find(".in-addr.arpa");
+		if (p >= 0) netPrefix = netPrefix.left(p);
+		std::vector<std::string> octs;
+		std::istringstream iss(std::string(netPrefix.text()));
+		std::string o;
+		while (std::getline(iss, o, '.')) octs.push_back(o);
+		networkId = (octs.size() == 3)
+			? FXString(octs[2].c_str()) + "." + octs[1].c_str() + "." + octs[0].c_str() + ".0/24"
+			: netPrefix;
+	}
+
+	ZonePropertiesDialog dlg(this, z.name, z.file, serial, refresh, retry, expire, minimum, soaOk, z.isReverse, networkId);
 	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
@@ -1276,7 +1376,25 @@ bool DnsManager::createMxRecord(int zoneIdx, const FXString& name, const FXStrin
 	return true;
 }
 
-// Die folgenden drei Handler muessen nach der vollstaendigen
+// Legt einen PTR-Zeiger in einer Reverse-Zone an. Aufgerufen von
+// NewPtrDialog::onAddPtr.
+bool DnsManager::createPtrRecord(int zoneIdx, const FXString& lastOctet, const FXString& hostFqdn, FXString& errorMsg) {
+	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
+	FXString zoneName = zones[zoneIdx].name;
+
+	if (lastOctet.empty()) { errorMsg = "Bitte die Host-IP-Nummer angeben."; return false; }
+	FXString targetFqdn = hostFqdn;
+	if (!targetFqdn.empty() && targetFqdn[targetFqdn.length()-1] != '.') targetFqdn += ".";
+	if (targetFqdn.empty()) { errorMsg = "Bitte einen Hostnamen angeben."; return false; }
+
+	FXString fullLine = lastOctet + "\tIN\tPTR\t" + targetFqdn;
+	if (!appendZoneRecord(zoneIdx, fullLine, errorMsg)) return false;
+
+	statuslbl->setText("Zeiger " + lastOctet + " -> " + targetFqdn + " in Zone " + zoneName + " angelegt.");
+	return true;
+}
+
+// Die folgenden Handler muessen nach der vollstaendigen
 // DnsManager-Definition stehen, da sie auf deren Methoden zugreifen
 // (die Dialoge kennen DnsManager bis hierher nur als Vorwaertsdeklaration).
 
@@ -1328,6 +1446,28 @@ long NewMxDialog::onAddMx(FXObject*, FXSelector, void*) {
 	if (mgr->createMxRecord(zoneIdx, name, target, prio, errorMsg)) {
 		FXMessageBox::information(this, MBOX_OK, "Neuer Mailserver",
 			"Der Mailserverdatensatz für \"%s\" wurde erfolgreich erstellt.", target.text());
+		resetFields();
+	} else {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	return 1;
+}
+
+long NewPtrDialog::onAddPtr(FXObject*, FXSelector, void*) {
+	FXString lastOctet = lastOctetField->getText().trim();
+	FXString host = hostField->getText().trim();
+	if (lastOctet.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "IP-Nummer fehlt", "Bitte die Host-IP-Nummer eingeben.");
+		return 1;
+	}
+	if (host.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Hostname fehlt", "Bitte einen Hostnamen (FQDN) eingeben.");
+		return 1;
+	}
+	FXString errorMsg;
+	if (mgr->createPtrRecord(zoneIdx, lastOctet, host, errorMsg)) {
+		FXMessageBox::information(this, MBOX_OK, "Neuer Zeiger",
+			"Der Zeigerdatensatz für \"%s\" wurde erfolgreich erstellt.", lastOctet.text());
 		resetFields();
 	} else {
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
