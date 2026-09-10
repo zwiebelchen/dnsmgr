@@ -249,6 +249,41 @@ static std::vector<ResourceRecord> parseZoneFile(const FXString& path, const FXS
 	return recs;
 }
 
+// Liest die 5 SOA-Zahlenwerte (Serial, Refresh, Retry, Expire, Minimum)
+// roh aus einer Zonendatei -- fuer den Eigenschaften-Dialog einer Zone.
+static bool parseSoaFields(const FXString& path, long& serial, long& refresh, long& retry, long& expire, long& minimum) {
+	std::ifstream in(path.text());
+	if (!in.is_open()) return false;
+
+	std::string line;
+	bool inSoa = false;
+	std::vector<long> nums;
+	while (std::getline(in, line)) {
+		size_t c = line.find(';');
+		if (c != std::string::npos) line = line.substr(0, c);
+
+		if (!inSoa) {
+			if (line.find("SOA") == std::string::npos) continue;
+			inSoa = true;
+		}
+
+		std::string digits;
+		for (size_t i = 0; i <= line.size(); ++i) {
+			if (i < line.size() && isdigit((unsigned char)line[i])) {
+				digits += line[i];
+			} else if (!digits.empty()) {
+				nums.push_back(atol(digits.c_str()));
+				digits.clear();
+			}
+		}
+		if (line.find(')') != std::string::npos) break;
+	}
+	if (nums.size() < 5) return false;
+	size_t n = nums.size();
+	serial = nums[n-5]; refresh = nums[n-4]; retry = nums[n-3]; expire = nums[n-2]; minimum = nums[n-1];
+	return true;
+}
+
 // Schreibt eine geaenderte IP fuer einen A-Record best-effort in die Zonendatei
 // (als root via writeFileAsRoot) und stoesst danach "rndc reload <zone>" an.
 static bool updateARecord(const FXString& zoneFile, const FXString& hostName,
@@ -559,6 +594,143 @@ FXDEFMAP(NewHostDialog) NewHostDialogMap[] = {
 FXIMPLEMENT(NewHostDialog, FXDialogBox, NewHostDialogMap, ARRAYNUMBER(NewHostDialogMap))
 
 // ---------------------------------------------------------------------
+// Dialog "Neuer Alias (CNAME)" -- gleiches Add/Fertig-Muster wie beim Host
+// ---------------------------------------------------------------------
+
+class NewAliasDialog : public FXDialogBox {
+	FXDECLARE(NewAliasDialog)
+private:
+	FXTextField *aliasField, *targetField;
+	DnsManager* mgr;
+	int zoneIdx;
+protected:
+	NewAliasDialog() {}
+public:
+	enum { ID_ADDALIAS = FXDialogBox::ID_LAST };
+	long onAddAlias(FXObject*, FXSelector, void*);
+
+	NewAliasDialog(FXWindow* owner, DnsManager* m, int zIdx, const FXString& zone)
+		: FXDialogBox(owner, "Neuer Alias", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0, 0, 400, 0, 0,0,0,0),
+		  mgr(m), zoneIdx(zIdx) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Neuer Alias in Zone: " + zone);
+
+		new FXLabel(main, "Aliasname (bei Nichtangabe wird der übergeordnete Domänenname verwendet):");
+		aliasField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+
+		new FXLabel(main, "Voll qualifizierter Domänenname (FQDN) für Zielhost:");
+		targetField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Alias hinzufügen", NULL, this, ID_ADDALIAS,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "&Fertig stellen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+
+	void resetFields() { aliasField->setText(""); targetField->setText(""); aliasField->setFocus(); }
+	virtual ~NewAliasDialog() {}
+};
+FXDEFMAP(NewAliasDialog) NewAliasDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, NewAliasDialog::ID_ADDALIAS, NewAliasDialog::onAddAlias),
+};
+FXIMPLEMENT(NewAliasDialog, FXDialogBox, NewAliasDialogMap, ARRAYNUMBER(NewAliasDialogMap))
+
+// ---------------------------------------------------------------------
+// Dialog "Neuer Mailserver (MX)" -- gleiches Add/Fertig-Muster
+// ---------------------------------------------------------------------
+
+class NewMxDialog : public FXDialogBox {
+	FXDECLARE(NewMxDialog)
+private:
+	FXTextField *nameField, *targetField, *prioField;
+	DnsManager* mgr;
+	int zoneIdx;
+protected:
+	NewMxDialog() {}
+public:
+	enum { ID_ADDMX = FXDialogBox::ID_LAST };
+	long onAddMx(FXObject*, FXSelector, void*);
+
+	NewMxDialog(FXWindow* owner, DnsManager* m, int zIdx, const FXString& zone)
+		: FXDialogBox(owner, "Neuer Mailserver", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0, 0, 420, 0, 0,0,0,0),
+		  mgr(m), zoneIdx(zIdx) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Neuer Mailserver in Zone: " + zone);
+
+		new FXLabel(main, "Host- oder untergeordneter Domänenname (bei Nichtangabe wird die übergeordnete Domäne verwendet):");
+		nameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+
+		new FXLabel(main, "Voll qualifizierter Domänenname (FQDN) des Mailservers:");
+		targetField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+
+		new FXLabel(main, "Mailserverpriorität:");
+		prioField = new FXTextField(main, 5, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X);
+		prioField->setText("10");
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Mailserver hinzufügen", NULL, this, ID_ADDMX,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "&Fertig stellen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+
+	void resetFields() { nameField->setText(""); targetField->setText(""); prioField->setText("10"); nameField->setFocus(); }
+	virtual ~NewMxDialog() {}
+};
+FXDEFMAP(NewMxDialog) NewMxDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, NewMxDialog::ID_ADDMX, NewMxDialog::onAddMx),
+};
+FXIMPLEMENT(NewMxDialog, FXDialogBox, NewMxDialogMap, ARRAYNUMBER(NewMxDialogMap))
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" einer Zone -- angelehnt an den "Allgemein"-Tab
+// der Original-Zoneneigenschaften (reine Anzeige in diesem Prototyp).
+// ---------------------------------------------------------------------
+
+class ZonePropertiesDialog : public FXDialogBox {
+	FXDECLARE(ZonePropertiesDialog)
+protected:
+	ZonePropertiesDialog() {}
+public:
+	ZonePropertiesDialog(FXWindow* owner, const FXString& zoneName, const FXString& zoneFile,
+	                      long serial, long refresh, long retry, long expire, long minimum, bool soaOk)
+		: FXDialogBox(owner, "Eigenschaften von " + zoneName, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,380,0, 0,0,0,0) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+
+		FXMatrix* grid = new FXMatrix(main, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 4,2);
+		auto addRow = [&](const char* label, const FXString& value) {
+			new FXLabel(grid, label);
+			FXTextField* tf = new FXTextField(grid, 24, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+			tf->setText(value);
+			tf->disable();
+		};
+		addRow("Zonenname:", zoneName);
+		addRow("Zonentyp:", "Primär (Standard)");
+		addRow("Zonendatei:", zoneFile.empty() ? FXString("(keine -- Demo-Modus)") : zoneFile);
+		if (soaOk) {
+			addRow("Seriennummer:", FXString(std::to_string(serial).c_str()));
+			addRow("Aktualisierungsintervall:", FXString(std::to_string(refresh).c_str()) + " s");
+			addRow("Wiederholungsintervall:", FXString(std::to_string(retry).c_str()) + " s");
+			addRow("Ablaufintervall:", FXString(std::to_string(expire).c_str()) + " s");
+			addRow("Minimum (Negative-Cache-TTL):", FXString(std::to_string(minimum).c_str()) + " s");
+		}
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	virtual ~ZonePropertiesDialog() {}
+};
+FXIMPLEMENT(ZonePropertiesDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
 // Hauptfenster
 // ---------------------------------------------------------------------
 
@@ -596,7 +768,7 @@ protected:
 	DnsManager() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWZONE, ID_NEWHOST,
-	       ID_DELETEZONE, ID_DELETERECORD, ID_PROPERTIES };
+	       ID_DELETEZONE, ID_DELETERECORD, ID_PROPERTIES, ID_NEWCNAME, ID_NEWMX, ID_ZONEPROPS };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -606,6 +778,9 @@ public:
 	long onAbout(FXObject*, FXSelector, void*);
 	long onNewZone(FXObject*, FXSelector, void*);
 	long onNewHost(FXObject*, FXSelector, void*);
+	long onNewCname(FXObject*, FXSelector, void*);
+	long onNewMx(FXObject*, FXSelector, void*);
+	long onZoneProperties(FXObject*, FXSelector, void*);
 	long onDeleteZone(FXObject*, FXSelector, void*);
 	long onDeleteRecord(FXObject*, FXSelector, void*);
 	long onProperties(FXObject*, FXSelector, void*);
@@ -615,7 +790,10 @@ public:
 	void showZoneRecords(int idx);
 	void openHostProperties(int zoneIdx, int recIdx);
 	int currentZoneIdxFromTree();
+	bool appendZoneRecord(int zoneIdx, const FXString& fullLine, FXString& errorMsg);
 	bool createHostRecord(int zoneIdx, const FXString& host, const FXString& ip, bool wantPtr, FXString& errorMsg);
+	bool createCnameRecord(int zoneIdx, const FXString& alias, const FXString& target, FXString& errorMsg);
+	bool createMxRecord(int zoneIdx, const FXString& name, const FXString& target, int priority, FXString& errorMsg);
 	virtual void create();
 	virtual ~DnsManager() {}
 };
@@ -629,6 +807,9 @@ FXDEFMAP(DnsManager) DnsManagerMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_ABOUT, DnsManager::onAbout),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWZONE, DnsManager::onNewZone),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWHOST, DnsManager::onNewHost),
+	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWCNAME, DnsManager::onNewCname),
+	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWMX, DnsManager::onNewMx),
+	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_ZONEPROPS, DnsManager::onZoneProperties),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_DELETEZONE, DnsManager::onDeleteZone),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_DELETERECORD, DnsManager::onDeleteRecord),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_PROPERTIES, DnsManager::onProperties),
@@ -819,13 +1000,23 @@ long DnsManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 	for (size_t i = 0; i < zoneItems.size(); ++i) if (zoneItems[i] == item) contextZoneIdx = (int)i;
 
 	FXMenuPane menu(this);
-	if (item == fwdItem) {
+	if (item == fwdItem || item == revItem) {
 		new FXMenuCommand(&menu, "&Neue Zone...", NULL, this, ID_NEWZONE);
+		new FXMenuSeparator(&menu);
+		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
 	} else if (contextZoneIdx >= 0 && !zones[contextZoneIdx].isReverse) {
 		new FXMenuCommand(&menu, "&Neuer Host (A)...", NULL, this, ID_NEWHOST);
+		new FXMenuCommand(&menu, "Neuer &Alias (CNAME)...", NULL, this, ID_NEWCNAME);
+		new FXMenuCommand(&menu, "Neuer &Mailserver (MX)...", NULL, this, ID_NEWMX);
+		new FXMenuSeparator(&menu);
+		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
+		new FXMenuCommand(&menu, "E&igenschaften", NULL, this, ID_ZONEPROPS);
 		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEZONE);
 	} else if (contextZoneIdx >= 0 && zones[contextZoneIdx].isReverse) {
+		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
+		new FXMenuCommand(&menu, "E&igenschaften", NULL, this, ID_ZONEPROPS);
+		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEZONE);
 	} else {
 		return 1; // fuer andere Knoten gibt es in diesem Prototyp noch kein Kontextmenue
@@ -921,16 +1112,59 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 	return 1;
 }
 
-// Legt einen A-Record in der Zonendatei von zones[zoneIdx] an, erhoeht die
-// SOA-Serial, ergaenzt best-effort einen PTR-Eintrag und aktualisiert die
-// Oberflaeche. Wird von NewHostDialog::onAddHost aufgerufen (siehe unten).
-bool DnsManager::createHostRecord(int zoneIdx, const FXString& host, const FXString& ip, bool wantPtr, FXString& errorMsg) {
+long DnsManager::onNewCname(FXObject*, FXSelector, void*) {
+	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
+	ZoneInfo z = zones[contextZoneIdx];
+	if (z.file.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		return 1;
+	}
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Alias angelegt werden.");
+		return 1;
+	}
+	NewAliasDialog dlg(this, this, contextZoneIdx, z.name);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long DnsManager::onNewMx(FXObject*, FXSelector, void*) {
+	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
+	ZoneInfo z = zones[contextZoneIdx];
+	if (z.file.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		return 1;
+	}
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Mailserver angelegt werden.");
+		return 1;
+	}
+	NewMxDialog dlg(this, this, contextZoneIdx, z.name);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long DnsManager::onZoneProperties(FXObject*, FXSelector, void*) {
+	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
+	ZoneInfo z = zones[contextZoneIdx];
+
+	long serial = 0, refresh = 0, retry = 0, expire = 0, minimum = 0;
+	bool soaOk = !z.file.empty() && parseSoaFields(z.file, serial, refresh, retry, expire, minimum);
+
+	ZonePropertiesDialog dlg(this, z.name, z.file, serial, refresh, retry, expire, minimum, soaOk);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+// Gemeinsame Kern-Logik zum Anhaengen eines Ressourcendatensatzes: liest die
+// Zonendatei, erhoeht die SOA-Serial um 1, haengt "fullLine" an, schreibt
+// als root zurueck und stoesst "rndc reload" an. Wird von
+// createHostRecord/createCnameRecord/createMxRecord genutzt.
+bool DnsManager::appendZoneRecord(int zoneIdx, const FXString& fullLine, FXString& errorMsg) {
 	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
 	ZoneInfo z = zones[zoneIdx];
 	if (z.file.empty()) { errorMsg = "Für diese Zone ist keine Zonendatei bekannt."; return false; }
 
-	// Zonendatei einlesen, Serial-Nummer der SOA um 1 erhoehen, neuen
-	// A-Record am Ende anhaengen.
 	std::ifstream in(z.file.text());
 	std::vector<std::string> lines;
 	std::string line;
@@ -959,12 +1193,26 @@ bool DnsManager::createHostRecord(int zoneIdx, const FXString& host, const FXStr
 
 	std::string newContent;
 	for (auto& l : lines) newContent += l + "\n";
-	newContent += std::string(host.text()) + "\tIN\tA\t" + ip.text() + "\n";
+	newContent += std::string(fullLine.text()) + "\n";
 
 	if (!writeFileAsRoot(z.file, newContent.c_str())) {
 		errorMsg = "Fehler beim Schreiben der Zonendatei.";
 		return false;
 	}
+
+	runAsRoot({ FXString("rndc"), FXString("reload"), z.name });
+	onRefresh(NULL, 0, NULL);
+	return true;
+}
+
+// Legt einen A-Record an, ergaenzt best-effort einen PTR-Eintrag.
+// Wird von NewHostDialog::onAddHost aufgerufen (siehe unten).
+bool DnsManager::createHostRecord(int zoneIdx, const FXString& host, const FXString& ip, bool wantPtr, FXString& errorMsg) {
+	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
+	FXString zoneName = zones[zoneIdx].name;
+
+	FXString fullLine = host + "\tIN\tA\t" + ip;
+	if (!appendZoneRecord(zoneIdx, fullLine, errorMsg)) return false;
 
 	// PTR-Eintrag best-effort: nur falls gewuenscht und eine passende
 	// klassische /24-Reverse-Zone (c.b.a.in-addr.arpa) bereits existiert.
@@ -980,7 +1228,7 @@ bool DnsManager::createHostRecord(int zoneIdx, const FXString& host, const FXStr
 					std::ifstream rin(zi.file.text());
 					std::string rcontent((std::istreambuf_iterator<char>(rin)), std::istreambuf_iterator<char>());
 					rin.close();
-					FXString ptrLine = FXString(octs[3].c_str()) + "\tIN\tPTR\t" + host + "." + z.name + ".\n";
+					FXString ptrLine = FXString(octs[3].c_str()) + "\tIN\tPTR\t" + host + "." + zoneName + ".\n";
 					FXString newRevContent = FXString(rcontent.c_str()) + ptrLine;
 					writeFileAsRoot(zi.file, newRevContent);
 					runAsRoot({ FXString("rndc"), FXString("reload"), zi.name });
@@ -990,15 +1238,48 @@ bool DnsManager::createHostRecord(int zoneIdx, const FXString& host, const FXStr
 		}
 	}
 
-	runAsRoot({ FXString("rndc"), FXString("reload"), z.name });
-	onRefresh(NULL, 0, NULL);
-	statuslbl->setText("Host " + host + " (" + ip + ") in Zone " + z.name + " angelegt.");
+	statuslbl->setText("Host " + host + " (" + ip + ") in Zone " + zoneName + " angelegt.");
 	return true;
 }
 
-// Muss nach der vollstaendigen DnsManager-Definition stehen, da sie auf
-// DnsManager::createHostRecord() zugreift (NewHostDialog kennt DnsManager
-// bis hierher nur als Vorwaertsdeklaration).
+// Legt einen CNAME-Alias an. Aufgerufen von NewAliasDialog::onAddAlias.
+bool DnsManager::createCnameRecord(int zoneIdx, const FXString& alias, const FXString& target, FXString& errorMsg) {
+	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
+	FXString zoneName = zones[zoneIdx].name;
+
+	FXString aliasName = alias.empty() ? FXString("@") : alias;
+	FXString targetFqdn = target;
+	if (!targetFqdn.empty() && targetFqdn[targetFqdn.length()-1] != '.') targetFqdn += ".";
+	if (targetFqdn.empty()) { errorMsg = "Bitte einen Zielhost angeben."; return false; }
+
+	FXString fullLine = aliasName + "\tIN\tCNAME\t" + targetFqdn;
+	if (!appendZoneRecord(zoneIdx, fullLine, errorMsg)) return false;
+
+	statuslbl->setText("Alias " + aliasName + " -> " + targetFqdn + " in Zone " + zoneName + " angelegt.");
+	return true;
+}
+
+// Legt einen MX-Eintrag an. Aufgerufen von NewMxDialog::onAddMx.
+bool DnsManager::createMxRecord(int zoneIdx, const FXString& name, const FXString& target, int priority, FXString& errorMsg) {
+	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
+	FXString zoneName = zones[zoneIdx].name;
+
+	FXString rname = name.empty() ? FXString("@") : name;
+	FXString targetFqdn = target;
+	if (!targetFqdn.empty() && targetFqdn[targetFqdn.length()-1] != '.') targetFqdn += ".";
+	if (targetFqdn.empty()) { errorMsg = "Bitte einen Mailserver angeben."; return false; }
+
+	FXString fullLine = rname + "\tIN\tMX\t" + FXString(std::to_string(priority).c_str()) + "\t" + targetFqdn;
+	if (!appendZoneRecord(zoneIdx, fullLine, errorMsg)) return false;
+
+	statuslbl->setText("Mailserver " + targetFqdn + " (Priorität " + FXString(std::to_string(priority).c_str()) + ") in Zone " + zoneName + " angelegt.");
+	return true;
+}
+
+// Die folgenden drei Handler muessen nach der vollstaendigen
+// DnsManager-Definition stehen, da sie auf deren Methoden zugreifen
+// (die Dialoge kennen DnsManager bis hierher nur als Vorwaertsdeklaration).
+
 long NewHostDialog::onAddHost(FXObject*, FXSelector, void*) {
 	FXString host = hostField->getText().trim();
 	FXString ip = ip1->getText() + "." + ip2->getText() + "." + ip3->getText() + "." + ip4->getText();
@@ -1010,6 +1291,43 @@ long NewHostDialog::onAddHost(FXObject*, FXSelector, void*) {
 	if (mgr->createHostRecord(zoneIdx, host, ip, ptrCheck->getCheck(), errorMsg)) {
 		FXMessageBox::information(this, MBOX_OK, "Neuer Host",
 			"Der Hostdatensatz für \"%s\" wurde erfolgreich erstellt.", host.text());
+		resetFields();
+	} else {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	return 1;
+}
+
+long NewAliasDialog::onAddAlias(FXObject*, FXSelector, void*) {
+	FXString alias = aliasField->getText().trim();
+	FXString target = targetField->getText().trim();
+	if (target.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Zielhost fehlt", "Bitte einen Zielhost (FQDN) eingeben.");
+		return 1;
+	}
+	FXString errorMsg;
+	if (mgr->createCnameRecord(zoneIdx, alias, target, errorMsg)) {
+		FXMessageBox::information(this, MBOX_OK, "Neuer Alias",
+			"Der Aliasdatensatz für \"%s\" wurde erfolgreich erstellt.", alias.empty() ? "@" : alias.text());
+		resetFields();
+	} else {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	return 1;
+}
+
+long NewMxDialog::onAddMx(FXObject*, FXSelector, void*) {
+	FXString name = nameField->getText().trim();
+	FXString target = targetField->getText().trim();
+	int prio = atoi(prioField->getText().text());
+	if (target.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Mailserver fehlt", "Bitte einen Mailserver (FQDN) eingeben.");
+		return 1;
+	}
+	FXString errorMsg;
+	if (mgr->createMxRecord(zoneIdx, name, target, prio, errorMsg)) {
+		FXMessageBox::information(this, MBOX_OK, "Neuer Mailserver",
+			"Der Mailserverdatensatz für \"%s\" wurde erfolgreich erstellt.", target.text());
 		resetFields();
 	} else {
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
