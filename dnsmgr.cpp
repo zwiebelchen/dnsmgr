@@ -87,7 +87,8 @@ struct ZoneInfo {
 };
 
 struct ResourceRecord {
-	FXString name;   // z.B. "@" oder "www"
+	FXString name;    // Anzeigename, z.B. "(identisch mit übergeordnetem...)" oder "www"
+	FXString rawName; // Rohname wie in der Zonendatei ("@" oder "www") -- fuer Bearbeiten/Loeschen
 	FXString type;   // SOA / NS / A / CNAME / MX ...
 	FXString data;   // Anzeigetext fuer die Datenspalte
 	FXString rawIp;  // bei A-Records: reine IP, fuer den Eigenschaften-Dialog
@@ -175,6 +176,7 @@ static std::vector<ResourceRecord> parseZoneFile(const FXString& path, const FXS
 				}
 				ResourceRecord rr;
 				rr.name = "(identisch mit übergeordnetem Ordnerobjekt)";
+				rr.rawName = "@";
 				rr.type = "Autoritätsursprung";
 				rr.data = "[" + FXString(serial.c_str()) + "], " + origin + ".";
 				recs.push_back(rr);
@@ -208,41 +210,72 @@ static std::vector<ResourceRecord> parseZoneFile(const FXString& path, const FXS
 			soaBuf = line;
 			if (!inSoa) {
 				ResourceRecord rr;
-				rr.name = dispName;
+				rr.name = dispName; rr.rawName = name;
 				rr.type = "Autoritätsursprung";
 				rr.data = origin + ".";
 				recs.push_back(rr);
 			}
 		} else if (type == "NS") {
 			ResourceRecord rr;
-			rr.name = dispName;
+			rr.name = dispName; rr.rawName = name;
 			rr.type = "Namenserver";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
 			recs.push_back(rr);
 		} else if (type == "A") {
 			ResourceRecord rr;
-			rr.name = (name == "@") ? origin : name;
+			rr.name = (name == "@") ? origin : name; rr.rawName = name;
 			rr.type = "Host";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
 			rr.rawIp = rr.data;
 			recs.push_back(rr);
+		} else if (type == "AAAA") {
+			ResourceRecord rr;
+			rr.name = (name == "@") ? origin : name; rr.rawName = name;
+			rr.type = "IPv6-Host";
+			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
+			recs.push_back(rr);
 		} else if (type == "CNAME") {
 			ResourceRecord rr;
-			rr.name = dispName;
+			rr.name = dispName; rr.rawName = name;
 			rr.type = "Alias";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
 			recs.push_back(rr);
 		} else if (type == "MX") {
 			ResourceRecord rr;
-			rr.name = dispName;
+			rr.name = dispName; rr.rawName = name;
 			rr.type = "Mailaustausch";
 			if (idx + 1 < tok.size()) rr.data = FXString("[") + tok[idx].c_str() + "] " + tok[idx+1].c_str();
 			recs.push_back(rr);
 		} else if (type == "PTR") {
 			ResourceRecord rr;
-			rr.name = dispName;
+			rr.name = dispName; rr.rawName = name;
 			rr.type = "Zeiger";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
+			recs.push_back(rr);
+		} else if (type == "SRV") {
+			ResourceRecord rr;
+			rr.name = dispName; rr.rawName = name;
+			rr.type = "Dienst";
+			if (idx + 3 < tok.size())
+				rr.data = FXString("[") + tok[idx].c_str() + "][" + tok[idx+1].c_str() + "][" + tok[idx+2].c_str() + "] " + tok[idx+3].c_str();
+			recs.push_back(rr);
+		} else if (type == "TXT") {
+			// Text-Inhalt kann Leerzeichen enthalten -- direkt aus der
+			// Originalzeile nach dem Schluesselwort TXT herausschneiden,
+			// statt sich auf die whitespace-getrennten Tokens zu verlassen.
+			size_t tpos = line.find("TXT");
+			std::string raw = (tpos != std::string::npos) ? line.substr(tpos + 3) : "";
+			size_t b = raw.find_first_not_of(" \t");
+			std::string display = (b != std::string::npos) ? raw.substr(b) : raw;
+			if (!display.empty() && display.front() == '"') {
+				display.erase(0, 1);
+				size_t endq = display.find('"');
+				if (endq != std::string::npos) display = display.substr(0, endq);
+			}
+			ResourceRecord rr;
+			rr.name = dispName; rr.rawName = name;
+			rr.type = "Text";
+			rr.data = display.c_str();
 			recs.push_back(rr);
 		}
 	}
@@ -251,6 +284,20 @@ static std::vector<ResourceRecord> parseZoneFile(const FXString& path, const FXS
 
 // Liest die 5 SOA-Zahlenwerte (Serial, Refresh, Retry, Expire, Minimum)
 // roh aus einer Zonendatei -- fuer den Eigenschaften-Dialog einer Zone.
+// Bildet unsere deutschen Anzeige-Typnamen auf die BIND-Schluesselwoerter
+// in der Zonendatei ab -- fuer generisches Bearbeiten/Loeschen.
+static FXString typeKeywordFor(const FXString& displayType) {
+	if (displayType == "Host") return "A";
+	if (displayType == "IPv6-Host") return "AAAA";
+	if (displayType == "Alias") return "CNAME";
+	if (displayType == "Mailaustausch") return "MX";
+	if (displayType == "Zeiger") return "PTR";
+	if (displayType == "Namenserver") return "NS";
+	if (displayType == "Text") return "TXT";
+	if (displayType == "Dienst") return "SRV";
+	return "";
+}
+
 static bool parseSoaFields(const FXString& path, long& serial, long& refresh, long& retry, long& expire, long& minimum) {
 	std::ifstream in(path.text());
 	if (!in.is_open()) return false;
@@ -785,6 +832,89 @@ public:
 FXIMPLEMENT(ZonePropertiesDialog, FXDialogBox, NULL, 0)
 
 // ---------------------------------------------------------------------
+// Generischer Dialog mit 1-4 Textfeldern -- fuer die Eigenschaften
+// bestehender Records (Alias/MX/PTR/NS/Text/Dienst/IPv6-Host) UND fuer
+// das Anlegen "anderer" neuer Datensaetze (NS/TXT/SRV/AAAA). Anders als
+// bei Host/Zone gibt es hier kein "Hinzufuegen"-Schleifenmuster -- das
+// entspricht dem Original: nur der New-Host-Assistent legt mehrere an,
+// alle anderen "New Resource Record"-Dialoge sind klassisches OK/Abbrechen.
+// ---------------------------------------------------------------------
+
+class GenericPropsDialog : public FXDialogBox {
+	FXDECLARE(GenericPropsDialog)
+private:
+	std::vector<FXTextField*> fields;
+protected:
+	GenericPropsDialog() {}
+public:
+	GenericPropsDialog(FXWindow* owner, const FXString& title, const FXString& infoLine,
+	                    const std::vector<FXString>& labels, const std::vector<FXString>& initial)
+		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0, 0, 420, 0, 0,0,0,0) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		if (!infoLine.empty()) new FXLabel(main, infoLine);
+
+		for (size_t i = 0; i < labels.size(); ++i) {
+			new FXLabel(main, labels[i]);
+			FXTextField* tf = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+			if (i < initial.size()) tf->setText(initial[i]);
+			fields.push_back(tf);
+		}
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+
+	FXString getValue(size_t i) const { return (i < fields.size()) ? fields[i]->getText() : FXString(""); }
+	virtual ~GenericPropsDialog() {}
+};
+FXIMPLEMENT(GenericPropsDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Ressourcendatensatztyp auswählen" -- entspricht dem Original
+// "Andere neue Datensätze..."; hier auf die haeufigsten, fuer BIND9
+// sinnvollen Typen beschraenkt: NS, TXT, SRV, AAAA.
+// ---------------------------------------------------------------------
+
+class OtherRecordTypeDialog : public FXDialogBox {
+	FXDECLARE(OtherRecordTypeDialog)
+private:
+	FXListBox* typeList;
+protected:
+	OtherRecordTypeDialog() {}
+public:
+	OtherRecordTypeDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Ressourcendatensatztyp auswählen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,360,0, 0,0,0,0) {
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Wählen Sie einen Ressourcendatensatztyp:");
+
+		typeList = new FXListBox(main, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		typeList->appendItem("Namenserver (NS)");
+		typeList->appendItem("Text (TXT)");
+		typeList->appendItem("Dienst (SRV)");
+		typeList->appendItem("IPv6-Host (AAAA)");
+		typeList->setCurrentItem(0);
+		typeList->setNumVisible(4);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Erstellen...", NULL, this, FXDialogBox::ID_ACCEPT,
+		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "&Abbrechen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+
+	FXint getSelected() const { return typeList->getCurrentItem(); }
+	virtual ~OtherRecordTypeDialog() {}
+};
+FXIMPLEMENT(OtherRecordTypeDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
 // Hauptfenster
 // ---------------------------------------------------------------------
 
@@ -822,7 +952,8 @@ protected:
 	DnsManager() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWZONE, ID_NEWHOST,
-	       ID_DELETEZONE, ID_DELETERECORD, ID_PROPERTIES, ID_NEWCNAME, ID_NEWMX, ID_ZONEPROPS, ID_NEWPTR };
+	       ID_DELETEZONE, ID_DELETERECORD, ID_PROPERTIES, ID_NEWCNAME, ID_NEWMX, ID_ZONEPROPS, ID_NEWPTR,
+	       ID_NEWOTHER };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -835,6 +966,7 @@ public:
 	long onNewCname(FXObject*, FXSelector, void*);
 	long onNewMx(FXObject*, FXSelector, void*);
 	long onNewPtr(FXObject*, FXSelector, void*);
+	long onNewOther(FXObject*, FXSelector, void*);
 	long onZoneProperties(FXObject*, FXSelector, void*);
 	long onDeleteZone(FXObject*, FXSelector, void*);
 	long onDeleteRecord(FXObject*, FXSelector, void*);
@@ -850,6 +982,8 @@ public:
 	bool createCnameRecord(int zoneIdx, const FXString& alias, const FXString& target, FXString& errorMsg);
 	bool createMxRecord(int zoneIdx, const FXString& name, const FXString& target, int priority, FXString& errorMsg);
 	bool createPtrRecord(int zoneIdx, const FXString& lastOctet, const FXString& hostFqdn, FXString& errorMsg);
+	bool modifyRecordLine(int zoneIdx, const FXString& rawName, const FXString& typeKeyword,
+	                       const FXString& newFullLine, FXString& errorMsg);
 	virtual void create();
 	virtual ~DnsManager() {}
 };
@@ -866,6 +1000,7 @@ FXDEFMAP(DnsManager) DnsManagerMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWCNAME, DnsManager::onNewCname),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWMX, DnsManager::onNewMx),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWPTR, DnsManager::onNewPtr),
+	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWOTHER, DnsManager::onNewOther),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_ZONEPROPS, DnsManager::onZoneProperties),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_DELETEZONE, DnsManager::onDeleteZone),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_DELETERECORD, DnsManager::onDeleteRecord),
@@ -1008,9 +1143,9 @@ void DnsManager::loadZones() {
 		zones.push_back(demo);
 
 		std::vector<ResourceRecord> recs;
-		ResourceRecord r1; r1.name = "(identisch mit übergeordnetem...)"; r1.type = "Autoritätsursprung"; r1.data = "[1], win2k-server., admin.";
-		ResourceRecord r2; r2.name = "(identisch mit übergeordnetem...)"; r2.type = "Namenserver"; r2.data = "win2k-server.";
-		ResourceRecord r3; r3.name = "win2k-server"; r3.type = "Host"; r3.data = "10.10.10.91"; r3.rawIp = "10.10.10.91";
+		ResourceRecord r1; r1.name = "(identisch mit übergeordnetem...)"; r1.rawName = "@"; r1.type = "Autoritätsursprung"; r1.data = "[1], win2k-server., admin.";
+		ResourceRecord r2; r2.name = "(identisch mit übergeordnetem...)"; r2.rawName = "@"; r2.type = "Namenserver"; r2.data = "win2k-server.";
+		ResourceRecord r3; r3.name = "win2k-server"; r3.rawName = "win2k-server"; r3.type = "Host"; r3.data = "10.10.10.91"; r3.rawIp = "10.10.10.91";
 		recs.push_back(r1); recs.push_back(r2); recs.push_back(r3);
 		zoneRecords.push_back(recs);
 	} else {
@@ -1065,6 +1200,7 @@ long DnsManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 		new FXMenuCommand(&menu, "&Neuer Host (A)...", NULL, this, ID_NEWHOST);
 		new FXMenuCommand(&menu, "Neuer &Alias (CNAME)...", NULL, this, ID_NEWCNAME);
 		new FXMenuCommand(&menu, "Neuer &Mailserver (MX)...", NULL, this, ID_NEWMX);
+		new FXMenuCommand(&menu, "&Andere neue Datensätze...", NULL, this, ID_NEWOTHER);
 		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
 		new FXMenuCommand(&menu, "E&igenschaften", NULL, this, ID_ZONEPROPS);
@@ -1072,6 +1208,7 @@ long DnsManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEZONE);
 	} else if (contextZoneIdx >= 0 && zones[contextZoneIdx].isReverse) {
 		new FXMenuCommand(&menu, "&Neuer Zeiger (PTR)...", NULL, this, ID_NEWPTR);
+		new FXMenuCommand(&menu, "&Andere neue Datensätze...", NULL, this, ID_NEWOTHER);
 		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
 		new FXMenuCommand(&menu, "E&igenschaften", NULL, this, ID_ZONEPROPS);
@@ -1227,6 +1364,97 @@ long DnsManager::onNewPtr(FXObject*, FXSelector, void*) {
 
 	NewPtrDialog dlg(this, this, contextZoneIdx, z.name, displayPrefix);
 	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long DnsManager::onNewOther(FXObject*, FXSelector, void*) {
+	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
+	ZoneInfo z = zones[contextZoneIdx];
+	if (z.file.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		return 1;
+	}
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Datensatz angelegt werden.");
+		return 1;
+	}
+
+	OtherRecordTypeDialog typeDlg(this);
+	if (!typeDlg.execute(PLACEMENT_OWNER)) return 1;
+	int sel = typeDlg.getSelected();
+	FXString zoneName = z.name;
+	FXString err;
+
+	if (sel == 0) { // Namenserver (NS)
+		GenericPropsDialog dlg(this, "Neuer Namenserver", "Neuer Namenserver in Zone: " + zoneName,
+			{ "Name (bei Nichtangabe wird übergeordnete Domäne verwendet):", "Nameserver (FQDN):" },
+			{ FXString(""), FXString("") });
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		FXString name = dlg.getValue(0).trim();
+		FXString target = dlg.getValue(1).trim();
+		if (target.empty()) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte einen Nameserver angeben."); return 1; }
+		if (target[target.length()-1] != '.') target += ".";
+		FXString rname = name.empty() ? FXString("@") : name;
+		FXString fullLine = rname + "\tIN\tNS\t" + target;
+		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
+			statuslbl->setText("Namenserver " + target + " in Zone " + zoneName + " angelegt.");
+			FXMessageBox::information(this, MBOX_OK, "Neuer Namenserver",
+				"Der Namenserverdatensatz für \"%s\" wurde erfolgreich erstellt.", target.text());
+		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+
+	} else if (sel == 1) { // Text (TXT)
+		GenericPropsDialog dlg(this, "Neuer Textdatensatz", "Neuer Textdatensatz in Zone: " + zoneName,
+			{ "Name (bei Nichtangabe wird übergeordnete Domäne verwendet):", "Text:" },
+			{ FXString(""), FXString("") });
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		FXString name = dlg.getValue(0).trim();
+		FXString text = dlg.getValue(1);
+		FXString rname = name.empty() ? FXString("@") : name;
+		FXString fullLine = rname + "\tIN\tTXT\t\"" + text + "\"";
+		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
+			statuslbl->setText("Textdatensatz in Zone " + zoneName + " angelegt.");
+			FXMessageBox::information(this, MBOX_OK, "Neuer Textdatensatz",
+				"Der Textdatensatz für \"%s\" wurde erfolgreich erstellt.", rname.text());
+		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+
+	} else if (sel == 2) { // Dienst (SRV)
+		GenericPropsDialog dlg(this, "Neuer Dienstdatensatz", "Neuer Dienstdatensatz in Zone: " + zoneName,
+			{ "Dienst (z.B. _sip._tcp):", "Priorität:", "Gewichtung:", "Port:", "Zielhost (FQDN):" },
+			{ FXString(""), FXString("0"), FXString("0"), FXString("0"), FXString("") });
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		FXString svc = dlg.getValue(0).trim();
+		FXString prio = dlg.getValue(1).trim();
+		FXString weight = dlg.getValue(2).trim();
+		FXString port = dlg.getValue(3).trim();
+		FXString target = dlg.getValue(4).trim();
+		if (svc.empty() || target.empty()) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte Dienst und Zielhost angeben.");
+			return 1;
+		}
+		if (target[target.length()-1] != '.') target += ".";
+		FXString fullLine = svc + "\tIN\tSRV\t" + prio + "\t" + weight + "\t" + port + "\t" + target;
+		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
+			statuslbl->setText("Dienstdatensatz " + svc + " in Zone " + zoneName + " angelegt.");
+			FXMessageBox::information(this, MBOX_OK, "Neuer Dienstdatensatz",
+				"Der Dienstdatensatz für \"%s\" wurde erfolgreich erstellt.", svc.text());
+		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+
+	} else if (sel == 3) { // IPv6-Host (AAAA)
+		GenericPropsDialog dlg(this, "Neuer IPv6-Host", "Neuer IPv6-Host in Zone: " + zoneName,
+			{ "Name (bei Nichtangabe wird übergeordnete Domäne verwendet):", "IPv6-Adresse:" },
+			{ FXString(""), FXString("::1") });
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		FXString name = dlg.getValue(0).trim();
+		FXString ip6 = dlg.getValue(1).trim();
+		if (ip6.empty()) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte eine IPv6-Adresse angeben."); return 1; }
+		FXString rname = name.empty() ? FXString("@") : name;
+		FXString fullLine = rname + "\tIN\tAAAA\t" + ip6;
+		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
+			statuslbl->setText("IPv6-Host " + rname + " (" + ip6 + ") in Zone " + zoneName + " angelegt.");
+			FXMessageBox::information(this, MBOX_OK, "Neuer IPv6-Host",
+				"Der IPv6-Hostdatensatz für \"%s\" wurde erfolgreich erstellt.", rname.text());
+		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+	}
 	return 1;
 }
 
@@ -1484,24 +1712,193 @@ int DnsManager::currentZoneIdxFromTree() {
 void DnsManager::openHostProperties(int zoneIdx, int recIdx) {
 	if (zoneIdx < 0 || zoneIdx >= (int)zoneRecords.size()) return;
 	if (recIdx < 0 || recIdx >= (int)zoneRecords[zoneIdx].size()) return;
-	ResourceRecord& rr = zoneRecords[zoneIdx][recIdx];
-	if (rr.type.find("Host") < 0) return; // nur A-Records haben in diesem Prototyp einen Dialog
+	ResourceRecord rr = zoneRecords[zoneIdx][recIdx];
+	if (rr.type == "Autoritätsursprung") return; // SOA nicht editierbar in diesem Prototyp
 
-	FXString hostDisplay = (rr.name.find("übergeordnetem") >= 0) ? zones[zoneIdx].name : rr.name;
+	FXString zoneName = zones[zoneIdx].name;
+	FXString zoneFile = zones[zoneIdx].file;
+	FXString hostDisplay = (rr.rawName == "@") ? zoneName : rr.rawName;
 
-	HostPropertiesDialog dlg(this, zones[zoneIdx].name, zones[zoneIdx].file, hostDisplay, rr.rawIp);
-	if (dlg.execute(PLACEMENT_OWNER)) {
-		FXString newIp = dlg.getNewIp();
-		if (newIp != rr.rawIp && !zones[zoneIdx].file.empty()) {
-			if (updateARecord(zones[zoneIdx].file, hostDisplay, rr.rawIp, newIp, zones[zoneIdx].name)) {
-				loadZones();
-				showZoneRecords(zoneIdx);
-				statuslbl->setText("Host " + hostDisplay + " aktualisiert auf " + newIp);
-			} else {
-				statuslbl->setText("Konnte A-Record nicht in der Zonendatei finden/ändern.");
+	if (rr.type == "Host") {
+		HostPropertiesDialog dlg(this, zoneName, zoneFile, hostDisplay, rr.rawIp);
+		if (dlg.execute(PLACEMENT_OWNER)) {
+			FXString newIp = dlg.getNewIp();
+			if (newIp != rr.rawIp && !zoneFile.empty()) {
+				if (updateARecord(zoneFile, hostDisplay, rr.rawIp, newIp, zoneName)) {
+					loadZones();
+					showZoneRecords(zoneIdx);
+					statuslbl->setText("Host " + hostDisplay + " aktualisiert auf " + newIp);
+				} else {
+					statuslbl->setText("Konnte A-Record nicht in der Zonendatei finden/ändern.");
+				}
 			}
 		}
+		return;
 	}
+
+	FXString typeKeyword = typeKeywordFor(rr.type);
+	if (typeKeyword.empty()) return; // unbekannter Typ
+
+	FXString info = "Eigenschaften von " + hostDisplay + " (" + rr.type + ") in Zone " + zoneName;
+
+	if (rr.type == "Mailaustausch") {
+		// rr.data hat die Form "[prio] ziel" -- fuer die Bearbeitung auftrennen
+		FXString d = rr.data;
+		int lb = d.find('['), rb = d.find(']');
+		FXString prio = (lb >= 0 && rb > lb) ? d.mid(lb+1, rb-lb-1) : FXString("10");
+		FXString target = (rb >= 0) ? d.mid(rb+1, d.length()-rb-1).trim() : d;
+
+		GenericPropsDialog dlg(this, "Eigenschaften von " + hostDisplay, info,
+			{ "Priorität:", "Zielhost (FQDN):" }, { prio, target });
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		FXString newTarget = dlg.getValue(1).trim();
+		if (!newTarget.empty() && newTarget[newTarget.length()-1] != '.') newTarget += ".";
+		FXString fullLine = rr.rawName + "\tIN\tMX\t" + dlg.getValue(0).trim() + "\t" + newTarget;
+		FXString err;
+		if (modifyRecordLine(zoneIdx, rr.rawName, typeKeyword, fullLine, err)) {
+			showZoneRecords(zoneIdx);
+			statuslbl->setText("Mailserver für " + hostDisplay + " aktualisiert.");
+		} else statuslbl->setText(err);
+
+	} else if (rr.type == "Dienst") {
+		// rr.data hat die Form "[prio][weight][port] ziel"
+		FXString d = rr.data;
+		std::vector<FXString> nums;
+		int pos = 0;
+		while (true) {
+			int lb = d.find('[', pos), rb = d.find(']', pos);
+			if (lb < 0 || rb < 0) break;
+			nums.push_back(d.mid(lb+1, rb-lb-1));
+			pos = rb + 1;
+		}
+		FXString target = (pos < (int)d.length()) ? d.mid(pos, d.length()-pos).trim() : FXString("");
+		FXString prio = nums.size() > 0 ? nums[0] : FXString("0");
+		FXString weight = nums.size() > 1 ? nums[1] : FXString("0");
+		FXString port = nums.size() > 2 ? nums[2] : FXString("0");
+
+		GenericPropsDialog dlg(this, "Eigenschaften von " + hostDisplay, info,
+			{ "Priorität:", "Gewichtung:", "Port:", "Zielhost (FQDN):" }, { prio, weight, port, target });
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		FXString newTarget = dlg.getValue(3).trim();
+		if (!newTarget.empty() && newTarget[newTarget.length()-1] != '.') newTarget += ".";
+		FXString fullLine = rr.rawName + "\tIN\tSRV\t" + dlg.getValue(0).trim() + "\t" + dlg.getValue(1).trim() + "\t" + dlg.getValue(2).trim() + "\t" + newTarget;
+		FXString err;
+		if (modifyRecordLine(zoneIdx, rr.rawName, typeKeyword, fullLine, err)) {
+			showZoneRecords(zoneIdx);
+			statuslbl->setText("Dienstdatensatz für " + hostDisplay + " aktualisiert.");
+		} else statuslbl->setText(err);
+
+	} else {
+		// Alias/Zeiger/Namenserver/IPv6-Host: ein Datenfeld; Text: Freitext
+		FXString label = "Wert:";
+		if (rr.type == "Alias" || rr.type == "Zeiger") label = "Zielhost (FQDN):";
+		else if (rr.type == "Namenserver") label = "Nameserver (FQDN):";
+		else if (rr.type == "IPv6-Host") label = "IPv6-Adresse:";
+		else if (rr.type == "Text") label = "Text:";
+
+		GenericPropsDialog dlg(this, "Eigenschaften von " + hostDisplay, info, { label }, { rr.data });
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		FXString newVal = dlg.getValue(0).trim();
+
+		FXString fullLine;
+		if (rr.type == "Text") {
+			fullLine = rr.rawName + "\tIN\tTXT\t\"" + dlg.getValue(0) + "\"";
+		} else {
+			if (!newVal.empty() && newVal[newVal.length()-1] != '.') newVal += ".";
+			fullLine = rr.rawName + "\tIN\t" + typeKeyword + "\t" + newVal;
+		}
+		FXString err;
+		if (modifyRecordLine(zoneIdx, rr.rawName, typeKeyword, fullLine, err)) {
+			showZoneRecords(zoneIdx);
+			statuslbl->setText(rr.type + "-Eintrag für " + hostDisplay + " aktualisiert.");
+		} else statuslbl->setText(err);
+	}
+}
+
+// Generisches Bearbeiten eines Ressourcendatensatzes: findet die Zeile
+// anhand von Rohname + Typ-Schluesselwort (robust ueber einen Mini-Parser,
+// der die Zonendatei wie parseZoneFile() durchgeht -- nicht per simplem
+// Substring-Suchen, damit z.B. SRV/TXT mit Sonderzeichen sicher matchen),
+// ersetzt die Zeile durch "newFullLine", erhoeht die SOA-Serial und
+// schreibt als root zurueck.
+bool DnsManager::modifyRecordLine(int zoneIdx, const FXString& rawName, const FXString& typeKeyword,
+                                   const FXString& newFullLine, FXString& errorMsg) {
+	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
+	ZoneInfo z = zones[zoneIdx];
+	if (z.file.empty()) { errorMsg = "Für diese Zone ist keine Zonendatei bekannt."; return false; }
+
+	std::ifstream in(z.file.text());
+	std::vector<std::string> lines;
+	std::string line;
+	std::string lastName = "@";
+	bool changed = false, bumped = false, inSoa = false;
+
+	while (std::getline(in, line)) {
+		if (!bumped) {
+			size_t sp = line.find("Serial");
+			if (sp != std::string::npos) {
+				std::string digits; size_t dpos = std::string::npos;
+				for (size_t i = 0; i < line.size(); ++i) {
+					if (isdigit((unsigned char)line[i])) { if (digits.empty()) dpos = i; digits += line[i]; }
+					else if (!digits.empty()) break;
+				}
+				if (!digits.empty()) {
+					long val = atol(digits.c_str()) + 1;
+					line.replace(dpos, digits.size(), std::to_string(val));
+					bumped = true;
+				}
+			}
+		}
+
+		std::string codeOnly = line;
+		size_t sc = codeOnly.find(';');
+		if (sc != std::string::npos) codeOnly = codeOnly.substr(0, sc);
+
+		if (inSoa) {
+			if (codeOnly.find(')') != std::string::npos) inSoa = false;
+			lines.push_back(line);
+			continue;
+		}
+		if (codeOnly.find_first_not_of(" \t\r\n") == std::string::npos || (!codeOnly.empty() && codeOnly[0] == '$')) {
+			lines.push_back(line);
+			continue;
+		}
+
+		std::istringstream iss(codeOnly);
+		std::vector<std::string> tok;
+		std::string t;
+		while (iss >> t) tok.push_back(t);
+
+		bool thisLineChanged = false;
+		if (!tok.empty()) {
+			size_t idx = 0;
+			std::string curName = lastName;
+			if (tok[0] != "IN" && tok[0] != "in") { curName = tok[0]; lastName = curName; idx = 1; }
+			if (idx < tok.size() && (tok[idx] == "IN" || tok[idx] == "in")) idx++;
+			if (idx < tok.size()) {
+				std::string typ = tok[idx];
+				std::transform(typ.begin(), typ.end(), typ.begin(), ::toupper);
+				if (typ == "SOA" && codeOnly.find(')') == std::string::npos) inSoa = true;
+				if (!changed && curName == std::string(rawName.text()) && typ == std::string(typeKeyword.text())) {
+					lines.push_back(std::string(newFullLine.text()));
+					changed = true;
+					thisLineChanged = true;
+				}
+			}
+		}
+		if (!thisLineChanged) lines.push_back(line);
+	}
+	in.close();
+
+	if (!changed) { errorMsg = "Konnte den Eintrag nicht in der Zonendatei finden."; return false; }
+
+	std::string newContent;
+	for (auto& l : lines) newContent += l + "\n";
+	if (!writeFileAsRoot(z.file, newContent.c_str())) { errorMsg = "Fehler beim Schreiben der Zonendatei."; return false; }
+
+	runAsRoot({ FXString("rndc"), FXString("reload"), z.name });
+	onRefresh(NULL, 0, NULL);
+	return true;
 }
 
 long DnsManager::onListDouble(FXObject*, FXSelector, void*) {
@@ -1531,13 +1928,9 @@ long DnsManager::onListRightClick(FXObject*, FXSelector, void* ptr) {
 	ResourceRecord& rr = zoneRecords[zoneIdx][idx];
 
 	FXMenuPane menu(this);
-	if (rr.type.find("Host") >= 0) {
+	if (rr.type != "Autoritätsursprung") {
 		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_PROPERTIES);
 		new FXMenuSeparator(&menu);
-	}
-	if (rr.type.find("Autoritätsursprung") < 0) {
-		// SOA-Record ist essenziell fuer die Zone und laesst sich in
-		// diesem Prototyp nicht ueber die Oberflaeche loeschen.
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETERECORD);
 	}
 	menu.create();
@@ -1553,7 +1946,7 @@ long DnsManager::onDeleteRecord(FXObject*, FXSelector, void*) {
 	if (sel < 0 || sel >= (int)zoneRecords[zoneIdx].size()) return 1;
 
 	ResourceRecord rr = zoneRecords[zoneIdx][sel];
-	if (rr.type.find("Autoritätsursprung") >= 0) return 1; // SOA nicht loeschbar
+	if (rr.type == "Autoritätsursprung") return 1; // SOA nicht loeschbar
 
 	ZoneInfo z = zones[zoneIdx];
 	if (z.file.empty()) return 1;
@@ -1562,29 +1955,76 @@ long DnsManager::onDeleteRecord(FXObject*, FXSelector, void*) {
 		return 1;
 	}
 
-	FXString hostDisplay = (rr.name.find("übergeordnetem") >= 0) ? FXString("@") : rr.name;
+	FXString hostDisplay = rr.rawName;
 	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
 	        "%s-Eintrag \"%s\" wirklich löschen?", rr.type.text(), hostDisplay.text()) != MBOX_CLICKED_YES) {
 		return 1;
 	}
 
-	// Datenwert fuer den Vergleich passend zur rawIp/data extrahieren
-	FXString matchData = !rr.rawIp.empty() ? rr.rawIp : rr.data;
-	// bei MX steht "[prio] ziel" in rr.data -- fuer den Zeilenabgleich reicht das Ziel
-	int sp = matchData.rfind(' ');
-	if (rr.type.find("Mailaustausch") >= 0 && sp >= 0) matchData = matchData.mid(sp + 1, matchData.length() - sp - 1);
-
+	FXString typeKeyword = typeKeywordFor(rr.type);
+	FXString errorMsg;
+	// Robustes, token-basiertes Loeschen (wie modifyRecordLine, aber die
+	// gefundene Zeile wird weggelassen statt ersetzt): identisch aufgebaut,
+	// damit auch Datensaetze mit Sonderzeichen (TXT/SRV) sicher matchen.
 	std::ifstream in(z.file.text());
 	std::vector<std::string> lines;
 	std::string line;
-	bool removed = false;
+	std::string lastName = "@";
+	bool removed = false, bumped = false, inSoa = false;
+
 	while (std::getline(in, line)) {
-		if (!removed && line.find(hostDisplay.text()) != std::string::npos &&
-		    line.find(matchData.text()) != std::string::npos) {
-			removed = true;
-			continue; // diese Zeile weglassen
+		if (!bumped) {
+			size_t sp = line.find("Serial");
+			if (sp != std::string::npos) {
+				std::string digits; size_t dpos = std::string::npos;
+				for (size_t i = 0; i < line.size(); ++i) {
+					if (isdigit((unsigned char)line[i])) { if (digits.empty()) dpos = i; digits += line[i]; }
+					else if (!digits.empty()) break;
+				}
+				if (!digits.empty()) {
+					long val = atol(digits.c_str()) + 1;
+					line.replace(dpos, digits.size(), std::to_string(val));
+					bumped = true;
+				}
+			}
 		}
-		lines.push_back(line);
+
+		std::string codeOnly = line;
+		size_t sc = codeOnly.find(';');
+		if (sc != std::string::npos) codeOnly = codeOnly.substr(0, sc);
+
+		if (inSoa) {
+			if (codeOnly.find(')') != std::string::npos) inSoa = false;
+			lines.push_back(line);
+			continue;
+		}
+		if (codeOnly.find_first_not_of(" \t\r\n") == std::string::npos || (!codeOnly.empty() && codeOnly[0] == '$')) {
+			lines.push_back(line);
+			continue;
+		}
+
+		std::istringstream iss(codeOnly);
+		std::vector<std::string> tok;
+		std::string t;
+		while (iss >> t) tok.push_back(t);
+
+		bool skipThisLine = false;
+		if (!tok.empty()) {
+			size_t idx = 0;
+			std::string curName = lastName;
+			if (tok[0] != "IN" && tok[0] != "in") { curName = tok[0]; lastName = curName; idx = 1; }
+			if (idx < tok.size() && (tok[idx] == "IN" || tok[idx] == "in")) idx++;
+			if (idx < tok.size()) {
+				std::string typ = tok[idx];
+				std::transform(typ.begin(), typ.end(), typ.begin(), ::toupper);
+				if (typ == "SOA" && codeOnly.find(')') == std::string::npos) inSoa = true;
+				if (!removed && curName == std::string(hostDisplay.text()) && typ == std::string(typeKeyword.text())) {
+					removed = true;
+					skipThisLine = true;
+				}
+			}
+		}
+		if (!skipThisLine) lines.push_back(line);
 	}
 	in.close();
 
