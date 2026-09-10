@@ -26,6 +26,8 @@ FOX-Toolkit-Muster wie `dnsmgr` in diesem Repo. Backend: **Kea DHCPv4**
   (Kea kennt das Konzept selbst nicht -- wird über mehrere Pools
   nachgebildet). Adresspool-Ansicht zeigt Pool-Blöcke und
   Ausschlussbereiche nebeneinander mit Typ-Spalte, wie im Original.
+  Rechtsklick auf einen Ausschlussbereich in der Liste -> **Löschen**
+  fügt die Spanne wieder zusammenhängend in den Pool ein.
 - **Bereichsoptionen konfigurieren...**: Router (003), DNS-Server (006),
   Domänenname (015), Verbindungsdauer (051)
 - **Eigenschaften**/**Löschen** je Bereich, **Aktualisieren** überall
@@ -55,6 +57,4 @@ Boost-Header-Metapaket `libboost1.83-dev`) installiert.
   ausgeführt, siehe oben).
 - Adressleases sind reine Anzeige, kein manuelles Löschen/Freigeben
   einzelner Leases.
-- Ausschlussbereiche lassen sich aktuell nur anlegen, nicht wieder
-  über die Oberfläche entfernen (nur manuell in der Konfiguration).
 - Kein Server-Eigenschaften-Dialog (globale Optionen).
