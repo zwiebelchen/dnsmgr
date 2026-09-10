@@ -29,16 +29,24 @@ FOX-Toolkit-Muster wie `mmc/devmgmt` im ice2k-Repo.
   Original-Assistenten. Beim PTR-Dialog wird das Netzwerk-Präfix aus
   dem Zonennamen berechnet und vorangestellt, es muss nur noch das
   letzte Oktett eingegeben werden.
+- **"Andere neue Datensätze..."**: Typauswahl-Dialog für Namenserver
+  (NS), Text (TXT), Dienst (SRV) und IPv6-Host (AAAA), danach klassisches
+  OK/Abbrechen (wie im Original -- nur der Host-Assistent legt mehrere
+  nacheinander an)
 - Kontextmenüs wie im Original:
   - Rechtsklick auf "Forward-/Reverse-Lookupzonen" -> **Neue Zone...** /
     **Aktualisieren**
   - Rechtsklick auf eine Forward-Zone -> **Neuer Host (A)...** / **Neuer
-    Alias (CNAME)...** / **Neuer Mailserver (MX)...** / **Aktualisieren**
-    / **Eigenschaften** / **Löschen**
+    Alias (CNAME)...** / **Neuer Mailserver (MX)...** / **Andere neue
+    Datensätze...** / **Aktualisieren** / **Eigenschaften** / **Löschen**
   - Rechtsklick auf eine Reverse-Zone -> **Neuer Zeiger (PTR)...** /
-    **Aktualisieren** / **Eigenschaften** / **Löschen**
+    **Andere neue Datensätze...** / **Aktualisieren** / **Eigenschaften**
+    / **Löschen**
   - Rechtsklick auf einen Eintrag in der Listenansicht -> **Eigenschaften**
-    (nur Host/A) / **Löschen**
+    (alle Typen außer SOA) / **Löschen**
+- **Eigenschaften-Dialoge** für alle Record-Typen außer SOA (auch für
+  Mehrfeld-Typen wie MX und SRV, mit automatischem Auftrennen/
+  Zusammensetzen der Anzeigewerte)
 - **Zonen-Eigenschaften**: zeigen Zonenname/-typ/-datei und die rohen
   SOA-Werte (Serial/Refresh/Retry/Expire/Minimum); bei Reverse-Zonen
   zusätzlich die berechnete Netzwerk-ID (z.B. `10.10.10.0/24`)
@@ -69,8 +77,11 @@ make
   Hosts wird der zugehörige PTR-Eintrag noch nicht automatisch
   mitgelöscht. Manuelles Anlegen über "Neuer Zeiger (PTR)..." funktioniert
   unabhängig davon immer.
-- CNAME/MX sind im Eigenschaften-Dialog noch nicht editierbar, nur beim
-  Anlegen setzbar (Löschen funktioniert für alle Typen außer SOA).
+- CNAME/MX-Zielhosts werden beim Speichern nicht auf Gültigkeit
+  geprüft (keine FQDN-Validierung).
 - Zonen-Eigenschaften sind nur eine Anzeige (SOA-Werte lassen sich noch
   nicht direkt darin bearbeiten).
 - Kein Undo für Löschaktionen.
+- Bearbeiten/Löschen findet bei mehreren Records mit identischem
+  Name+Typ (z.B. zwei NS-Einträge für "@") immer nur den ersten
+  Treffer -- für Round-Robin-Konfigurationen mit Bedacht nutzen.
