@@ -175,7 +175,7 @@ static std::vector<ResourceRecord> parseZoneFile(const FXString& path, const FXS
 				}
 				ResourceRecord rr;
 				rr.name = "(identisch mit übergeordnetem Ordnerobjekt)";
-				rr.type = "Autoritätsursprung (SOA)";
+				rr.type = "Autoritätsursprung";
 				rr.data = "[" + FXString(serial.c_str()) + "], " + origin + ".";
 				recs.push_back(rr);
 			}
@@ -209,39 +209,39 @@ static std::vector<ResourceRecord> parseZoneFile(const FXString& path, const FXS
 			if (!inSoa) {
 				ResourceRecord rr;
 				rr.name = dispName;
-				rr.type = "Autoritätsursprung (SOA)";
+				rr.type = "Autoritätsursprung";
 				rr.data = origin + ".";
 				recs.push_back(rr);
 			}
 		} else if (type == "NS") {
 			ResourceRecord rr;
 			rr.name = dispName;
-			rr.type = "Namenserver (NS)";
+			rr.type = "Namenserver";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
 			recs.push_back(rr);
 		} else if (type == "A") {
 			ResourceRecord rr;
 			rr.name = (name == "@") ? origin : name;
-			rr.type = "Host (A)";
+			rr.type = "Host";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
 			rr.rawIp = rr.data;
 			recs.push_back(rr);
 		} else if (type == "CNAME") {
 			ResourceRecord rr;
 			rr.name = dispName;
-			rr.type = "Alias (CNAME)";
+			rr.type = "Alias";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
 			recs.push_back(rr);
 		} else if (type == "MX") {
 			ResourceRecord rr;
 			rr.name = dispName;
-			rr.type = "Mailaustausch (MX)";
+			rr.type = "Mailaustausch";
 			if (idx + 1 < tok.size()) rr.data = FXString("[") + tok[idx].c_str() + "] " + tok[idx+1].c_str();
 			recs.push_back(rr);
 		} else if (type == "PTR") {
 			ResourceRecord rr;
 			rr.name = dispName;
-			rr.type = "Zeiger (PTR)";
+			rr.type = "Zeiger";
 			rr.data = (idx < tok.size()) ? tok[idx].c_str() : "";
 			recs.push_back(rr);
 		}
