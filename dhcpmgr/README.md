@@ -24,6 +24,9 @@ FOX-Toolkit-Muster wie `dnsmgr` in diesem Repo. Backend: **Kea DHCPv4**
   Domänenname (015), Verbindungsdauer (051)
 - **Eigenschaften**/**Löschen** je Bereich, **Aktualisieren** überall
 - Liest aktive Leases aus `/var/lib/kea/kea-leases4.csv` (reine Anzeige)
+- Nach jedem Speichern wird `systemctl restart kea-dhcp4-server`
+  automatisch ausgeführt; schlägt der Neustart fehl, erscheint eine
+  Warnung in der Statuszeile statt es stillschweigend zu verschlucken
 
 Jede geschriebene Konfiguration wird mit `kea-dhcp4 -t` gegen den
 echten Kea-Parser validiert getestet, nicht nur auf gültiges JSON.
@@ -44,8 +47,9 @@ Boost-Header-Metapaket `libboost1.83-dev`) installiert.
 - Kein Aktivieren/Deaktivieren eines Bereichs.
 - Bereichsoptionen sind auf Router/DNS-Server/Domänenname/
   Verbindungsdauer beschränkt (kein "Andere Optionen konfigurieren").
-- Änderungen wirken erst nach `systemctl restart kea-dhcp4-server`
-  (kein Steuerkanal/Control-Agent-Reload).
+- Kein Steuerkanal/Control-Agent-Reload -- Änderungen wirken erst nach
+  einem vollen `systemctl restart kea-dhcp4-server` (wird automatisch
+  ausgeführt, siehe oben).
 - Adressleases sind reine Anzeige, kein manuelles Löschen/Freigeben
   einzelner Leases.
 - Kein Server-Eigenschaften-Dialog (globale Optionen).
