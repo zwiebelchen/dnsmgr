@@ -9,6 +9,9 @@ FOX-Toolkit-Muster wie `mmc/devmgmt` im ice2k-Repo.
 ## Funktionsumfang
 - Fenster/Menü/Toolbar im MMC-Look, mit Original-Icons aus `mmc/devmgmt`
 - Baumansicht: DNS -> Hostname -> Forward-/Reverse-Lookupzonen -> Zonen
+- Record-Typ-Bezeichnungen exakt wie im Original ("Autoritätsursprung",
+  "Namenserver", "Host", "Alias", "Mailaustausch", "Zeiger" -- ohne
+  technische Abkürzungen in Klammern)
 - Liest echte BIND9-Zonen aus `/etc/bind/named.conf.local` + Zonendateien
   (SOA, NS, A, CNAME, MX, PTR)
 - Root-Rechte beim Start über `i2ksudo` (GUI-Passwortabfrage im
@@ -16,6 +19,13 @@ FOX-Toolkit-Muster wie `mmc/devmgmt` im ice2k-Repo.
   sudo-Timestamp-Caching i. d. R. nur einmal pro Sitzung nötig.
 - Legt automatisch eine Demo-Zone `zwiebelchen.org` unter `/etc/bind/`
   an, falls `named.conf.local` fehlt oder keine Zone enthält
+- **Zonen-Assistent** ("Neue Zone..."): Auswahl Forward-/
+  Reverse-Lookupzone mit Live-Vorschau des berechneten
+  `in-addr.arpa`-Namens, Button "Fertig stellen" wie im Original
+- **Neuer-Host-Dialog**: legt Hosts per "Host hinzufügen" sofort an und
+  bleibt für weitere offen (mit Erfolgsmeldung "Der Hostdatensatz für
+  ... wurde erfolgreich erstellt."), "Fertig stellen" schließt ihn --
+  genauso wie im Original-Assistenten
 - Kontextmenüs:
   - Rechtsklick auf "Forward-Lookupzonen" -> **Neue Zone...**
   - Rechtsklick auf eine Zone -> **Neuer Host (A)...** / **Löschen**
