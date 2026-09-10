@@ -230,6 +230,30 @@ static std::vector<PoolRange> subtractExclusion(const std::vector<PoolRange>& po
 	return out;
 }
 
+// Fuegt einen zuvor ausgeschlossenen Bereich wieder in die Pool-Liste
+// ein und verschmilzt angrenzende/ueberlappende Bloecke zu einem
+// zusammenhaengenden Block -- das Gegenstueck zu subtractExclusion(),
+// gebraucht beim Loeschen eines Ausschlussbereichs.
+static std::vector<PoolRange> mergeBackRange(std::vector<PoolRange> pools, const PoolRange& toAdd) {
+	pools.push_back(toAdd);
+	std::sort(pools.begin(), pools.end(), [](const PoolRange& a, const PoolRange& b) {
+		return ipToUint(a.start) < ipToUint(b.start);
+	});
+	std::vector<PoolRange> out;
+	for (auto& p : pools) {
+		if (!out.empty()) {
+			uint32_t prevEnd = ipToUint(out.back().end);
+			uint32_t curStart = ipToUint(p.start);
+			if (curStart <= prevEnd + 1) {
+				if (ipToUint(p.end) > prevEnd) out.back().end = p.end;
+				continue;
+			}
+		}
+		out.push_back(p);
+	}
+	return out;
+}
+
 static std::vector<ScopeInfo> parseScopes(const json::value& conf) {
 	std::vector<ScopeInfo> scopes;
 	if (!isValidConfig(conf)) return scopes;
@@ -702,20 +726,24 @@ private:
 	int contextScopeIdx;      // Bereich, auf dem das Kontextmenue geoeffnet wurde
 	NodeKind currentNodeKind; // Art des aktuell in der Liste angezeigten Knotens
 	int currentScopeForList;  // zugehoeriger Bereichs-Index fuer die Liste
+	FXString contextExclStart, contextExclEnd; // fuer "Ausschlussbereich loeschen" gemerkt
 
 protected:
 	DhcpManager() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWSCOPE,
-	       ID_NEWRESERVATION, ID_CONFIGOPTIONS, ID_DELETESCOPE, ID_SCOPEPROPS, ID_NEWEXCLUSION };
+	       ID_NEWRESERVATION, ID_CONFIGOPTIONS, ID_DELETESCOPE, ID_SCOPEPROPS, ID_NEWEXCLUSION,
+	       ID_DELETEEXCLUSION };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
+	long onListRightClick(FXObject*, FXSelector, void*);
 	long onRefresh(FXObject*, FXSelector, void*);
 	long onAbout(FXObject*, FXSelector, void*);
 	long onNewScope(FXObject*, FXSelector, void*);
 	long onNewReservation(FXObject*, FXSelector, void*);
 	long onNewExclusion(FXObject*, FXSelector, void*);
+	long onDeleteExclusion(FXObject*, FXSelector, void*);
 	long onConfigureOptions(FXObject*, FXSelector, void*);
 	long onDeleteScope(FXObject*, FXSelector, void*);
 	long onScopeProperties(FXObject*, FXSelector, void*);
@@ -725,6 +753,7 @@ public:
 	void showListFor(NodeKind kind, int scopeIdx);
 	bool createReservation(int scopeIdx, const FXString& ip, const FXString& mac, const FXString& hostname, FXString& errorMsg);
 	bool createExclusion(int scopeIdx, const FXString& start, const FXString& end, FXString& errorMsg);
+	bool deleteExclusion(int scopeIdx, const FXString& start, const FXString& end, FXString& errorMsg);
 	virtual void create();
 	virtual ~DhcpManager() {}
 };
@@ -732,11 +761,13 @@ public:
 FXDEFMAP(DhcpManager) DhcpManagerMap[] = {
 	FXMAPFUNC(SEL_CHANGED, DhcpManager::ID_TREE, DhcpManager::onTreeChanged),
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DhcpManager::ID_TREE, DhcpManager::onTreeRightClick),
+	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DhcpManager::ID_LIST, DhcpManager::onListRightClick),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_REFRESH, DhcpManager::onRefresh),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_ABOUT, DhcpManager::onAbout),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWSCOPE, DhcpManager::onNewScope),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWRESERVATION, DhcpManager::onNewReservation),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_NEWEXCLUSION, DhcpManager::onNewExclusion),
+	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETEEXCLUSION, DhcpManager::onDeleteExclusion),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_CONFIGOPTIONS, DhcpManager::onConfigureOptions),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETESCOPE, DhcpManager::onDeleteScope),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_SCOPEPROPS, DhcpManager::onScopeProperties),
@@ -985,6 +1016,36 @@ long DhcpManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 	return 1;
 }
 
+long DhcpManager::onListRightClick(FXObject*, FXSelector, void* ptr) {
+	FXEvent* ev = (FXEvent*)ptr;
+	if (currentNodeKind != NK_POOL || currentScopeForList < 0) return 1;
+
+	FXint idx = list->getItemAt(ev->win_x, ev->win_y);
+	if (idx < 0) return 1;
+	list->setCurrentItem(idx);
+	list->selectItem(idx);
+
+	FXString txt = list->getItemText(idx);
+	int t1 = txt.find('\t');
+	int t2 = txt.find('\t', t1 + 1);
+	if (t1 < 0 || t2 < 0) return 1;
+	FXString start = txt.left(t1);
+	FXString end = txt.mid(t1 + 1, t2 - t1 - 1);
+	FXString type = txt.mid(t2 + 1, txt.length() - t2 - 1);
+	if (type != "Ausschlussbereich") return 1; // Adresspool-Bloecke selbst sind nicht direkt loeschbar
+
+	contextScopeIdx = currentScopeForList;
+	contextExclStart = start;
+	contextExclEnd = end;
+
+	FXMenuPane menu(this);
+	new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEEXCLUSION);
+	menu.create();
+	menu.popup(NULL, ev->root_x, ev->root_y);
+	getApp()->runModalWhileShown(&menu);
+	return 1;
+}
+
 long DhcpManager::onRefresh(FXObject*, FXSelector, void*) {
 	list->clearItems();
 	setListColumns(list, {});
@@ -1114,6 +1175,24 @@ long DhcpManager::onNewExclusion(FXObject*, FXSelector, void*) {
 	}
 	NewExclusionDialog dlg(this, this, contextScopeIdx, scopes[contextScopeIdx].name);
 	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long DhcpManager::onDeleteExclusion(FXObject*, FXSelector, void*) {
+	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
+		return 1;
+	}
+	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	        "Ausschlussbereich \"%s - %s\" wirklich löschen?", contextExclStart.text(), contextExclEnd.text())
+	        != MBOX_CLICKED_YES) {
+		return 1;
+	}
+	FXString errorMsg;
+	if (!deleteExclusion(contextScopeIdx, contextExclStart, contextExclEnd, errorMsg)) {
+		statuslbl->setText(errorMsg);
+	}
 	return 1;
 }
 
@@ -1256,6 +1335,54 @@ bool DhcpManager::createExclusion(int scopeIdx, const FXString& startIn, const F
 	bool restarted = restartKeaService();
 	onRefresh(NULL, 0, NULL);
 	statuslbl->setText("Ausschlussbereich " + start + " - " + end + " angelegt."
+		+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
+	return true;
+}
+
+// Entfernt einen zuvor angelegten Ausschlussbereich wieder: fuegt die
+// Spanne per mergeBackRange() in die Pool-Liste zurueck (verschmilzt
+// sie mit angrenzenden Bloecken) und entfernt den passenden Eintrag
+// aus user-context.exclusions.
+bool DhcpManager::deleteExclusion(int scopeIdx, const FXString& start, const FXString& end, FXString& errorMsg) {
+	if (scopeIdx < 0 || scopeIdx >= (int)scopes.size()) { errorMsg = "Ungültiger Bereich."; return false; }
+	FXString cidr = scopes[scopeIdx].subnetCidr;
+
+	json::value conf = loadKeaConfig();
+	if (!isValidConfig(conf)) { errorMsg = "Konfiguration nicht gefunden."; return false; }
+
+	bool found = false;
+	for (auto& sv : conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array()) {
+		if (!sv.is_object() || jsonStr(sv.as_object(), "subnet") != cidr) continue;
+		found = true;
+
+		std::vector<PoolRange> curPools;
+		if (auto* p = sv.as_object().if_contains("pools")) {
+			if (p->is_array()) curPools = jsonPoolsToVector(p->as_array());
+		}
+		std::vector<PoolRange> newPools = mergeBackRange(curPools, PoolRange{ start, end });
+		sv.as_object()["pools"] = poolsVectorToJson(newPools);
+
+		if (sv.as_object().if_contains("user-context") && sv.as_object().at("user-context").is_object()) {
+			auto& uc = sv.as_object().at("user-context").as_object();
+			if (uc.if_contains("exclusions") && uc.at("exclusions").is_array()) {
+				auto& exclArr = uc.at("exclusions").as_array();
+				for (size_t i = 0; i < exclArr.size(); ++i) {
+					if (!exclArr[i].is_object()) continue;
+					if (jsonStr(exclArr[i].as_object(), "start") == start && jsonStr(exclArr[i].as_object(), "end") == end) {
+						exclArr.erase(exclArr.begin() + i);
+						break;
+					}
+				}
+			}
+		}
+		break;
+	}
+	if (!found) { errorMsg = "Bereich nicht gefunden."; return false; }
+
+	if (!saveKeaConfig(conf)) { errorMsg = "Fehler beim Schreiben der Konfiguration."; return false; }
+	bool restarted = restartKeaService();
+	onRefresh(NULL, 0, NULL);
+	statuslbl->setText("Ausschlussbereich " + start + " - " + end + " gelöscht."
 		+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
 	return true;
 }
