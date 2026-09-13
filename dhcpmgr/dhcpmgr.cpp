@@ -741,7 +741,7 @@ FXIMPLEMENT(NewExclusionDialog, FXDialogBox, NewExclusionDialogMap, ARRAYNUMBER(
 // Hauptfenster
 // ---------------------------------------------------------------------
 
-enum NodeKind { NK_NONE, NK_SCOPE, NK_POOL, NK_LEASES, NK_RESERVATIONS, NK_OPTIONS };
+enum NodeKind { NK_NONE, NK_SCOPE, NK_POOL, NK_LEASES, NK_RESERVATIONS, NK_OPTIONS, NK_SERVEROPTIONS };
 
 class DhcpManager : public FXMainWindow {
 	FXDECLARE(DhcpManager)
@@ -761,8 +761,9 @@ private:
 	FXTreeList* tree;
 	FXIconList* list;
 
-	FXTreeItem *rootItem, *serverItem;
+	FXTreeItem *rootItem, *serverItem, *serverOptionsItem;
 	std::vector<FXTreeItem*> scopeItems, poolItems, leaseItems, resItems, optItems;
+	std::vector<ScopeOption> serverOptions; // globale Optionen, unabhaengig von einem Bereich
 	std::vector<ScopeInfo> scopes;
 
 	FXIcon *icoRoot, *icoServer, *icoFolder, *icoClock, *icoKey;
@@ -779,7 +780,7 @@ protected:
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWSCOPE,
 	       ID_NEWRESERVATION, ID_CONFIGOPTIONS, ID_DELETESCOPE, ID_SCOPEPROPS, ID_NEWEXCLUSION,
-	       ID_DELETEEXCLUSION, ID_RESPROPS, ID_DELETERESERVATION };
+	       ID_DELETEEXCLUSION, ID_RESPROPS, ID_DELETERESERVATION, ID_SERVEROPTIONS };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -793,6 +794,7 @@ public:
 	long onReservationProperties(FXObject*, FXSelector, void*);
 	long onDeleteReservation(FXObject*, FXSelector, void*);
 	long onConfigureOptions(FXObject*, FXSelector, void*);
+	long onServerOptions(FXObject*, FXSelector, void*);
 	long onDeleteScope(FXObject*, FXSelector, void*);
 	long onScopeProperties(FXObject*, FXSelector, void*);
 
@@ -821,6 +823,7 @@ FXDEFMAP(DhcpManager) DhcpManagerMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_RESPROPS, DhcpManager::onReservationProperties),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETERESERVATION, DhcpManager::onDeleteReservation),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_CONFIGOPTIONS, DhcpManager::onConfigureOptions),
+	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_SERVEROPTIONS, DhcpManager::onServerOptions),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_DELETESCOPE, DhcpManager::onDeleteScope),
 	FXMAPFUNC(SEL_COMMAND, DhcpManager::ID_SCOPEPROPS, DhcpManager::onScopeProperties),
 };
@@ -962,6 +965,37 @@ void DhcpManager::loadScopes() {
 		resItems.push_back(resItem);
 		optItems.push_back(optItem);
 	}
+
+	// "Serveroptionen" -- gleichrangig neben den Bereichen, fuer globale
+	// Optionen (Dhcp4-Ebene, oberhalb aller Bereiche), genau wie im Original.
+	serverOptions.clear();
+	long globalLease = 86400;
+	if (isValidConfig(conf)) {
+		auto& dhcp4 = conf.as_object().at("Dhcp4").as_object();
+		if (auto* vl = dhcp4.if_contains("valid-lifetime")) globalLease = vl->to_number<int64_t>();
+		ScopeOption lease;
+		lease.label = "051 Verbindungsdauer";
+		lease.value = FXString(std::to_string(globalLease).c_str()) + " s";
+		serverOptions.push_back(lease);
+		if (auto* opts = dhcp4.if_contains("option-data")) {
+			if (opts->is_array()) {
+				for (auto& ov : opts->as_array()) {
+					if (!ov.is_object()) continue;
+					FXString oname = jsonStr(ov.as_object(), "name");
+					FXString oval = jsonStr(ov.as_object(), "data");
+					ScopeOption opt;
+					if (oname == "routers") opt.label = "003 Router";
+					else if (oname == "domain-name-servers") opt.label = "006 DNS-Server";
+					else if (oname == "domain-name") opt.label = "015 Domänenname";
+					else opt.label = oname;
+					opt.value = oval;
+					serverOptions.push_back(opt);
+				}
+			}
+		}
+	}
+	serverOptionsItem = tree->appendItem(serverItem, "Serveroptionen", icoFolder, icoFolder);
+
 	tree->expandTree(serverItem);
 
 	// Leases den jeweiligen Bereichen zuordnen (fuer showListFor)
@@ -974,17 +1008,27 @@ void DhcpManager::showListFor(NodeKind kind, int scopeIdx) {
 	list->clearItems();
 	currentNodeKind = kind;
 	currentScopeForList = scopeIdx;
+
+	if (kind == NK_SERVEROPTIONS) {
+		setListColumns(list, { {"Option", 200}, {"Wert", 260} });
+		for (auto& o : serverOptions) {
+			FXString txt = o.label + "\t" + o.value;
+			list->appendItem(txt, icoFolder, icoFolder);
+		}
+		return;
+	}
+
 	if (scopeIdx < 0 || scopeIdx >= (int)scopes.size()) { setListColumns(list, {}); return; }
 	ScopeInfo& sc = scopes[scopeIdx];
 
 	if (kind == NK_POOL) {
-		setListColumns(list, { {"Startadresse", 160}, {"Endadresse", 160}, {"Typ", 140} });
+		setListColumns(list, { {"Startadresse", 160}, {"Endadresse", 160}, {"Beschreibung", 220} });
 		for (auto& p : sc.pools) {
-			FXString txt = p.start + "\t" + p.end + "\tAdresspool";
+			FXString txt = p.start + "\t" + p.end + "\tAdressbereich für Verteilung";
 			list->appendItem(txt, icoFolder, icoFolder);
 		}
 		for (auto& e : sc.exclusions) {
-			FXString txt = e.start + "\t" + e.end + "\tAusschlussbereich";
+			FXString txt = e.start + "\t" + e.end + "\tAdressbereich für Ausschluss";
 			list->appendItem(txt, icoDelete, icoDelete);
 		}
 	} else if (kind == NK_LEASES) {
@@ -1014,6 +1058,7 @@ void DhcpManager::showListFor(NodeKind kind, int scopeIdx) {
 long DhcpManager::onTreeChanged(FXObject*, FXSelector, void*) {
 	FXTreeItem* cur = tree->getCurrentItem();
 	if (!cur) return 1;
+	if (cur == serverOptionsItem) { showListFor(NK_SERVEROPTIONS, -1); return 1; }
 	for (size_t i = 0; i < scopeItems.size(); ++i) {
 		if (poolItems[i] == cur) { showListFor(NK_POOL, (int)i); return 1; }
 		if (leaseItems[i] == cur) { showListFor(NK_LEASES, (int)i); return 1; }
@@ -1042,6 +1087,8 @@ long DhcpManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 		new FXMenuCommand(&menu, "&Neuer Bereich...", NULL, this, ID_NEWSCOPE);
 		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
+	} else if (item == serverOptionsItem) {
+		new FXMenuCommand(&menu, "&Serveroptionen konfigurieren...", NULL, this, ID_SERVEROPTIONS);
 	} else if (contextScopeIdx >= 0) {
 		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
 		new FXMenuCommand(&menu, "E&igenschaften", NULL, this, ID_SCOPEPROPS);
@@ -1090,7 +1137,7 @@ long DhcpManager::onListRightClick(FXObject*, FXSelector, void* ptr) {
 	contextScopeIdx = currentScopeForList;
 
 	if (currentNodeKind == NK_POOL) {
-		if (col3 != "Ausschlussbereich") return 1; // Adresspool-Bloecke selbst sind nicht direkt loeschbar
+		if (col3 != "Adressbereich für Ausschluss") return 1; // Adresspool-Bloecke selbst sind nicht direkt loeschbar
 		contextExclStart = col1;
 		contextExclEnd = col2;
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETEEXCLUSION);
@@ -1140,6 +1187,21 @@ long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 	FXString startIp = dlg.getStartIp();
 	FXString endIp = dlg.getEndIp();
 	FXString mask = dlg.getMask();
+
+	// Absicherung gegen das leere/unausgefuellte Formular (alle Oktett-Felder
+	// stehen standardmaessig auf 0): ohne diese Pruefung entsteht sonst
+	// unbemerkt ein sinnloser Bereich "0.0.0.0/24".
+	if (ipToUint(startIp) == 0 || ipToUint(endIp) == 0) {
+		FXMessageBox::error(this, MBOX_OK, "Ungültige Adressen",
+			"Bitte eine echte Start- und End-IP-Adresse angeben (nicht 0.0.0.0).");
+		return 1;
+	}
+	if (ipToUint(startIp) > ipToUint(endIp)) {
+		FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+			"Die Start-IP-Adresse muss vor (oder gleich) der End-IP-Adresse liegen.");
+		return 1;
+	}
+
 	FXString cidr = computeSubnetCidr(startIp, mask);
 
 	json::value conf = loadKeaConfig();
@@ -1343,6 +1405,49 @@ long DhcpManager::onConfigureOptions(FXObject*, FXSelector, void*) {
 			+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
 	} else {
 		statuslbl->setText("Fehler beim Speichern der Bereichsoptionen.");
+	}
+	return 1;
+}
+
+long DhcpManager::onServerOptions(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Optionen gesetzt werden.");
+		return 1;
+	}
+
+	FXString router, dns, domain;
+	long lease = 86400;
+	for (auto& o : serverOptions) {
+		if (o.label == "003 Router") router = o.value;
+		else if (o.label == "006 DNS-Server") dns = o.value;
+		else if (o.label == "015 Domänenname") domain = o.value;
+		else if (o.label == "051 Verbindungsdauer") lease = atol(o.value.text());
+	}
+
+	ConfigureOptionsDialog dlg(this, "Server (alle Bereiche)", router, dns, domain, lease);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+	json::value conf = loadKeaConfig();
+	if (!isValidConfig(conf)) conf = buildSkeletonConfig();
+	auto& dhcp4 = conf.as_object().at("Dhcp4").as_object();
+
+	json::array opts;
+	FXString newRouter = dlg.getRouter();
+	FXString newDns = dlg.getDns();
+	FXString newDomain = dlg.getDomain();
+	if (!newRouter.empty()) opts.push_back(json::object{ {"name","routers"}, {"data", newRouter.text()} });
+	if (!newDns.empty()) opts.push_back(json::object{ {"name","domain-name-servers"}, {"data", newDns.text()} });
+	if (!newDomain.empty()) opts.push_back(json::object{ {"name","domain-name"}, {"data", newDomain.text()} });
+	dhcp4["option-data"] = opts;
+	dhcp4["valid-lifetime"] = dlg.getLease();
+
+	if (saveKeaConfig(conf)) {
+		bool restarted = restartKeaService();
+		onRefresh(NULL, 0, NULL);
+		statuslbl->setText(FXString("Serveroptionen aktualisiert.")
+			+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
+	} else {
+		statuslbl->setText("Fehler beim Speichern der Serveroptionen.");
 	}
 	return 1;
 }
