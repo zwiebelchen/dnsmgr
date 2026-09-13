@@ -17,7 +17,11 @@ FOX-Toolkit-Muster wie `dnsmgr` in diesem Repo. Backend: **Kea DHCPv4**
   `/etc/kea/kea-dhcp4.conf` fehlt oder keinen Bereich enthält
 - **Neuer Bereich...** (Assistent): Bereichsname, Beschreibung,
   Start-/End-IP-Adresse, Subnetzmaske -- Netz-CIDR wird automatisch
-  berechnet
+  berechnet. Validiert die Eingaben (keine 0.0.0.0-Adressen, Start ≤
+  Ende), bevor etwas geschrieben wird.
+- **Serveroptionen**: eigener Knoten gleichrangig neben den Bereichen
+  (wie im Original) -- globale Router/DNS-Server/Domänenname/
+  Verbindungsdauer auf Dhcp4-Ebene, unabhängig von einzelnen Bereichen.
 - **Neue Reservierung...**: legt sofort an und bleibt für weitere
   offen ("Hinzufügen"/"Schließen"), wie im Original. Rechtsklick auf
   eine bestehende Reservierung -> **Eigenschaften** (IP/MAC/Name
@@ -27,7 +31,9 @@ FOX-Toolkit-Muster wie `dnsmgr` in diesem Repo. Backend: **Kea DHCPv4**
   neu, indem der Ausschluss aus dem Adresspool herausgeschnitten wird
   (Kea kennt das Konzept selbst nicht -- wird über mehrere Pools
   nachgebildet). Adresspool-Ansicht zeigt Pool-Blöcke und
-  Ausschlussbereiche nebeneinander mit Typ-Spalte, wie im Original.
+  Ausschlussbereiche nebeneinander mit einer Beschreibung-Spalte
+  ("Adressbereich für Verteilung"/"Adressbereich für Ausschluss"),
+  exakt wie im Original.
   Rechtsklick auf einen Ausschlussbereich in der Liste -> **Löschen**
   fügt die Spanne wieder zusammenhängend in den Pool ein.
 - **Bereichsoptionen konfigurieren...**: Router (003), DNS-Server (006),
