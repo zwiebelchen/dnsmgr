@@ -63,15 +63,10 @@ static bool writeFileAsRoot(const FXString& path, const std::string& content) {
 	fwrite(content.data(), 1, content.size(), f);
 	fclose(f);
 
-	fprintf(stderr, "[DHCPMGR-DEBUG] writeFileAsRoot(): schreibe %zu Bytes nach %s (ueber %s)\n",
-	        content.size(), path.text(), tmpname);
-
 	int rc = runAsRoot({ FXString("cp"), FXString(tmpname), path });
-	fprintf(stderr, "[DHCPMGR-DEBUG] writeFileAsRoot(): 'cp' Rueckgabewert=%d\n", rc);
 	unlink(tmpname);
 	if (rc != 0) return false;
-	int rc2 = runAsRoot({ FXString("chmod"), FXString("644"), path });
-	fprintf(stderr, "[DHCPMGR-DEBUG] writeFileAsRoot(): 'chmod' Rueckgabewert=%d\n", rc2);
+	runAsRoot({ FXString("chmod"), FXString("644"), path });
 	return true;
 }
 
@@ -102,19 +97,13 @@ static std::string stripJsonComments(const std::string& in) {
 // leeres json::object zurueck (Aufrufer prueft ueber isValidConfig()).
 static json::value loadKeaConfig() {
 	std::ifstream in(KEA_CONF);
-	if (!in.is_open()) {
-		fprintf(stderr, "[DHCPMGR-DEBUG] loadKeaConfig(): Datei %s konnte nicht geoeffnet werden.\n", KEA_CONF);
-		return json::object();
-	}
+	if (!in.is_open()) return json::object();
 	std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 	in.close();
 	content = stripJsonComments(content);
 	try {
-		json::value v = json::parse(content);
-		fprintf(stderr, "[DHCPMGR-DEBUG] loadKeaConfig(): %zu Bytes gelesen, JSON-Parse OK.\n", content.size());
-		return v;
-	} catch (const std::exception& e) {
-		fprintf(stderr, "[DHCPMGR-DEBUG] loadKeaConfig(): JSON-PARSE FEHLGESCHLAGEN (%zu Bytes gelesen): %s\n", content.size(), e.what());
+		return json::parse(content);
+	} catch (...) {
 		return json::object();
 	}
 }
@@ -945,11 +934,7 @@ void DhcpManager::loadScopes() {
 	while (loop) { FXTreeItem* n = loop->getNext(); tree->removeItem(loop); loop = n; }
 
 	json::value conf = loadKeaConfig();
-	int subnetCountBefore = isValidConfig(conf) ? (int)conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array().size() : -1;
-	fprintf(stderr, "[DHCPMGR-DEBUG] loadScopes(): isValidConfig=%d, subnet4-Anzahl=%d, g_haveRoot=%d\n",
-	        isValidConfig(conf), subnetCountBefore, g_haveRoot);
 	if (g_haveRoot && !isValidConfig(conf)) {
-		fprintf(stderr, "[DHCPMGR-DEBUG] loadScopes(): Konfiguration UNGUELTIG -- seedDemoScopeOnDisk() wird jetzt aufgerufen!\n");
 		if (seedDemoScopeOnDisk()) {
 			statuslbl->setText("Keine Konfiguration gefunden -- Demo-Bereich nach /etc/kea/ geschrieben.");
 			conf = loadKeaConfig();
@@ -1216,6 +1201,14 @@ long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 			"Die Start-IP-Adresse muss vor (oder gleich) der End-IP-Adresse liegen.");
 		return 1;
 	}
+	{
+		uint32_t maskBits = (maskToPrefixLen(mask) == 0) ? 0 : (0xFFFFFFFFu << (32 - maskToPrefixLen(mask)));
+		if ((ipToUint(startIp) & maskBits) != (ipToUint(endIp) & maskBits)) {
+			FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+				"Start- und End-IP-Adresse müssen im selben Subnetz liegen (passend zur Subnetzmaske).");
+			return 1;
+		}
+	}
 
 	FXString cidr = computeSubnetCidr(startIp, mask);
 
@@ -1241,15 +1234,8 @@ long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 
 	conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array().push_back(subnet);
 
-	fprintf(stderr, "[DHCPMGR-DEBUG] onNewScope(): subnet4-Anzahl VOR dem Speichern=%zu, neuer CIDR=%s\n",
-	        conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array().size(), cidr.text());
-
-	bool saved = saveKeaConfig(conf);
-	fprintf(stderr, "[DHCPMGR-DEBUG] onNewScope(): saveKeaConfig() Rueckgabewert=%d\n", saved);
-
-	if (saved) {
+	if (saveKeaConfig(conf)) {
 		bool restarted = restartKeaService();
-		fprintf(stderr, "[DHCPMGR-DEBUG] onNewScope(): restartKeaService()=%d -- rufe jetzt onRefresh() auf\n", restarted);
 		onRefresh(NULL, 0, NULL);
 		statuslbl->setText("Bereich " + name + " (" + cidr + ") angelegt."
 			+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
@@ -1735,6 +1721,20 @@ int main(int argc, char* argv[]) {
 	// Root-Rechte anfragen, BEVOR das Hauptfenster aufgebaut wird -- wie
 	// bei dnsmgr: i2ksudo zeigt die GUI-Passwortabfrage im Win2k-Stil.
 	g_haveRoot = (runAsRoot({ FXString("true") }) == 0);
+
+	// Debian/Kea legt /etc/kea standardmaessig mit Modus 750 an (nur root
+	// + Gruppe duerfen das Verzeichnis betreten) -- anders als /etc/bind
+	// beim DNS-Manager, das i.d.R. 755 ist. Ohne diese Korrektur kann der
+	// normale Benutzer die Konfigurationsdatei nie lesen (selbst wenn sie
+	// selbst 644 ist), das Programm haelt die Config bei jedem Neuladen
+	// faelschlich fuer ungueltig und schreibt den Demo-Bereich erneut --
+	// und ueberschreibt damit alles, was der Benutzer gerade erst angelegt
+	// hat. Einmalig beim Start beheben, dann funktioniert das ganz normale
+	// unprivilegierte Lesen in loadKeaConfig().
+	if (g_haveRoot) {
+		runAsRoot({ FXString("mkdir"), FXString("-p"), FXString("/etc/kea") });
+		runAsRoot({ FXString("chmod"), FXString("755"), FXString("/etc/kea") });
+	}
 
 	DhcpManager* win = new DhcpManager(&application);
 	application.create();
