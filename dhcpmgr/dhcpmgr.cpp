@@ -160,6 +160,17 @@ static FXString computeSubnetCidr(const FXString& startIp, const FXString& mask)
 	return uintToIp(network) + "/" + FXString(std::to_string(prefix).c_str());
 }
 
+// Liest die Praefixlaenge aus einem "a.b.c.d/nn"-CIDR-String und gibt
+// die zugehoerige Subnetzmaske in Punktnotation zurueck -- fuer die
+// (nur informative) Anzeige in den Bereichseigenschaften.
+static FXString maskFromCidr(const FXString& cidr) {
+	int slash = cidr.find('/');
+	if (slash < 0) return "255.255.255.0";
+	int prefixLen = atoi(cidr.mid(slash + 1, cidr.length() - slash - 1).text());
+	uint32_t maskBits = (prefixLen == 0) ? 0 : (0xFFFFFFFFu << (32 - prefixLen));
+	return uintToIp(maskBits);
+}
+
 // ---------------------------------------------------------------------
 // Datenmodell fuer einen Bereich (Scope), aus dem geparsten Kea-JSON
 // ---------------------------------------------------------------------
@@ -538,39 +549,107 @@ FXIMPLEMENT(NewScopeWizardDialog, FXDialogBox, NULL, 0)
 // Dialog "Eigenschaften" eines Bereichs -- reine Anzeige, angelehnt an
 // den "Allgemein"-Tab der Original-Bereichseigenschaften.
 // ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" eines Bereichs -- editierbar, angelehnt an den
+// "Allgemein"-Tab der Original-Bereichseigenschaften: Bereichsname,
+// Adressbereich (Erste/Letzte IP-Adresse), Subnetzmaske (nur Anzeige --
+// die aendert sich nicht mehr, ohne den Bereich neu anzulegen),
+// Gueltigkeitsdauer der Lease (begrenzt in Tagen/Stunden/Minuten oder
+// unbegrenzt), Beschreibung.
+// ---------------------------------------------------------------------
 class ScopePropertiesDialog : public FXDialogBox {
 	FXDECLARE(ScopePropertiesDialog)
+private:
+	FXTextField *nameField, *descField;
+	IpQuad startIp, endIp;
+	FXTextField *daysField, *hoursField, *minutesField;
+	FXRadioButton *rbLimited, *rbUnlimited;
 protected:
 	ScopePropertiesDialog() {}
 public:
+	enum { ID_LIMITED = FXDialogBox::ID_LAST, ID_UNLIMITED };
+
+	long onLeaseMode(FXObject* sender, FXSelector, void*) {
+		bool unlimited = (sender == rbUnlimited);
+		rbLimited->setCheck(!unlimited);
+		rbUnlimited->setCheck(unlimited);
+		daysField->disable(); hoursField->disable(); minutesField->disable();
+		if (!unlimited) { daysField->enable(); hoursField->enable(); minutesField->enable(); }
+		return 1;
+	}
+
 	ScopePropertiesDialog(FXWindow* owner, const ScopeInfo& sc)
-		: FXDialogBox(owner, "Eigenschaften von " + sc.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,380,0, 0,0,0,0) {
+		: FXDialogBox(owner, "Eigenschaften von " + sc.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0, 0,0,0,0) {
 
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		FXMatrix* grid = new FXMatrix(main, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 4,2);
-		auto addRow = [&](const char* label, const FXString& value) {
-			new FXLabel(grid, label);
-			FXTextField* tf = new FXTextField(grid, 24, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-			tf->setText(value);
-			tf->disable();
-		};
-		addRow("Bereichsname:", sc.name);
-		addRow("Beschreibung:", sc.description);
-		addRow("Netz:", sc.subnetCidr);
-		if (!sc.pools.empty()) {
-			addRow("Startadresse:", sc.pools[0].start);
-			addRow("Endadresse:", sc.pools[0].end);
-		}
-		addRow("Verbindungsdauer:", FXString(std::to_string(sc.validLifetime).c_str()) + " s");
+
+		new FXLabel(main, "Bereichsname:");
+		nameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		nameField->setText(sc.name);
+
+		new FXLabel(main, "Erste IP-Adresse:");
+		startIp.build(main);
+		if (!sc.pools.empty()) startIp.set(sc.pools[0].start);
+
+		new FXLabel(main, "Letzte IP-Adresse:");
+		endIp.build(main);
+		if (!sc.pools.empty()) endIp.set(sc.pools[0].end);
+
+		new FXLabel(main, "Subnetzmaske: " + maskFromCidr(sc.subnetCidr) + "  (Netz: " + sc.subnetCidr + ")");
+
+		FXGroupBox* leaseBox = new FXGroupBox(main, "Gültigkeitsdauer der Lease für DHCP-Clients", FRAME_GROOVE | LAYOUT_FILL_X);
+		FXVerticalFrame* leaseFrame = new FXVerticalFrame(leaseBox, LAYOUT_FILL_X, 0,0,0,0, 6,6,6,6);
+
+		rbLimited = new FXRadioButton(leaseFrame, "Begrenzt auf:", this, ID_LIMITED);
+		FXMatrix* dhm = new FXMatrix(leaseFrame, 3, MATRIX_BY_COLUMNS, 0,0,0,0, 20,0,0,0, 8,2);
+		new FXLabel(dhm, "Tage:"); new FXLabel(dhm, "Stunden:"); new FXLabel(dhm, "Minuten:");
+		long lease = sc.validLifetime;
+		bool unlimited = lease >= 2147483647L;
+		long days = lease / 86400, rem = lease % 86400;
+		long hours = rem / 3600; rem %= 3600;
+		long minutes = rem / 60;
+		daysField = new FXTextField(dhm, 4, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X);
+		daysField->setText(FXString(std::to_string(unlimited ? 0 : days).c_str()));
+		hoursField = new FXTextField(dhm, 4, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X);
+		hoursField->setText(FXString(std::to_string(unlimited ? 0 : hours).c_str()));
+		minutesField = new FXTextField(dhm, 4, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X);
+		minutesField->setText(FXString(std::to_string(unlimited ? 0 : minutes).c_str()));
+
+		rbUnlimited = new FXRadioButton(leaseFrame, "Unbegrenzt", this, ID_UNLIMITED);
+		rbLimited->setCheck(!unlimited);
+		rbUnlimited->setCheck(unlimited);
+		if (unlimited) { daysField->disable(); hoursField->disable(); minutesField->disable(); }
+
+		new FXLabel(main, "Beschreibung:");
+		descField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		descField->setText(sc.description);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
 		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT,
 		             BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL,
+		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+
+	FXString getName() const { return nameField->getText().trim(); }
+	FXString getDescription() const { return descField->getText(); }
+	FXString getStartIp() const { return startIp.get(); }
+	FXString getEndIp() const { return endIp.get(); }
+	long getLeaseSeconds() const {
+		if (rbUnlimited->getCheck()) return 2147483647L; // vom DHCP-Protokoll her die groesstmoegliche Lease-Dauer
+		long d = atol(daysField->getText().text());
+		long h = atol(hoursField->getText().text());
+		long m = atol(minutesField->getText().text());
+		return d*86400 + h*3600 + m*60;
 	}
 	virtual ~ScopePropertiesDialog() {}
 };
-FXIMPLEMENT(ScopePropertiesDialog, FXDialogBox, NULL, 0)
+FXDEFMAP(ScopePropertiesDialog) ScopePropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ScopePropertiesDialog::ID_LIMITED, ScopePropertiesDialog::onLeaseMode),
+	FXMAPFUNC(SEL_COMMAND, ScopePropertiesDialog::ID_UNLIMITED, ScopePropertiesDialog::onLeaseMode),
+};
+FXIMPLEMENT(ScopePropertiesDialog, FXDialogBox, ScopePropertiesDialogMap, ARRAYNUMBER(ScopePropertiesDialogMap))
 
 // ---------------------------------------------------------------------
 // Dialog "Bereichsoptionen konfigurieren" -- Router (003), DNS-Server
@@ -1280,8 +1359,70 @@ long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 
 long DhcpManager::onScopeProperties(FXObject*, FXSelector, void*) {
 	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
-	ScopePropertiesDialog dlg(this, scopes[contextScopeIdx]);
-	dlg.execute(PLACEMENT_OWNER);
+	ScopeInfo sc = scopes[contextScopeIdx];
+	FXString scopeCidr = sc.subnetCidr;
+
+	ScopePropertiesDialog dlg(this, sc);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
+		return 1;
+	}
+
+	FXString newName = dlg.getName();
+	if (newName.empty()) newName = sc.name;
+	FXString newDesc = dlg.getDescription();
+	FXString newStart = dlg.getStartIp();
+	FXString newEnd = dlg.getEndIp();
+	long newLease = dlg.getLeaseSeconds();
+
+	// Absicherung: der neue Adressbereich muss weiterhin zum bestehenden
+	// Netz passen -- die Subnetzmaske selbst aendert dieser Dialog nicht
+	// (das entspricht dem Original, wo das Feld dort ausgegraut ist).
+	int slash = scopeCidr.find('/');
+	int prefixLen = (slash >= 0) ? atoi(scopeCidr.mid(slash + 1, scopeCidr.length() - slash - 1).text()) : 24;
+	uint32_t maskBits = (prefixLen == 0) ? 0 : (0xFFFFFFFFu << (32 - prefixLen));
+	uint32_t network = (slash >= 0) ? ipToUint(scopeCidr.left(slash)) : 0;
+
+	if (ipToUint(newStart) > ipToUint(newEnd)) {
+		FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+			"Die erste IP-Adresse muss vor (oder gleich) der letzten IP-Adresse liegen.");
+		return 1;
+	}
+	if ((ipToUint(newStart) & maskBits) != network || (ipToUint(newEnd) & maskBits) != network) {
+		FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+			"Erste und letzte IP-Adresse müssen im Netz %s liegen.\n"
+			"Um das Netz selbst zu ändern, muss ein neuer Bereich angelegt werden.", scopeCidr.text());
+		return 1;
+	}
+
+	json::value conf = loadKeaConfig();
+	if (!isValidConfig(conf)) { statuslbl->setText("Konfiguration nicht gefunden."); return 1; }
+	bool found = false;
+	for (auto& sv : conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array()) {
+		if (!sv.is_object() || jsonStr(sv.as_object(), "subnet") != scopeCidr) continue;
+		found = true;
+		sv.as_object()["pools"] = json::array{ json::object{ {"pool", (newStart + " - " + newEnd).text()} } };
+		sv.as_object()["valid-lifetime"] = newLease;
+		if (!sv.as_object().if_contains("user-context") || !sv.as_object().at("user-context").is_object()) {
+			sv.as_object()["user-context"] = json::object{};
+		}
+		auto& uc = sv.as_object().at("user-context").as_object();
+		uc["name"] = newName.text();
+		uc["description"] = newDesc.text();
+		break;
+	}
+	if (!found) { statuslbl->setText("Bereich nicht gefunden."); return 1; }
+
+	if (saveKeaConfig(conf)) {
+		bool restarted = restartKeaService();
+		onRefresh(NULL, 0, NULL);
+		statuslbl->setText("Eigenschaften von " + newName + " aktualisiert."
+			+ (restarted ? FXString("") : FXString(" Achtung: kea-dhcp4-server konnte nicht neu gestartet werden -- bitte manuell prüfen.")));
+	} else {
+		statuslbl->setText("Fehler beim Speichern der Bereichseigenschaften.");
+	}
 	return 1;
 }
 
