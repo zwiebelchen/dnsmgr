@@ -428,15 +428,32 @@ static bool seedDemoScopeOnDisk() {
 // ---------------------------------------------------------------------
 // Kleiner wiederverwendbarer 4-Oktett-IP-Eingabewidget-Helfer
 // ---------------------------------------------------------------------
-struct IpQuad {
+// Nachbau des klassischen Windows-IP-Adressfelds: springt automatisch
+// zum naechsten Oktett weiter, sobald 3 Ziffern eingegeben wurden --
+// genau wie im Original (z.B. beim Ausschluss-Dialog).
+class IpQuad : public FXObject {
+	FXDECLARE(IpQuad)
+public:
 	FXTextField *o1, *o2, *o3, *o4;
+	enum { ID_O1 = 1, ID_O2, ID_O3 };
+
+	long onOctetChanged(FXObject* sender, FXSelector, void*) {
+		FXTextField* tf = (FXTextField*)sender;
+		FXTextField* next = (tf == o1) ? o2 : (tf == o2) ? o3 : (tf == o3) ? o4 : NULL;
+		if (next && tf->getText().length() >= 3) {
+			next->setFocus();
+			next->selectAll();
+		}
+		return 1;
+	}
+
 	void build(FXComposite* parent) {
 		FXHorizontalFrame* f = new FXHorizontalFrame(parent, 0,0,0,0,0, 0,0,0,0, 1,1);
-		o1 = new FXTextField(f, 3, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X); o1->setText("0");
+		o1 = new FXTextField(f, 3, this, ID_O1, FRAME_SUNKEN | JUSTIFY_CENTER_X); o1->setText("0");
 		new FXLabel(f, ".");
-		o2 = new FXTextField(f, 3, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X); o2->setText("0");
+		o2 = new FXTextField(f, 3, this, ID_O2, FRAME_SUNKEN | JUSTIFY_CENTER_X); o2->setText("0");
 		new FXLabel(f, ".");
-		o3 = new FXTextField(f, 3, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X); o3->setText("0");
+		o3 = new FXTextField(f, 3, this, ID_O3, FRAME_SUNKEN | JUSTIFY_CENTER_X); o3->setText("0");
 		new FXLabel(f, ".");
 		o4 = new FXTextField(f, 3, NULL, 0, FRAME_SUNKEN | JUSTIFY_CENTER_X); o4->setText("0");
 	}
@@ -450,10 +467,22 @@ struct IpQuad {
 			o4->setText(c.mid(d3+1, c.length()-d3-1));
 		}
 	}
+	// Leert alle vier Felder -- fuer optionale Adressen (z.B. "Letzte
+	// IP-Adresse" beim Ausschluss-Dialog, die im Original leer bleiben darf).
+	void clear() { o1->setText(""); o2->setText(""); o3->setText(""); o4->setText(""); }
+	FXbool isEmpty() const {
+		return o1->getText().empty() && o2->getText().empty() && o3->getText().empty() && o4->getText().empty();
+	}
 	FXString get() const {
 		return o1->getText() + "." + o2->getText() + "." + o3->getText() + "." + o4->getText();
 	}
 };
+FXDEFMAP(IpQuad) IpQuadMap[] = {
+	FXMAPFUNC(SEL_CHANGED, IpQuad::ID_O1, IpQuad::onOctetChanged),
+	FXMAPFUNC(SEL_CHANGED, IpQuad::ID_O2, IpQuad::onOctetChanged),
+	FXMAPFUNC(SEL_CHANGED, IpQuad::ID_O3, IpQuad::onOctetChanged),
+};
+FXIMPLEMENT(IpQuad, FXObject, IpQuadMap, ARRAYNUMBER(IpQuadMap))
 
 // ---------------------------------------------------------------------
 // Assistent "Neuer Bereich" -- Name/Beschreibung, Start-/End-IP,
@@ -709,18 +738,21 @@ public:
 	long onAddExclusion(FXObject*, FXSelector, void*);
 
 	NewExclusionDialog(FXWindow* owner, DhcpManager* m, int sIdx, const FXString& scopeName)
-		: FXDialogBox(owner, "Neuer Ausschlussbereich", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,380,0, 0,0,0,0),
+		: FXDialogBox(owner, "Ausschluss hinzufügen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0, 0,0,0,0),
 		  mgr(m), scopeIdx(sIdx) {
 
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		new FXLabel(main, "Neuer Ausschlussbereich in Bereich: " + scopeName);
-		new FXLabel(main, "(Für eine einzelne Adresse Start- und End-Adresse gleich lassen.)");
+		new FXLabel(main,
+			"Geben Sie den IP-Adressbereich an, den Sie ausschließen möchten.\n"
+			"Wenn Sie eine einzelne IP-Adresse ausschließen möchten, geben Sie\n"
+			"nur die Adresse in \"Erste IP-Adresse\" an.",
+			NULL, JUSTIFY_LEFT);
 
-		new FXLabel(main, "Start-IP-Adresse:");
+		new FXLabel(main, "Erste IP-Adresse:");
 		startIp.build(main);
-		new FXLabel(main, "End-IP-Adresse:");
+		new FXLabel(main, "Letzte IP-Adresse:");
 		endIp.build(main);
-		endIp.set("0.0.0.0");
+		endIp.clear(); // bleibt leer, bis der Benutzer eine echte Bereichsobergrenze eingibt
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -729,7 +761,7 @@ public:
 		new FXButton(btnf, "&Schließen", NULL, this, FXDialogBox::ID_CANCEL,
 		             BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
 	}
-	void resetFields() { startIp.set("0.0.0.0"); endIp.set("0.0.0.0"); }
+	void resetFields() { startIp.set("0.0.0.0"); endIp.clear(); }
 	virtual ~NewExclusionDialog() {}
 };
 FXDEFMAP(NewExclusionDialog) NewExclusionDialogMap[] = {
@@ -766,7 +798,7 @@ private:
 	std::vector<ScopeOption> serverOptions; // globale Optionen, unabhaengig von einem Bereich
 	std::vector<ScopeInfo> scopes;
 
-	FXIcon *icoRoot, *icoServer, *icoFolder, *icoClock, *icoKey;
+	FXIcon *icoRoot, *icoServer, *icoFolder, *icoClock, *icoKey, *icoComputer;
 	FXIcon *icoBack, *icoForward, *icoUp, *icoContree, *icoProperties, *icoRefresh, *icoHelp, *icoDelete;
 
 	int contextScopeIdx;      // Bereich, auf dem das Kontextmenue geoeffnet wurde
@@ -917,6 +949,7 @@ DhcpManager::DhcpManager(FXApp* a)
 	icoFolder = new FXPNGIcon(getApp(), resico_folder, IMAGE_NEAREST); icoFolder->create();
 	icoClock = new FXPNGIcon(getApp(), resico_clock, IMAGE_NEAREST); icoClock->create();
 	icoKey = new FXPNGIcon(getApp(), resico_key, IMAGE_NEAREST); icoKey->create();
+	icoComputer = new FXPNGIcon(getApp(), resico_computer, IMAGE_NEAREST); icoComputer->create();
 
 	char hostname[256];
 	gethostname(hostname, sizeof(hostname));
@@ -1025,7 +1058,7 @@ void DhcpManager::showListFor(NodeKind kind, int scopeIdx) {
 		setListColumns(list, { {"Startadresse", 160}, {"Endadresse", 160}, {"Beschreibung", 220} });
 		for (auto& p : sc.pools) {
 			FXString txt = p.start + "\t" + p.end + "\tAdressbereich für Verteilung";
-			list->appendItem(txt, icoFolder, icoFolder);
+			list->appendItem(txt, icoComputer, icoComputer);
 		}
 		for (auto& e : sc.exclusions) {
 			FXString txt = e.start + "\t" + e.end + "\tAdressbereich für Ausschluss";
@@ -1696,7 +1729,9 @@ long NewReservationDialog::onAddReservation(FXObject*, FXSelector, void*) {
 
 long NewExclusionDialog::onAddExclusion(FXObject*, FXSelector, void*) {
 	FXString startVal = startIp.get();
-	FXString endVal = endIp.get();
+	// "Letzte IP-Adresse" ist optional -- bleibt sie leer, wird wie im
+	// Original nur die eine Adresse aus "Erste IP-Adresse" ausgeschlossen.
+	FXString endVal = endIp.isEmpty() ? startVal : endIp.get();
 	FXString errorMsg;
 	if (mgr->createExclusion(scopeIdx, startVal, endVal, errorMsg)) {
 		FXMessageBox::information(this, MBOX_OK, "Neuer Ausschlussbereich",
