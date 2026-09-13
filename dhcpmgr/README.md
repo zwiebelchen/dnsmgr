@@ -38,7 +38,11 @@ FOX-Toolkit-Muster wie `dnsmgr` in diesem Repo. Backend: **Kea DHCPv4**
   fügt die Spanne wieder zusammenhängend in den Pool ein.
 - **Bereichsoptionen konfigurieren...**: Router (003), DNS-Server (006),
   Domänenname (015), Verbindungsdauer (051)
-- **Eigenschaften**/**Löschen** je Bereich, **Aktualisieren** überall
+- **Eigenschaften** je Bereich -- editierbar: Bereichsname, Beschreibung,
+  Erste/Letzte IP-Adresse (Adressbereich direkt ändern), Gültigkeitsdauer
+  der Lease (Begrenzt auf Tage/Stunden/Minuten oder Unbegrenzt), genau
+  wie im Original. Subnetzmaske bleibt Anzeige-only. / **Löschen** je
+  Bereich, **Aktualisieren** überall
 - Liest aktive Leases aus `/var/lib/kea/kea-leases4.csv` (reine Anzeige)
 - Nach jedem Speichern wird `systemctl restart kea-dhcp4-server`
   automatisch ausgeführt; schlägt der Neustart fehl, erscheint eine
