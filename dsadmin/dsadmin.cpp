@@ -14,6 +14,73 @@
 #include <FXPNGIcon.h>
 #include <FXGIFIcon.h>
 #include "res/foxres.h"
+#include "admparser.h"
+#include "regpol.h"
+#include <algorithm>
+#include <map>
+
+// ---------------------------------------------------------------------
+// Richtlinienzustand aus einem bestehenden Registry.pol ableiten --
+// hier schon vor den Dialog-Klassen definiert, da PolicyEditDialog
+// (weiter unten) den Typ PolicyState in seiner Konstruktor-Signatur
+// braucht.
+// ---------------------------------------------------------------------
+enum PolicyState { POLSTATE_NOT_CONFIGURED, POLSTATE_ENABLED, POLSTATE_DISABLED };
+
+struct RegLookup {
+	// Schluessel: (Registrierungsschluessel in Kleinbuchstaben, Wertname in
+	// Kleinbuchstaben) -- fuer verlaessliche Gross-/Kleinschreibungs-
+	// unabhaengige Suche, genau wie die echte Registrierung es handhabt.
+	std::map<std::pair<std::string, std::string>, RegPolEntry> values;
+};
+
+static std::string lowerCopy(const std::string& s) {
+	std::string r = s;
+	std::transform(r.begin(), r.end(), r.begin(), [](unsigned char c) { return std::tolower(c); });
+	return r;
+}
+
+static RegLookup buildRegLookup(const RegPolFile& file) {
+	RegLookup lk;
+	for (auto& e : file.entries) {
+		lk.values[{ lowerCopy(e.key), lowerCopy(e.valuename) }] = e;
+	}
+	return lk;
+}
+
+// Ermittelt den fuer eine Richtlinie tatsaechlich zustaendigen
+// Registrierungsschluessel: eigener KEYNAME, sonst der naechste in der
+// Kategorie-Kette definierte.
+static std::string resolveEffectiveKey(const AdmPolicy& pol, const std::vector<const AdmCategory*>& categoryChain) {
+	if (!pol.keyname.empty()) return pol.keyname;
+	for (auto it = categoryChain.rbegin(); it != categoryChain.rend(); ++it) {
+		if (!(*it)->keyname.empty()) return (*it)->keyname;
+	}
+	return "";
+}
+
+static PolicyState determinePolicyState(const AdmPolicy& pol, const std::string& effectiveKey, const RegLookup& lk) {
+	if (pol.hasValueOnOff) {
+		auto it = lk.values.find({ lowerCopy(effectiveKey), lowerCopy(pol.valuename) });
+		if (it == lk.values.end()) return POLSTATE_NOT_CONFIGURED;
+		// Wert vorhanden -- vergleiche den Dateninhalt mit VALUEON/VALUEOFF.
+		if (it->second.type == REG_TYPE_DWORD && it->second.data.size() >= 4) {
+			uint32_t v = (uint32_t)it->second.data[0] | ((uint32_t)it->second.data[1] << 8)
+			           | ((uint32_t)it->second.data[2] << 16) | ((uint32_t)it->second.data[3] << 24);
+			if (std::to_string(v) == pol.valueOn) return POLSTATE_ENABLED;
+			if (std::to_string(v) == pol.valueOff) return POLSTATE_DISABLED;
+		}
+		return POLSTATE_ENABLED; // Wert vorhanden, aber nicht eindeutig zuordenbar -- als aktiviert werten
+	}
+	if (!pol.parts.empty()) {
+		for (auto& part : pol.parts) {
+			std::string vn = !part.valuename.empty() ? part.valuename : pol.valuename;
+			if (lk.values.count({ lowerCopy(effectiveKey), lowerCopy(vn) })) return POLSTATE_ENABLED;
+		}
+		return POLSTATE_NOT_CONFIGURED;
+	}
+	return POLSTATE_NOT_CONFIGURED;
+}
 
 #include <stdio.h>
 #include <string.h>
@@ -488,6 +555,155 @@ static bool unlinkGpo(FXWindow* owner, const FXString& guid, const FXString& con
 // ---------------------------------------------------------------------
 // Dialog "Neuer Benutzer"
 // ---------------------------------------------------------------------
+static const char* ADM_DIR = "/usr/local/share/ice2k/adm";
+
+static bool haveAdmFiles() {
+	FXString path = FXString(ADM_DIR) + "/system.adm";
+	return access(path.text(), F_OK) == 0;
+}
+
+static bool haveMsiextract() {
+	return access("/usr/bin/msiextract", F_OK) == 0;
+}
+
+static bool installMsiextract(std::string& log, FXString& errorMsg) {
+	log += "Installiere msitools (zum Entpacken der .msi-Datei)...\n";
+	runAsRootCaptured({ FXString("apt-get"), FXString("update") }, log);
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("env"), FXString("DEBIAN_FRONTEND=noninteractive"),
+	                              FXString("apt-get"), FXString("install"), FXString("-y"),
+	                              FXString("-o"), FXString("Dpkg::Options::=--force-confold"),
+	                              FXString("msitools") }, out);
+	log += out + "\n";
+	if (rc != 0 || !haveMsiextract()) {
+		errorMsg = "Installation von msitools ist fehlgeschlagen (siehe Protokoll).";
+		return false;
+	}
+	log += "msitools erfolgreich installiert.\n";
+	return true;
+}
+
+// Versucht das .msi automatisch herunterzuladen. Da die Microsoft-
+// Downloadseite ihren tatsaechlichen Dateilink per JavaScript erzeugt,
+// ist dieser direkte Link ohne Garantie -- schlaegt er fehl, wird auf
+// den manuellen Weg zurueckgefallen (siehe downloadAndExtractAdmFiles).
+static bool tryAutoDownloadMsi(const FXString& destPath, std::string& log) {
+	log += "Versuche automatischen Download von " + std::string(destPath.text()) + "...\n";
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("wget"), FXString("-q"), FXString("-O"), destPath,
+	                              FXString("https://download.microsoft.com/download/f/0/0/f00b6d78-011f-42d5-b2e5-2f5e0f2e6b0c/2000admsetup.msi") }, out);
+	log += out + "\n";
+	if (rc != 0 || access(destPath.text(), F_OK) != 0) {
+		runAsRoot({ FXString("rm"), FXString("-f"), destPath });
+		return false;
+	}
+	return true;
+}
+
+static bool extractAdmFromMsi(const FXString& msiPath, std::string& log, FXString& errorMsg) {
+	log += "Entpacke ADM-Dateien aus " + std::string(msiPath.text()) + "...\n";
+	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(ADM_DIR) });
+	FXString tmpDir = "/tmp/ice2k-adm-extract";
+	runAsRoot({ FXString("rm"), FXString("-rf"), tmpDir });
+	runAsRoot({ FXString("mkdir"), FXString("-p"), tmpDir });
+
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("msiextract"), FXString("-C"), tmpDir, msiPath }, out);
+	log += out + "\n";
+	if (rc != 0) { errorMsg = "msiextract ist fehlgeschlagen (siehe Protokoll)."; return false; }
+
+	// Die .adm-Dateien liegen im MSI ueblicherweise direkt im Wurzel-
+	// verzeichnis oder einem Unterordner -- wir suchen rekursiv und
+	// kopieren alle Fundstellen in unser ADM-Verzeichnis.
+	out.clear();
+	rc = runAsRootCaptured({ FXString("bash"), FXString("-c"),
+		FXString("find '") + tmpDir + "' -iname '*.adm' -exec cp {} " + FXString(ADM_DIR) + "/ \\;" }, out);
+	runAsRoot({ FXString("rm"), FXString("-rf"), tmpDir });
+
+	if (!haveAdmFiles()) {
+		errorMsg = "Nach dem Entpacken wurden keine .adm-Dateien in " + FXString(ADM_DIR) + " gefunden.";
+		return false;
+	}
+	log += "ADM-Dateien erfolgreich nach " + std::string(ADM_DIR) + " kopiert.\n";
+	return true;
+}
+
+// Kompletter Ablauf: Werkzeuge pruefen/installieren, Download versuchen,
+// bei Fehlschlag manuell nachfragen (Datei-Auswahldialog fuer ein
+// bereits von Hand heruntergeladenes .msi), dann entpacken.
+static bool downloadAndExtractAdmFiles(FXWindow* owner, std::string& log, FXString& errorMsg) {
+	if (!haveMsiextract()) {
+		if (!installMsiextract(log, errorMsg)) return false;
+	}
+
+	FXString msiPath = "/tmp/2000admsetup.msi";
+	runAsRoot({ FXString("rm"), FXString("-f"), msiPath });
+
+	if (!tryAutoDownloadMsi(msiPath, log)) {
+		log += "Automatischer Download nicht erfolgreich.\n";
+		FXMessageBox::information(owner, MBOX_OK, "Manueller Download nötig",
+			"Der automatische Download hat nicht funktioniert.\n\n"
+			"Bitte lade das Paket \"2000admsetup.msi\" manuell von\n"
+			"https://www.microsoft.com/en-us/download/details.aspx?id=18664\n"
+			"herunter und wähle es im nächsten Dialog aus.");
+		FXString picked = FXFileDialog::getOpenFilename(owner, "2000admsetup.msi auswählen", FXSystem::getHomeDirectory(), "MSI-Dateien (*.msi)");
+		if (picked.empty()) { errorMsg = "Kein Download und keine Datei ausgewählt."; return false; }
+		std::string out;
+		runAsRootCaptured({ FXString("cp"), picked, msiPath }, out);
+	}
+
+	bool ok = extractAdmFromMsi(msiPath, log, errorMsg);
+	runAsRoot({ FXString("rm"), FXString("-f"), msiPath });
+	return ok;
+}
+
+// ---------------------------------------------------------------------
+// ADM-Dateien laden und zusammenfuehren -- mehrere .adm-Dateien
+// (system.adm, inetres.adm, ...) tragen oft zu denselben Ober-
+// kategorien bei (z.B. "Windows-Komponenten"). Wir fuehren
+// gleichnamige Kategorien rekursiv zusammen, damit im Baum keine
+// Dopplungen entstehen.
+// ---------------------------------------------------------------------
+static void mergeCategoryInto(AdmCategory& target, AdmCategory&& src) {
+	if (target.keyname.empty()) target.keyname = src.keyname;
+	for (auto& sc : src.subCategories) {
+		bool merged = false;
+		for (auto& tc : target.subCategories) {
+			if (tc.label == sc.label) { mergeCategoryInto(tc, std::move(sc)); merged = true; break; }
+		}
+		if (!merged) target.subCategories.push_back(std::move(sc));
+	}
+	for (auto& p : src.policies) target.policies.push_back(std::move(p));
+}
+
+static void mergeCategoriesInto(std::vector<AdmCategory>& target, std::vector<AdmCategory>&& src) {
+	for (auto& sc : src) {
+		bool merged = false;
+		for (auto& tc : target) {
+			if (tc.label == sc.label) { mergeCategoryInto(tc, std::move(sc)); merged = true; break; }
+		}
+		if (!merged) target.push_back(std::move(sc));
+	}
+}
+
+// Laedt alle .adm-Dateien aus ADM_DIR und liefert die zusammengefuehrten
+// Ober-Kategorien fuer eine gegebene CLASS ("MACHINE" oder "USER").
+static std::vector<AdmCategory> loadMergedAdmCategories(const std::string& wantClass) {
+	std::vector<AdmCategory> result;
+	std::string out;
+	runAsRootCaptured({ FXString("bash"), FXString("-c"), FXString("ls ") + ADM_DIR + "/*.adm 2>/dev/null" }, out);
+	for (auto& fname : splitLines(out)) {
+		if (fname.empty()) continue;
+		AdmFile file = parseAdmFile(fname);
+		if (!file.parseError.empty()) continue;
+		for (auto& cls : file.classes) {
+			if (cls.classType != wantClass) continue;
+			mergeCategoriesInto(result, std::move(cls.topCategories));
+		}
+	}
+	return result;
+}
+
 class NewUserDialog : public FXDialogBox {
 	FXDECLARE(NewUserDialog)
 private:
@@ -641,6 +857,374 @@ FXDEFMAP(GroupMembersDialog) GroupMembersDialogMap[] = {
 FXIMPLEMENT(GroupMembersDialog, FXDialogBox, GroupMembersDialogMap, ARRAYNUMBER(GroupMembersDialogMap))
 
 // ---------------------------------------------------------------------
+// Dialog "Eigenschaften" einer einzelnen Richtlinie -- Nicht
+// konfiguriert/Aktiviert/Deaktiviert plus (falls vorhanden) das
+// Eingabefeld des ersten Parts. Mehrere Parts pro Richtlinie werden in
+// dieser ersten Version noch nicht unterstuetzt (in der Praxis haben
+// die meisten Richtlinien hoechstens einen Part).
+// ---------------------------------------------------------------------
+class PolicyEditDialog : public FXDialogBox {
+	FXDECLARE(PolicyEditDialog)
+private:
+	const AdmPolicy* policy;
+	FXint stateVar = 0; // 0=Nicht konfiguriert, 1=Aktiviert, 2=Deaktiviert
+	FXDataTarget* stateTarget = NULL;
+	FXCheckButton* partCheckbox = NULL;
+	FXTextField* partTextField = NULL;
+	FXComboBox* partCombo = NULL;
+	std::vector<AdmItem> comboItems;
+protected:
+	PolicyEditDialog() {}
+public:
+	enum { ID_STATE = FXDialogBox::ID_LAST };
+	long onStateChanged(FXObject*, FXSelector, void*) {
+		bool enabled = (stateVar == 1);
+		if (partCheckbox) enabled ? partCheckbox->enable() : partCheckbox->disable();
+		if (partTextField) enabled ? partTextField->enable() : partTextField->disable();
+		if (partCombo) enabled ? partCombo->enable() : partCombo->disable();
+		return 1;
+	}
+
+	PolicyEditDialog(FXWindow* owner, const AdmPolicy& pol, PolicyState initialState, const std::string& initialPartValue)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + pol.label.c_str(), DECOR_TITLE | DECOR_BORDER, 0,0,440,0),
+		  policy(&pol) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, pol.label.c_str(), NULL, LABEL_NORMAL | JUSTIFY_LEFT);
+		FXText* explainText = new FXText(main, NULL, 0, TEXT_READONLY | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,70);
+		explainText->setText(pol.explainText.c_str());
+
+		stateVar = (initialState == POLSTATE_ENABLED) ? 1 : (initialState == POLSTATE_DISABLED) ? 2 : 0;
+		stateTarget = new FXDataTarget(stateVar, this, ID_STATE);
+		FXGroupBox* group = new FXGroupBox(main, "", GROUPBOX_NORMAL | FRAME_GROOVE | LAYOUT_FILL_X);
+		FXVerticalFrame* radioFrame = new FXVerticalFrame(group, LAYOUT_FILL_X);
+		new FXRadioButton(radioFrame, "&Nicht konfiguriert", stateTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(radioFrame, "&Aktiviert", stateTarget, FXDataTarget::ID_OPTION + 1);
+		new FXRadioButton(radioFrame, "&Deaktiviert", stateTarget, FXDataTarget::ID_OPTION + 2);
+
+		FXVerticalFrame* dynamicArea = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,4,4);
+		if (!pol.parts.empty()) {
+			auto& part = pol.parts[0];
+			switch (part.type) {
+				case ADMPART_CHECKBOX:
+					partCheckbox = new FXCheckButton(dynamicArea, part.label.c_str());
+					if (initialPartValue == "1") partCheckbox->setCheck(true);
+					break;
+				case ADMPART_EDITTEXT:
+					new FXLabel(dynamicArea, part.label.c_str());
+					partTextField = new FXTextField(dynamicArea, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+					partTextField->setText((!initialPartValue.empty() ? initialPartValue : part.defaultValue).c_str());
+					break;
+				case ADMPART_NUMERIC:
+					new FXLabel(dynamicArea, part.label.c_str());
+					partTextField = new FXTextField(dynamicArea, 10, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+					partTextField->setText((!initialPartValue.empty() ? initialPartValue : part.defaultValue).c_str());
+					break;
+				case ADMPART_DROPDOWNLIST:
+				case ADMPART_COMBOBOX:
+					new FXLabel(dynamicArea, part.label.c_str());
+					partCombo = new FXComboBox(dynamicArea, 20, NULL, 0, COMBOBOX_STATIC | FRAME_SUNKEN | LAYOUT_FILL_X);
+					comboItems = part.items;
+					for (size_t i = 0; i < part.items.size(); i++) {
+						partCombo->appendItem(part.items[i].label.c_str());
+						if (part.items[i].value == initialPartValue) partCombo->setCurrentItem((FXint)i);
+					}
+					break;
+				default: break;
+			}
+		}
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+
+		onStateChanged(NULL, 0, NULL);
+	}
+
+	PolicyState getState() const {
+		return stateVar == 1 ? POLSTATE_ENABLED : stateVar == 2 ? POLSTATE_DISABLED : POLSTATE_NOT_CONFIGURED;
+	}
+	// Liefert den aktuellen Wert des (einzigen unterstuetzten) Parts, oder
+	// "" wenn kein Part vorhanden ist bzw. CHECKBOX nicht angehakt.
+	std::string getPartValue() const {
+		if (partCheckbox) return partCheckbox->getCheck() ? "1" : "0";
+		if (partTextField) return partTextField->getText().text();
+		if (partCombo) {
+			int idx = partCombo->getCurrentItem();
+			if (idx >= 0 && idx < (int)comboItems.size()) return comboItems[idx].value;
+		}
+		return "";
+	}
+	virtual ~PolicyEditDialog() { delete stateTarget; }
+};
+FXDEFMAP(PolicyEditDialog) PolicyEditDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, PolicyEditDialog::ID_STATE, PolicyEditDialog::onStateChanged),
+};
+FXIMPLEMENT(PolicyEditDialog, FXDialogBox, PolicyEditDialogMap, ARRAYNUMBER(PolicyEditDialogMap))
+
+// ---------------------------------------------------------------------
+// GPT.INI-Versionszaehler erhoehen -- damit ein echter Client erkennt,
+// dass sich die Gruppenrichtlinie geaendert hat und neu angewendet
+// werden muss. Format: 32-Bit-Zahl, oberes Halbwort = Benutzer-Version,
+// unteres Halbwort = Computer-Version (wir erhoehen hier nur die
+// Computer-Version, da dieser Editor sich vorerst auf
+// Computerkonfiguration beschraenkt).
+// ---------------------------------------------------------------------
+static void bumpGptIniMachineVersion(const std::string& gptIniPath) {
+	std::string content = readFileUnprivileged(gptIniPath.c_str());
+	uint32_t version = 0;
+	size_t pos = content.find("Version=");
+	if (pos != std::string::npos) {
+		size_t start = pos + 8, end = start;
+		while (end < content.size() && isdigit((unsigned char)content[end])) end++;
+		try { version = (uint32_t)std::stoul(content.substr(start, end - start)); } catch (...) {}
+	}
+	uint32_t machineVer = (version & 0xFFFF) + 1;
+	uint32_t userVer = (version >> 16) & 0xFFFF;
+	uint32_t newVersion = (userVer << 16) | machineVer;
+	std::string newContent = "[General]\r\nVersion=" + std::to_string(newVersion) + "\r\n";
+
+	FXString tmpPath = "/tmp/ice2k-gptini-tmp";
+	std::ofstream out(tmpPath.text());
+	out << newContent;
+	out.close();
+	runAsRoot({ FXString("cp"), tmpPath, FXString(gptIniPath.c_str()) });
+	runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
+}
+
+// ---------------------------------------------------------------------
+// Gruppenrichtlinienobjekt-Editor: Baum links (Kategorien der
+// zusammengefuehrten ADM-Dateien), Liste rechts (Richtlinien der
+// gewaehlten Kategorie mit Status). Doppelklick oeffnet
+// PolicyEditDialog; "Speichern" schreibt die Aenderungen in die
+// Registry.pol des GPOs und erhoeht die GPT.INI-Version.
+// ---------------------------------------------------------------------
+struct PendingEdit { PolicyState state; std::string partValue; std::string effectiveKey; };
+
+class AdmEditorDialog : public FXDialogBox {
+	FXDECLARE(AdmEditorDialog)
+private:
+	FXTreeList* tree;
+	FXIconList* list;
+	std::vector<AdmCategory> categories;
+	std::map<FXTreeItem*, std::pair<AdmCategory*, std::vector<const AdmCategory*>>> itemInfo;
+	std::vector<AdmPolicy*> currentPolicies;
+	std::vector<std::string> currentEffectiveKeys;
+	RegLookup originalLookup;
+	RegPolFile originalFile;
+	std::string polPath, gptIniPath;
+	std::map<AdmPolicy*, PendingEdit> edits;
+	FXIcon *icoFolder, *icoPolicy;
+protected:
+	AdmEditorDialog() {}
+public:
+	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_SAVE };
+
+	void collectCategoryChildren(FXTreeItem* parentItem, std::vector<AdmCategory>& cats, std::vector<const AdmCategory*> chain) {
+		for (auto& cat : cats) {
+			FXTreeItem* item = tree->appendItem(parentItem, cat.label.c_str(), icoFolder, icoFolder);
+			std::vector<const AdmCategory*> newChain = chain;
+			newChain.push_back(&cat);
+			itemInfo[item] = { &cat, newChain };
+			collectCategoryChildren(item, cat.subCategories, newChain);
+		}
+	}
+
+	const char* stateLabel(PolicyState st) {
+		return st == POLSTATE_ENABLED ? "Aktiviert" : st == POLSTATE_DISABLED ? "Deaktiviert" : "Nicht konfiguriert";
+	}
+
+	void showCategoryPolicies(AdmCategory* cat, const std::vector<const AdmCategory*>& chain) {
+		list->clearItems();
+		currentPolicies.clear();
+		currentEffectiveKeys.clear();
+		for (auto& pol : cat->policies) {
+			std::string key = resolveEffectiveKey(pol, chain);
+			PolicyState st = edits.count(&pol) ? edits[&pol].state : determinePolicyState(pol, key, originalLookup);
+			FXString txt = FXString(pol.label.c_str()) + "\t" + stateLabel(st);
+			list->appendItem(txt, icoPolicy, icoPolicy);
+			currentPolicies.push_back(&pol);
+			currentEffectiveKeys.push_back(key);
+		}
+	}
+
+	long onTreeChanged(FXObject*, FXSelector, void*) {
+		FXTreeItem* cur = tree->getCurrentItem();
+		if (!cur || !itemInfo.count(cur)) return 1;
+		auto& info = itemInfo[cur];
+		showCategoryPolicies(info.first, info.second);
+		return 1;
+	}
+
+	long onListDoubleClick(FXObject*, FXSelector, void*) {
+		int idx = list->getCurrentItem();
+		if (idx < 0 || idx >= (int)currentPolicies.size()) return 1;
+		AdmPolicy* pol = currentPolicies[idx];
+		std::string key = currentEffectiveKeys[idx];
+		PolicyState curState = edits.count(pol) ? edits[pol].state : determinePolicyState(*pol, key, originalLookup);
+		std::string curPartValue;
+		if (edits.count(pol)) {
+			curPartValue = edits[pol].partValue;
+		} else if (!pol->parts.empty()) {
+			std::string vn = !pol->parts[0].valuename.empty() ? pol->parts[0].valuename : pol->valuename;
+			auto it = originalLookup.values.find({ lowerCopy(key), lowerCopy(vn) });
+			if (it != originalLookup.values.end()) {
+				if (it->second.type == REG_TYPE_DWORD && it->second.data.size() >= 4) {
+					uint32_t v = (uint32_t)it->second.data[0] | ((uint32_t)it->second.data[1] << 8)
+					           | ((uint32_t)it->second.data[2] << 16) | ((uint32_t)it->second.data[3] << 24);
+					curPartValue = std::to_string(v);
+				} else if (it->second.type == REG_TYPE_SZ) {
+					curPartValue = std::string((const char*)it->second.data.data(), it->second.data.size());
+				}
+			}
+		}
+
+		PolicyEditDialog dlg(this, *pol, curState, curPartValue);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+		PendingEdit ed;
+		ed.state = dlg.getState();
+		ed.partValue = dlg.getPartValue();
+		ed.effectiveKey = key;
+		edits[pol] = ed;
+
+		FXString txt = FXString(pol->label.c_str()) + "\t" + stateLabel(ed.state);
+		list->setItemText(idx, txt);
+		return 1;
+	}
+
+	long onSave(FXObject*, FXSelector, void*) {
+		std::vector<RegPolEntry> finalEntries = originalFile.entries;
+		auto removeEntry = [&](const std::string& key, const std::string& valuename) {
+			std::string lk = lowerCopy(key), lv = lowerCopy(valuename);
+			finalEntries.erase(std::remove_if(finalEntries.begin(), finalEntries.end(), [&](const RegPolEntry& e) {
+				return lowerCopy(e.key) == lk && lowerCopy(e.valuename) == lv;
+			}), finalEntries.end());
+		};
+
+		for (auto& kv : edits) {
+			AdmPolicy* pol = kv.first;
+			PendingEdit& ed = kv.second;
+			std::string key = ed.effectiveKey;
+			if (pol->hasValueOnOff) {
+				removeEntry(key, pol->valuename);
+				if (ed.state == POLSTATE_ENABLED) {
+					uint32_t v = 0; try { v = (uint32_t)std::stol(pol->valueOn.empty() ? "1" : pol->valueOn); } catch (...) {}
+					finalEntries.push_back(makeRegDwordEntry(key, pol->valuename, v));
+				} else if (ed.state == POLSTATE_DISABLED) {
+					uint32_t v = 0; try { v = (uint32_t)std::stol(pol->valueOff.empty() ? "0" : pol->valueOff); } catch (...) {}
+					finalEntries.push_back(makeRegDwordEntry(key, pol->valuename, v));
+				}
+				// POLSTATE_NOT_CONFIGURED: Zeile bleibt entfernt, keine neue.
+			} else if (!pol->parts.empty()) {
+				auto& part = pol->parts[0];
+				std::string vn = !part.valuename.empty() ? part.valuename : pol->valuename;
+				removeEntry(key, vn);
+				removeEntry(key, "**del." + vn);
+				bool wasConfigured = originalLookup.values.count({ lowerCopy(key), lowerCopy(vn) }) > 0;
+				if (ed.state == POLSTATE_ENABLED) {
+					switch (part.type) {
+						case ADMPART_CHECKBOX:
+						case ADMPART_NUMERIC: {
+							uint32_t v = 0; try { v = (uint32_t)std::stol(ed.partValue.empty() ? "0" : ed.partValue); } catch (...) {}
+							finalEntries.push_back(makeRegDwordEntry(key, vn, v));
+							break;
+						}
+						case ADMPART_EDITTEXT:
+							finalEntries.push_back(makeRegSzEntry(key, vn, ed.partValue));
+							break;
+						case ADMPART_DROPDOWNLIST:
+						case ADMPART_COMBOBOX: {
+							bool isNum = false;
+							for (auto& it2 : part.items) if (it2.value == ed.partValue) isNum = it2.isNumeric;
+							if (isNum) {
+								uint32_t v = 0; try { v = (uint32_t)std::stol(ed.partValue.empty() ? "0" : ed.partValue); } catch (...) {}
+								finalEntries.push_back(makeRegDwordEntry(key, vn, v));
+							} else {
+								finalEntries.push_back(makeRegSzEntry(key, vn, ed.partValue));
+							}
+							break;
+						}
+						default: break;
+					}
+				} else if (wasConfigured) {
+					// Deaktiviert ODER (wieder) Nicht konfiguriert, aber vorher
+					// gesetzt -- aktiv loeschen, damit ein Client den Wert
+					// tatsaechlich entfernt statt ihn stehen zu lassen.
+					finalEntries.push_back(makeDeleteValueEntry(key, vn));
+				}
+			}
+		}
+
+		std::string errorMsg;
+		FXString tmpPath = "/tmp/ice2k-regpol-tmp";
+		if (!writeRegPolFile(tmpPath.text(), finalEntries, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.c_str());
+			return 1;
+		}
+		runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(polPath.substr(0, polPath.find_last_of('/')).c_str()) });
+		int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(polPath.c_str()) });
+		runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
+		if (rc != 0) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "Konnte %s nicht schreiben (Root-Rechte?).", polPath.c_str());
+			return 1;
+		}
+		bumpGptIniMachineVersion(gptIniPath);
+
+		// Neu einlesen, damit "Nicht konfiguriert"/"Aktiviert"/... beim
+		// naechsten Oeffnen wieder den tatsaechlich gespeicherten Zustand
+		// zeigt statt der Sitzungs-Aenderungen.
+		originalFile = parseRegPolFile(polPath);
+		originalLookup = buildRegLookup(originalFile);
+		edits.clear();
+		FXTreeItem* cur = tree->getCurrentItem();
+		if (cur && itemInfo.count(cur)) showCategoryPolicies(itemInfo[cur].first, itemInfo[cur].second);
+
+		FXMessageBox::information(this, MBOX_OK, "Gespeichert", "Die Gruppenrichtlinie wurde gespeichert.");
+		return 1;
+	}
+
+	AdmEditorDialog(FXWindow* owner, std::vector<AdmCategory>&& cats, const std::string& polPath_, const std::string& gptIniPath_)
+		: FXDialogBox(owner, "Gruppenrichtlinienobjekt-Editor", DECOR_ALL, 0,0,760,480),
+		  categories(std::move(cats)), polPath(polPath_), gptIniPath(gptIniPath_) {
+		originalFile = parseRegPolFile(polPath); // leer/fehlend ist okay -- noch keine Einstellungen
+		originalLookup = buildRegLookup(originalFile);
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
+		FXSplitter* splitter = new FXSplitter(main, LAYOUT_FILL_X | LAYOUT_FILL_Y | SPLITTER_TRACKING);
+		FXPacker* treeframe = new FXPacker(splitter, FRAME_NORMAL | LAYOUT_FILL_Y, 0,0,280,0, 0,0,0,0);
+		tree = new FXTreeList(treeframe, this, ID_TREE,
+		                       SCROLLERS_DONT_TRACK | FRAME_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y |
+		                       TREELIST_SHOWS_BOXES | TREELIST_SHOWS_LINES | TREELIST_BROWSESELECT | TREELIST_ROOT_BOXES);
+		FXPacker* listframe = new FXPacker(splitter, FRAME_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXIconList(listframe, this, ID_LIST,
+		                       ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y | FRAME_NORMAL);
+		list->appendHeader("Richtlinie", NULL, 400);
+		list->appendHeader("Status", NULL, 160);
+
+		icoFolder = new FXPNGIcon(getApp(), resico_folder, IMAGE_NEAREST); icoFolder->create();
+		icoPolicy = new FXPNGIcon(getApp(), resico_key, IMAGE_NEAREST); icoPolicy->create();
+
+		FXTreeItem* root = tree->appendItem(NULL, "Computerkonfiguration\\Administrative Vorlagen", icoFolder, icoFolder);
+		std::vector<const AdmCategory*> chain;
+		collectCategoryChildren(root, categories, chain);
+		tree->expandTree(root);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 10,10,6,6);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Speichern", NULL, this, ID_SAVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	virtual ~AdmEditorDialog() {}
+};
+FXDEFMAP(AdmEditorDialog) AdmEditorDialogMap[] = {
+	FXMAPFUNC(SEL_CHANGED, AdmEditorDialog::ID_TREE, AdmEditorDialog::onTreeChanged),
+	FXMAPFUNC(SEL_DOUBLECLICKED, AdmEditorDialog::ID_LIST, AdmEditorDialog::onListDoubleClick),
+	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SAVE, AdmEditorDialog::onSave),
+};
+FXIMPLEMENT(AdmEditorDialog, FXDialogBox, AdmEditorDialogMap, ARRAYNUMBER(AdmEditorDialogMap))
+
+// ---------------------------------------------------------------------
 // Dialog "Eigenschaften" von Domäne/OU -- mit dem "Gruppenrichtlinie"-
 // Reiter (Original-Vorbild: Screenshot des Nutzers). Der eigentliche
 // Editor der Administrativen Vorlagen ist ein eigener, spaeterer
@@ -650,14 +1234,16 @@ class PropertiesDialog : public FXDialogBox {
 	FXDECLARE(PropertiesDialog)
 private:
 	FXString containerFullDN;
+	FXString realm;
 	FXList* gpoList;
 	std::vector<FXString> linkedGuids;
 	std::map<FXString, FXString> guidToName;
 public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO };
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO };
 	long onNewGpo(FXObject*, FXSelector, void*);
 	long onAddGpo(FXObject*, FXSelector, void*);
 	long onRemoveGpo(FXObject*, FXSelector, void*);
+	long onEditGpo(FXObject*, FXSelector, void*);
 
 	void reloadList() {
 		gpoList->clearItems();
@@ -673,9 +1259,9 @@ public:
 protected:
 	PropertiesDialog() {}
 public:
-	PropertiesDialog(FXWindow* owner, const FXString& title, const FXString& fullDN)
+	PropertiesDialog(FXWindow* owner, const FXString& title, const FXString& fullDN, const FXString& realm_)
 		: FXDialogBox(owner, FXString("Eigenschaften von ") + title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,420),
-		  containerFullDN(fullDN) {
+		  containerFullDN(fullDN), realm(realm_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
 		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
 
@@ -687,6 +1273,7 @@ public:
 		new FXButton(gpoBtns, "&Neu", NULL, this, ID_NEW_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -700,6 +1287,7 @@ FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_NEW_GPO, PropertiesDialog::onNewGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_ADD_GPO, PropertiesDialog::onAddGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_REMOVE_GPO, PropertiesDialog::onRemoveGpo),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_EDIT_GPO, PropertiesDialog::onEditGpo),
 };
 FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
 
@@ -750,6 +1338,31 @@ long PropertiesDialog::onRemoveGpo(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	unlinkGpo(this, linkedGuids[idx], containerFullDN, errorMsg);
 	reloadList();
+	return 1;
+}
+
+long PropertiesDialog::onEditGpo(FXObject*, FXSelector, void*) {
+	int idx = gpoList->getCurrentItem();
+	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
+	if (!haveAdmFiles()) {
+		FXMessageBox::error(this, MBOX_OK, "ADM-Vorlagen fehlen",
+			"Es sind keine administrativen Vorlagen (.adm-Dateien) eingerichtet.\n"
+			"Bitte starte das Programm neu und lade sie herunter.");
+		return 1;
+	}
+	FXString guid = linkedGuids[idx];
+	FXString realmLower = realm; realmLower.lower();
+	std::string sysvolBase = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + guid.text();
+	std::string polPath = sysvolBase + "/MACHINE/Registry.pol";
+	std::string gptIniPath = sysvolBase + "/GPT.INI";
+
+	std::vector<AdmCategory> cats = loadMergedAdmCategories("MACHINE");
+	if (cats.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "Keine Kategorien aus den ADM-Dateien geladen (Parserfehler oder leeres ADM-Verzeichnis?).");
+		return 1;
+	}
+	AdmEditorDialog dlg(this, std::move(cats), polPath, gptIniPath);
+	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
 
@@ -1077,7 +1690,7 @@ long DsAdminWindow::onProperties(FXObject*, FXSelector, void*) {
 		title = relDN.empty() ? domain.realm : relDN;
 		fullDN = relDNToFullDN(relDN, domain);
 	}
-	PropertiesDialog dlg(this, title, fullDN);
+	PropertiesDialog dlg(this, title, fullDN, domain.realm);
 	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
@@ -1106,107 +1719,11 @@ void DsAdminWindow::create() {
 // Das .msi selbst ist ein Windows-Installer-Paket -- wir entpacken es
 // unter Linux mit "msiextract" (aus dem Paket "msitools").
 // ---------------------------------------------------------------------
-static const char* ADM_DIR = "/usr/local/share/ice2k/adm";
 
-static bool haveAdmFiles() {
-	FXString path = FXString(ADM_DIR) + "/system.adm";
-	return access(path.text(), F_OK) == 0;
-}
-
-static bool haveMsiextract() {
-	return access("/usr/bin/msiextract", F_OK) == 0;
-}
-
-static bool installMsiextract(std::string& log, FXString& errorMsg) {
-	log += "Installiere msitools (zum Entpacken der .msi-Datei)...\n";
-	runAsRootCaptured({ FXString("apt-get"), FXString("update") }, log);
-	std::string out;
-	int rc = runAsRootCaptured({ FXString("env"), FXString("DEBIAN_FRONTEND=noninteractive"),
-	                              FXString("apt-get"), FXString("install"), FXString("-y"),
-	                              FXString("-o"), FXString("Dpkg::Options::=--force-confold"),
-	                              FXString("msitools") }, out);
-	log += out + "\n";
-	if (rc != 0 || !haveMsiextract()) {
-		errorMsg = "Installation von msitools ist fehlgeschlagen (siehe Protokoll).";
-		return false;
-	}
-	log += "msitools erfolgreich installiert.\n";
-	return true;
-}
-
-// Versucht das .msi automatisch herunterzuladen. Da die Microsoft-
-// Downloadseite ihren tatsaechlichen Dateilink per JavaScript erzeugt,
-// ist dieser direkte Link ohne Garantie -- schlaegt er fehl, wird auf
-// den manuellen Weg zurueckgefallen (siehe downloadAndExtractAdmFiles).
-static bool tryAutoDownloadMsi(const FXString& destPath, std::string& log) {
-	log += "Versuche automatischen Download von " + std::string(destPath.text()) + "...\n";
-	std::string out;
-	int rc = runAsRootCaptured({ FXString("wget"), FXString("-q"), FXString("-O"), destPath,
-	                              FXString("https://download.microsoft.com/download/f/0/0/f00b6d78-011f-42d5-b2e5-2f5e0f2e6b0c/2000admsetup.msi") }, out);
-	log += out + "\n";
-	if (rc != 0 || access(destPath.text(), F_OK) != 0) {
-		runAsRoot({ FXString("rm"), FXString("-f"), destPath });
-		return false;
-	}
-	return true;
-}
-
-static bool extractAdmFromMsi(const FXString& msiPath, std::string& log, FXString& errorMsg) {
-	log += "Entpacke ADM-Dateien aus " + std::string(msiPath.text()) + "...\n";
-	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(ADM_DIR) });
-	FXString tmpDir = "/tmp/ice2k-adm-extract";
-	runAsRoot({ FXString("rm"), FXString("-rf"), tmpDir });
-	runAsRoot({ FXString("mkdir"), FXString("-p"), tmpDir });
-
-	std::string out;
-	int rc = runAsRootCaptured({ FXString("msiextract"), FXString("-C"), tmpDir, msiPath }, out);
-	log += out + "\n";
-	if (rc != 0) { errorMsg = "msiextract ist fehlgeschlagen (siehe Protokoll)."; return false; }
-
-	// Die .adm-Dateien liegen im MSI ueblicherweise direkt im Wurzel-
-	// verzeichnis oder einem Unterordner -- wir suchen rekursiv und
-	// kopieren alle Fundstellen in unser ADM-Verzeichnis.
-	out.clear();
-	rc = runAsRootCaptured({ FXString("bash"), FXString("-c"),
-		FXString("find '") + tmpDir + "' -iname '*.adm' -exec cp {} " + FXString(ADM_DIR) + "/ \\;" }, out);
-	runAsRoot({ FXString("rm"), FXString("-rf"), tmpDir });
-
-	if (!haveAdmFiles()) {
-		errorMsg = "Nach dem Entpacken wurden keine .adm-Dateien in " + FXString(ADM_DIR) + " gefunden.";
-		return false;
-	}
-	log += "ADM-Dateien erfolgreich nach " + std::string(ADM_DIR) + " kopiert.\n";
-	return true;
-}
-
-// Kompletter Ablauf: Werkzeuge pruefen/installieren, Download versuchen,
-// bei Fehlschlag manuell nachfragen (Datei-Auswahldialog fuer ein
-// bereits von Hand heruntergeladenes .msi), dann entpacken.
-static bool downloadAndExtractAdmFiles(FXWindow* owner, std::string& log, FXString& errorMsg) {
-	if (!haveMsiextract()) {
-		if (!installMsiextract(log, errorMsg)) return false;
-	}
-
-	FXString msiPath = "/tmp/2000admsetup.msi";
-	runAsRoot({ FXString("rm"), FXString("-f"), msiPath });
-
-	if (!tryAutoDownloadMsi(msiPath, log)) {
-		log += "Automatischer Download nicht erfolgreich.\n";
-		FXMessageBox::information(owner, MBOX_OK, "Manueller Download nötig",
-			"Der automatische Download hat nicht funktioniert.\n\n"
-			"Bitte lade das Paket \"2000admsetup.msi\" manuell von\n"
-			"https://www.microsoft.com/en-us/download/details.aspx?id=18664\n"
-			"herunter und wähle es im nächsten Dialog aus.");
-		FXString picked = FXFileDialog::getOpenFilename(owner, "2000admsetup.msi auswählen", FXSystem::getHomeDirectory(), "MSI-Dateien (*.msi)");
-		if (picked.empty()) { errorMsg = "Kein Download und keine Datei ausgewählt."; return false; }
-		std::string out;
-		runAsRootCaptured({ FXString("cp"), picked, msiPath }, out);
-	}
-
-	bool ok = extractAdmFromMsi(msiPath, log, errorMsg);
-	runAsRoot({ FXString("rm"), FXString("-f"), msiPath });
-	return ok;
-}
+// ---------------------------------------------------------------------
+// Richtlinienzustand-Ableitung: bereits oben (vor den Dialog-Klassen)
+// definiert, siehe PolicyState/RegLookup/determinePolicyState.
+// ---------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
 	FXApp application("DsAdmin", "Ice2KProj");
