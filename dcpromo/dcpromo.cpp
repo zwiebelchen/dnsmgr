@@ -552,8 +552,12 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 		// Windows 2000 kann aber nur MD5, nicht das modernere AES. Ohne
 		// dies scheitert der Domänenbeitritt an genau der Stelle, an der
 		// das Computerkonto den sicheren Kanal aufbaut ("NT_STATUS_
-		// DOWNGRADE_DETECTED" im Samba-Log).
-		conf = smbConfSetOrRemove(conf, "server reject md5 schannel", "no");
+		// DOWNGRADE_DETECTED" im Samba-Log). WICHTIG: "server reject md5
+		// schannel = no" (ohne Konto-Suffix) ist KEIN gueltiger globaler
+		// Parameter -- der existiert nur als Pro-Konto-Ausnahme
+		// ("...:KONTONAME$ = no", siehe Samba-eigene CVE-Seite). Der
+		// tatsaechliche globale Schalter heisst "reject md5 clients".
+		conf = smbConfSetOrRemove(conf, "reject md5 clients", "no");
 		writeFileAsRoot(SMB_CONF, conf);
 	}
 
