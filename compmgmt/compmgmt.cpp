@@ -595,7 +595,7 @@ CompMgmt::CompMgmt(FXApp* a)
 	new FXSeparator(this, SEPARATOR_NONE|LAYOUT_FIX_HEIGHT, 0,0,0,2);
 
 	dcNoticeLabel = new FXLabel(this,
-		"Dieser Server ist ein Domänencontroller. Netzwerk-Anmeldekonten werden über \"Active Directory-Benutzer und -Computer\" verwaltet -- diese Ansicht zeigt nur noch lokale Linux-Systemkonten (SSH, sudo, Dienste), ohne Samba-Netzwerkfreigabe-Anbindung.",
+		"Dieser Server ist ein Domänencontroller. Netzwerk-Anmeldekonten werden über \"Active Directory-Benutzer und -Computer\" verwaltet. Lokale Linux-Benutzerkonten (z.B. für SSH-Zugang) lassen sich hier weiterhin vollständig anlegen/bearbeiten/löschen -- nur die Samba-Netzwerkfreigabe-Anbindung ist deaktiviert.",
 		NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 6,6,4,4);
 	dcNoticeLabel->setBackColor(FXRGB(255, 250, 205));
 	if (!isDC) dcNoticeLabel->hide();
