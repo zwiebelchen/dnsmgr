@@ -476,6 +476,33 @@ static bool isServiceActive(const FXString& name) {
 	return runAsRoot({ FXString("systemctl"), FXString("is-active"), FXString("--quiet"), name }) == 0;
 }
 
+static const char* RESOLV_CONF = "/etc/resolv.conf";
+static const char* RESOLV_CONF_HEAD = "/etc/resolv.conf.head";
+
+// Ein AD-Domaenencontroller MUSS sich selbst als DNS-Server verwenden --
+// sonst kann er seine eigenen Kerberos-/LDAP-SRV-Records nicht finden
+// (genau das haben wir live bei einem Nutzer erlebt: "kinit: unable to
+// reach any KDC", obwohl Samba und die DNS-Daten selbst laengst korrekt
+// waren -- nur /etc/resolv.conf zeigte noch auf den alten Netzwerk-DNS).
+// /etc/resolv.conf wird auf vielen Systemen (z.B. von dhcpcd) bei jeder
+// Lease-Erneuerung neu geschrieben -- deshalb zusaetzlich in
+// /etc/resolv.conf.head eintragen, das dhcpcd unveraendert an den
+// Anfang der generierten Datei stellt und damit DHCP-Neustarts
+// ueberlebt.
+static void pointDnsAtSelf(std::string& log) {
+	log += "Stelle sicher, dass dieser Server sich selbst als DNS-Server verwendet\n"
+	       "(nötig, damit Kerberos/LDAP die eigenen SRV-Records finden)...\n";
+	backupFileOnce(RESOLV_CONF);
+	writeFileAsRoot(RESOLV_CONF, "nameserver 127.0.0.1\n");
+	backupFileOnce(RESOLV_CONF_HEAD);
+	writeFileAsRoot(RESOLV_CONF_HEAD, "nameserver 127.0.0.1\n");
+}
+
+static void restoreDnsResolver() {
+	restoreBackupOrLeaveAlone(RESOLV_CONF);
+	restoreBackupOrLeaveAlone(RESOLV_CONF_HEAD);
+}
+
 static bool provisionDomain(const FXString& dnsName, const FXString& netbios, const FXString& adminPass,
                              bool win2kCompatible, std::string& log, FXString& errorMsg) {
 	log += "Bestehende smb.conf sichern (falls vorhanden)...\n";
@@ -538,6 +565,8 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 	} else {
 		log += "bind9 und samba-ad-dc laufen.\n";
 	}
+
+	pointDnsAtSelf(log);
 	return true;
 }
 
@@ -614,6 +643,9 @@ static bool removeActiveDirectory(std::string& log, FXString& errorMsg) {
 	       "schon dnsmgrs unveränderter Originalzustand ist)...\n";
 	restoreBackupOrLeaveAlone(BIND_LOCAL);
 	restoreBackupOrLeaveAlone(BIND_OPTIONS);
+
+	log += "Stelle ursprünglichen DNS-Resolver wieder her (falls verändert)...\n";
+	restoreDnsResolver();
 
 	log += "Starte bind9 und smbd/nmbd/winbind neu, deaktiviere samba-ad-dc...\n";
 	bool r1 = runAsRoot({ FXString("systemctl"), FXString("disable"), FXString("--now"), FXString("samba-ad-dc") }) == 0;
