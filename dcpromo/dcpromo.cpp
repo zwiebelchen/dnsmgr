@@ -126,6 +126,64 @@ static int runAsRootCaptured(const std::vector<FXString>& args, std::string& out
 	return -1;
 }
 
+// ---------------------------------------------------------------------
+// Prueft, ob alle fuer Samba-AD-DC noetigen Pakete installiert sind --
+// wir hatten selbst beim Testen erlebt, dass mehrere davon auf einem
+// frisch installierten Debian noch fehlen (samba-tool allein reicht
+// nicht: Schema-Dateien, DSDB-/VFS-Module und winbind kommen erst mit
+// separaten Paketen). Erkennung ueber eine representative Datei je
+// Paket statt "dpkg -s", damit es auch dann korrekt erkennt, wenn ein
+// Paket nur unvollstaendig konfiguriert wurde.
+// ---------------------------------------------------------------------
+struct PkgCheck { const char* pkg; const char* checkFile; };
+static const PkgCheck REQUIRED_PACKAGES[] = {
+	{ "samba", "/usr/sbin/samba" },
+	{ "samba-common-bin", "/usr/bin/samba-tool" },
+	{ "samba-ad-provision", "/usr/share/samba/setup/ad-schema/AD_DS_Attributes_Windows_Server_v1903.ldf" },
+	{ "samba-dsdb-modules", "/usr/lib/x86_64-linux-gnu/samba/ldb/samba_secrets.so" },
+	{ "samba-vfs-modules", "/usr/lib/x86_64-linux-gnu/samba/vfs/acl_xattr.so" },
+	{ "winbind", "/usr/sbin/winbindd" },
+	{ "bind9", "/usr/sbin/named" },
+};
+
+static std::vector<FXString> findMissingPackages() {
+	std::vector<FXString> missing;
+	for (auto& p : REQUIRED_PACKAGES) {
+		if (access(p.checkFile, F_OK) != 0) missing.push_back(FXString(p.pkg));
+	}
+	return missing;
+}
+
+// Installiert die fehlenden Pakete per apt-get. Nicht-interaktiv und
+// mit "--force-confold", damit ein Rueckfrage-Dialog zu named.conf.local
+// (haben wir selbst erlebt: dnsmgr legt dort schon eine eigene Datei
+// an) den Assistenten nicht haengen laesst -- die bestehende, von
+// dnsmgr verwaltete Datei bleibt dabei unangetastet.
+static bool installMissingPackages(const std::vector<FXString>& pkgs, std::string& log, FXString& errorMsg) {
+	log += "Aktualisiere Paketlisten (apt-get update)...\n";
+	std::string out;
+	runAsRootCaptured({ FXString("apt-get"), FXString("update") }, out);
+	log += out + "\n";
+
+	FXString pkgList;
+	for (auto& p : pkgs) pkgList += p + " ";
+	log += "Installiere fehlende Pakete: " + std::string(pkgList.text()) + "\n";
+
+	std::vector<FXString> args = {
+		FXString("env"), FXString("DEBIAN_FRONTEND=noninteractive"),
+		FXString("apt-get"), FXString("install"), FXString("-y"),
+		FXString("-o"), FXString("Dpkg::Options::=--force-confold"),
+	};
+	for (auto& p : pkgs) args.push_back(p);
+
+	out.clear();
+	int rc = runAsRootCaptured(args, out);
+	log += out + "\n";
+	if (rc != 0) { errorMsg = "Installation der fehlenden Pakete ist fehlgeschlagen (siehe Protokoll)."; return false; }
+	log += "Pakete erfolgreich installiert.\n\n";
+	return true;
+}
+
 static bool writeFileAsRoot(const FXString& path, const std::string& content) {
 	char tmpname[] = "/tmp/dcpromo_XXXXXX";
 	int fd = mkstemp(tmpname);
@@ -490,8 +548,8 @@ public:
 
 	DcPromoWizard(FXApp* a);
 	void gotoPage(int page);
-	void runProvisioningNow();
-	void runMigrationNow();
+	void runProvisioningNow(const std::vector<FXString>& missingPkgs);
+	void runMigrationNow(const std::vector<FXString>& missingPkgs);
 	virtual void create();
 	virtual ~DcPromoWizard() {}
 };
@@ -719,11 +777,22 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 			FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann Active Directory nicht installiert werden.");
 			return 1;
 		}
+		std::vector<FXString> missing = findMissingPackages();
+		if (!missing.empty()) {
+			FXString list;
+			for (auto& p : missing) list += p + "\n";
+			if (FXMessageBox::question(this, MBOX_YES_NO, "Fehlende Pakete",
+			        "Für Active Directory werden folgende Pakete benötigt, sind aber\n"
+			        "nicht installiert:\n\n%s\n"
+			        "Jetzt per apt installieren?", list.text()) != MBOX_CLICKED_YES) {
+				return 1; // bleibt auf der Zusammenfassung, nichts wurde veraendert
+			}
+		}
 		migrating = false;
 		gotoPage(PAGE_RUNNING);
 		getApp()->repaint();
 		getApp()->flush();
-		runProvisioningNow();
+		runProvisioningNow(missing);
 
 	} else if (cur == PAGE_RUNNING) {
 		gotoPage(PAGE_FINISH);
@@ -755,17 +824,41 @@ long DcPromoWizard::onMigrate(FXObject*, FXSelector, void*) {
 	        "machen. Fortfahren?", domainState.realm.text()) != MBOX_CLICKED_YES) {
 		return 1;
 	}
+	std::vector<FXString> missing = findMissingPackages();
+	if (!missing.empty()) {
+		FXString list;
+		for (auto& p : missing) list += p + "\n";
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Fehlende Pakete",
+		        "Für die Migration werden folgende Pakete benötigt, sind aber\n"
+		        "nicht installiert:\n\n%s\n"
+		        "Jetzt per apt installieren?", list.text()) != MBOX_CLICKED_YES) {
+			return 1;
+		}
+	}
 	migrating = true;
 	gotoPage(PAGE_RUNNING);
 	getApp()->repaint();
 	getApp()->flush();
-	runMigrationNow();
+	runMigrationNow(missing);
 	return 1;
 }
 
-void DcPromoWizard::runProvisioningNow() {
+void DcPromoWizard::runProvisioningNow(const std::vector<FXString>& missingPkgs) {
 	std::string log;
 	FXString errorMsg;
+
+	if (!missingPkgs.empty()) {
+		if (!installMissingPackages(missingPkgs, log, errorMsg)) {
+			logText->setText(log.c_str());
+			logText->appendText(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return;
+		}
+		logText->setText(log.c_str());
+		getApp()->repaint();
+		getApp()->flush();
+	}
+
 	bool ok = provisionDomain(dnsNameField->getText().trim(), netbiosField->getText().trim(),
 	                           adminPwField->getText(), rbWin2k->getCheck(), log, errorMsg);
 	logText->setText(log.c_str());
@@ -777,9 +870,22 @@ void DcPromoWizard::runProvisioningNow() {
 	}
 }
 
-void DcPromoWizard::runMigrationNow() {
+void DcPromoWizard::runMigrationNow(const std::vector<FXString>& missingPkgs) {
 	std::string log;
 	FXString errorMsg;
+
+	if (!missingPkgs.empty()) {
+		if (!installMissingPackages(missingPkgs, log, errorMsg)) {
+			logText->setText(log.c_str());
+			logText->appendText(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return;
+		}
+		logText->setText(log.c_str());
+		getApp()->repaint();
+		getApp()->flush();
+	}
+
 	bool ok = migrateToModernAd(domainState.realm, log, errorMsg);
 	logText->setText(log.c_str());
 	if (!ok) {
