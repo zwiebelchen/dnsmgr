@@ -532,6 +532,24 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 	if (rc != 0) { errorMsg = "samba-tool domain provision ist fehlgeschlagen (siehe Protokoll)."; return false; }
 	log += "Provisionierung abgeschlossen.\n";
 
+	// Windows 2000 kann nur SMB1 (NT LM 0.12) -- moderne Samba-Versionen
+	// lehnen SMB1 seit 4.11 standardmaessig komplett ab. Ohne dies
+	// scheitert jeder Legacy-Vorgang, der ueber SMB1/IPC$ laeuft (z.B.
+	// die klassische Computerkonto-Erstellung beim Domänenbeitritt),
+	// mit nur schwer zu deutenden Fehlermeldungen wie "Der angegebene
+	// Netzwerkname ist nicht mehr verfügbar" -- waehrend Kerberos und
+	// LDAP (die kein SMB brauchen) ganz normal funktionieren. Da dieses
+	// Projekt explizit echte Windows-2000-Clients unterstuetzen soll,
+	// aktivieren wir SMB1/NTLMv1 hier bewusst.
+	log += "Aktiviere SMB1/NTLMv1 für echte Windows-2000-Clients (moderne Samba-\n"
+	       "Versionen lehnen das seit 4.11 standardmäßig ab)...\n";
+	{
+		std::string conf = readFileUnprivileged(SMB_CONF);
+		conf = smbConfSetOrRemove(conf, "server min protocol", "NT1");
+		conf = smbConfSetOrRemove(conf, "ntlm auth", "ntlmv1-permitted");
+		writeFileAsRoot(SMB_CONF, conf);
+	}
+
 	// Der klassische smbd/nmbd/winbind-Dienst (z.B. von compmgmt als
 	// Datei-Server genutzt) kollidiert mit samba-ad-dc -- der vereinheit-
 	// lichte AD-DC-Prozess uebernimmt SMB/NetBIOS/Winbind selbst. Ohne
