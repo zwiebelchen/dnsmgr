@@ -318,6 +318,13 @@ static bool deleteGroup(const FXString& groupname, FXString& errorMsg) {
 	return true;
 }
 
+// ---------------------------------------------------------------------
+// Gruppenmitgliedschaft.
+// ---------------------------------------------------------------------
+static std::vector<FXString> listGroupMembers(const FXString& groupname) {
+	return listNames({ FXString("samba-tool"), FXString("group"), FXString("listmembers"), groupname });
+}
+
 static bool createOU(const FXString& ouDN, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("add"), ouDN }, out);
@@ -394,7 +401,7 @@ public:
 	AdminCredsDialog(FXWindow* owner)
 		: FXDialogBox(owner, "Administrator-Anmeldedaten", DECOR_TITLE | DECOR_BORDER, 0,0,360,0) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		new FXLabel(main, "Für Gruppenrichtlinien-Änderungen werden Domain-\nAdmin-Anmeldedaten benötigt:");
+		new FXLabel(main, "Für diese Änderung werden Domain-Admin-\nAnmeldedaten benötigt (z.B. bei geschützten\nGruppen wie \"Domain Admins\" oder GPOs):");
 		new FXLabel(main, "Benutzername:");
 		userField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
 		userField->setText("administrator");
@@ -420,6 +427,35 @@ static FXString ensureAdminCreds(FXWindow* owner) {
 	g_adminPass = dlg.getPassword();
 	g_haveAdminCreds = true;
 	return FXString("-U") + g_adminUser + "%" + g_adminPass;
+}
+
+static bool addGroupMember(FXWindow* owner, const FXString& groupname, const FXString& member, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("addmembers"), groupname, member }, out);
+	if (rc != 0) {
+		// Manche besonders geschuetzte Gruppen (z.B. "Domain Admins")
+		// brauchen echte Administrator-Anmeldedaten, root/Maschinenkonto
+		// reichen nicht -- genau wie bei GPOs.
+		FXString cred = ensureAdminCreds(owner);
+		if (cred.empty()) { errorMsg = out.c_str(); return false; }
+		out.clear();
+		rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("addmembers"), groupname, member, cred }, out);
+		if (rc != 0) { errorMsg = out.c_str(); return false; }
+	}
+	return true;
+}
+
+static bool removeGroupMember(FXWindow* owner, const FXString& groupname, const FXString& member, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("removemembers"), groupname, member }, out);
+	if (rc != 0) {
+		FXString cred = ensureAdminCreds(owner);
+		if (cred.empty()) { errorMsg = out.c_str(); return false; }
+		out.clear();
+		rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("removemembers"), groupname, member, cred }, out);
+		if (rc != 0) { errorMsg = out.c_str(); return false; }
+	}
+	return true;
 }
 
 static bool createGpo(FXWindow* owner, const FXString& displayName, FXString& errorMsg) {
@@ -533,6 +569,76 @@ public:
 	virtual ~NewOUDialog() {}
 };
 FXIMPLEMENT(NewOUDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" einer Gruppe -- Mitgliederliste mit
+// Hinzufuegen/Entfernen (analog zu compmgmt, aber gegen die
+// AD-Domaene statt gegen lokale Linux-Gruppen).
+// ---------------------------------------------------------------------
+class GroupMembersDialog : public FXDialogBox {
+	FXDECLARE(GroupMembersDialog)
+private:
+	FXString groupname;
+	FXList* memberList;
+	FXTextField* addField;
+public:
+	enum { ID_ADDMEMBER = FXDialogBox::ID_LAST, ID_REMOVEMEMBER };
+	void reloadList() {
+		memberList->clearItems();
+		for (auto& m : listGroupMembers(groupname)) memberList->appendItem(m);
+	}
+	long onAddMember(FXObject*, FXSelector, void*) {
+		FXString name = addField->getText().trim();
+		if (name.empty()) return 1;
+		FXString errorMsg;
+		if (!addGroupMember(this, groupname, name, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return 1;
+		}
+		addField->setText("");
+		reloadList();
+		return 1;
+	}
+	long onRemoveMember(FXObject*, FXSelector, void*) {
+		int sel = memberList->getCurrentItem();
+		if (sel < 0) return 1;
+		FXString name = memberList->getItemText(sel);
+		FXString errorMsg;
+		if (!removeGroupMember(this, groupname, name, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return 1;
+		}
+		reloadList();
+		return 1;
+	}
+protected:
+	GroupMembersDialog() {}
+public:
+	GroupMembersDialog(FXWindow* owner, const FXString& groupName_)
+		: FXDialogBox(owner, "Eigenschaften von " + groupName_, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,360,420),
+		  groupname(groupName_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Mitglieder:");
+		memberList = new FXList(main, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		FXHorizontalFrame* addf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		addField = new FXTextField(addf, 20, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		new FXButton(addf, "&Hinzufügen", NULL, this, ID_ADDMEMBER, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(addf, "&Entfernen", NULL, this, ID_REMOVEMEMBER, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+
+		reloadList();
+	}
+	virtual ~GroupMembersDialog() {}
+};
+FXDEFMAP(GroupMembersDialog) GroupMembersDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, GroupMembersDialog::ID_ADDMEMBER, GroupMembersDialog::onAddMember),
+	FXMAPFUNC(SEL_COMMAND, GroupMembersDialog::ID_REMOVEMEMBER, GroupMembersDialog::onRemoveMember),
+};
+FXIMPLEMENT(GroupMembersDialog, FXDialogBox, GroupMembersDialogMap, ARRAYNUMBER(GroupMembersDialogMap))
 
 // ---------------------------------------------------------------------
 // Dialog "Eigenschaften" von Domäne/OU -- mit dem "Gruppenrichtlinie"-
@@ -676,7 +782,7 @@ protected:
 public:
 	enum {
 		ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT,
-		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_DELETE_OBJECT, ID_PROPERTIES
+		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS
 	};
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -688,6 +794,7 @@ public:
 	long onNewOU(FXObject*, FXSelector, void*);
 	long onDeleteObject(FXObject*, FXSelector, void*);
 	long onProperties(FXObject*, FXSelector, void*);
+	long onGroupProperties(FXObject*, FXSelector, void*);
 
 	DsAdminWindow(FXApp* a);
 	void loadTree();
@@ -707,6 +814,7 @@ FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_OU, DsAdminWindow::onNewOU),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_DELETE_OBJECT, DsAdminWindow::onDeleteObject),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_PROPERTIES, DsAdminWindow::onProperties),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_GROUP_PROPS, DsAdminWindow::onGroupProperties),
 };
 FXIMPLEMENT(DsAdminWindow, FXMainWindow, DsAdminWindowMap, ARRAYNUMBER(DsAdminWindowMap))
 
@@ -871,6 +979,9 @@ long DsAdminWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 		propertiesFromList = true;
 		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_PROPERTIES);
 		new FXMenuSeparator(&menu);
+	} else if (obj.type == OBJ_GROUP) {
+		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_GROUP_PROPS);
+		new FXMenuSeparator(&menu);
 	}
 	new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_OBJECT);
 	menu.create();
@@ -967,6 +1078,16 @@ long DsAdminWindow::onProperties(FXObject*, FXSelector, void*) {
 		fullDN = relDNToFullDN(relDN, domain);
 	}
 	PropertiesDialog dlg(this, title, fullDN);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long DsAdminWindow::onGroupProperties(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	DirObject& obj = currentObjects[idx];
+	if (obj.type != OBJ_GROUP) return 1;
+	GroupMembersDialog dlg(this, obj.accountName);
 	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
