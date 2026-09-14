@@ -17,6 +17,7 @@ jeweiligen Unterordner.
 | [`dhcpmgr/`](dhcpmgr/README.md) | DHCP-Manager | Kea DHCP | Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen, Root via `i2ksudo` |
 | [`compmgmt/`](compmgmt/README.md) | Computerverwaltung (Lokale Benutzer und Gruppen) | Linux-User/-Gruppen + Samba | Benutzer/Gruppen anlegen/bearbeiten/löschen, Root via `i2ksudo`; Freigegebene Ordner folgen |
 | [`dcpromo/`](dcpromo/README.md) | Assistent zum Installieren von Active Directory | Samba als AD-Domain-Controller | Neue Domäne (Windows-2000-kompatibel oder moderne BIND9-DLZ-Integration), Migration zwischen beiden |
+| [`dsadmin/`](dsadmin/README.md) | Active Directory-Benutzer und -Computer | samba-tool (user/group/ou/gpo) | Domänenkonten anlegen/löschen, Gruppenrichtlinie-Verknüpfungen; ADM-Editor folgt |
 
 ## Gemeinsame Bausteine
 
@@ -35,6 +36,8 @@ Alle Programme teilen sich denselben Grundaufbau:
 cd dnsmgr && make && ./dnsmgr
 cd dhcpmgr && make && ./dhcpmgr
 cd compmgmt && make && ./compmgmt
+cd dcpromo && make && ./dcpromo
+cd dsadmin && make && ./dsadmin
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,
