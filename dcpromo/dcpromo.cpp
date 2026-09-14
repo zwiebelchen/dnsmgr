@@ -308,6 +308,10 @@ static void backupFileOnce(const FXString& path) {
 // Stellt eine zuvor gesicherte Datei wieder her (fuer "Active Directory
 // entfernen"). Existiert keine Sicherung, wird die Datei ersatzlos
 // entfernt -- sie wurde dann erst durch die AD-Installation angelegt.
+// Fuer smb.conf: kein Backup vorhanden bedeutet "gab es vor der
+// AD-Installation nicht" -- also ersatzlos entfernen ist hier korrekt
+// (Samba erzeugt beim naechsten Paket-Trigger/Neuinstallieren wieder
+// eine sinnvolle Default-smb.conf).
 static void restoreBackupOrRemove(const FXString& path) {
 	FXString backup = path + BACKUP_SUFFIX;
 	if (access(backup.text(), F_OK) == 0) {
@@ -315,6 +319,24 @@ static void restoreBackupOrRemove(const FXString& path) {
 	} else {
 		runAsRoot({ FXString("rm"), FXString("-f"), path });
 	}
+}
+
+// Fuer named.conf.local/named.conf.options: diese Dateien existieren
+// so gut wie immer schon VOR jeder AD-Installation (dnsmgr verwaltet
+// named.conf.local!). "Kein Backup vorhanden" heisst hier NICHT "gab
+// es vorher nicht", sondern meistens "das ist schon der unveraenderte
+// Originalzustand" (z.B. weil ein frueherer Entfernen-Vorgang das
+// Backup bereits konsumiert/wiederhergestellt hat). Deshalb NIE
+// loeschen, wenn kein Backup existiert -- nur wiederherstellen, wenn
+// eins da ist, sonst die Datei unangetastet lassen. Ein faelschlich
+// geloeschtes named.conf.local hat bei einem echten Test bereits
+// dnsmgrs komplette Zonenkonfiguration zerstoert.
+static void restoreBackupOrLeaveAlone(const FXString& path) {
+	FXString backup = path + BACKUP_SUFFIX;
+	if (access(backup.text(), F_OK) == 0) {
+		runAsRoot({ FXString("mv"), backup, path });
+	}
+	// kein "else rm -f" hier -- absichtlich!
 }
 
 static bool configureBindForWin2k(FXString& errorMsg) {
@@ -548,9 +570,11 @@ static bool removeActiveDirectory(std::string& log, FXString& errorMsg) {
 	log += "Stelle ursprüngliche smb.conf wieder her (falls vorhanden)...\n";
 	restoreBackupOrRemove(SMB_CONF);
 
-	log += "Stelle ursprüngliche BIND9-Konfiguration wieder her (falls vorhanden)...\n";
-	restoreBackupOrRemove(BIND_LOCAL);
-	restoreBackupOrRemove(BIND_OPTIONS);
+	log += "Stelle ursprüngliche BIND9-Konfiguration wieder her (falls ein Backup\n"
+	       "existiert -- sonst bleibt die Datei unangetastet, da sie dann vermutlich\n"
+	       "schon dnsmgrs unveränderter Originalzustand ist)...\n";
+	restoreBackupOrLeaveAlone(BIND_LOCAL);
+	restoreBackupOrLeaveAlone(BIND_OPTIONS);
 
 	log += "Starte bind9 und smbd/nmbd neu, deaktiviere samba-ad-dc...\n";
 	bool r1 = runAsRoot({ FXString("systemctl"), FXString("disable"), FXString("--now"), FXString("samba-ad-dc") }) == 0;
