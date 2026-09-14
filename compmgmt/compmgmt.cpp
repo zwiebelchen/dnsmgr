@@ -108,6 +108,38 @@ static std::vector<std::string> splitStr(const std::string& s, char sep) {
 	return out;
 }
 
+// ---------------------------------------------------------------------
+// Domaenencontroller-Erkennung -- gleiches Muster wie in dcpromo/dsadmin.
+// Anders als bei Windows verschwinden die Linux-Konten (/etc/passwd)
+// NICHT, wenn der Server zum AD-Domaenencontroller wird -- samba-tool
+// domain provision ersetzt nur Sambas eigene Passwort-Datenbank
+// (tdbsam), nicht die Unix-Konten selbst. Diese bleiben fuer SSH/sudo/
+// Systemdienste weiterhin nötig. Deshalb sperren wir hier NICHT wie im
+// Original, sondern deuten um: weiterhin nutzbar als Verwaltung fuer
+// lokale Linux-Systemkonten, aber ohne Samba-Anbindung fuer neue/
+// geaenderte Konten (die alte tdbsam-Datenbank ist nach der AD-
+// Provisionierung ohnehin verwaist -- smbd/nmbd laufen dann gar nicht
+// mehr, ihre Aufgabe uebernimmt der vereinheitlichte samba-ad-dc-Prozess).
+static bool isDomainController() {
+	std::ifstream in("/etc/samba/smb.conf");
+	if (!in.is_open()) return false;
+	std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	std::string line;
+	std::istringstream iss(content);
+	while (std::getline(iss, line)) {
+		size_t p = line.find('=');
+		if (p == std::string::npos) continue;
+		std::string k = line.substr(0, p);
+		size_t a = k.find_first_not_of(" \t");
+		size_t b = k.find_last_not_of(" \t");
+		if (a == std::string::npos) continue;
+		k = k.substr(a, b - a + 1);
+		if (k != "server role") continue;
+		return line.find("domain controller") != std::string::npos;
+	}
+	return false;
+}
+
 static std::vector<UserInfo> parseUsers() {
 	std::vector<UserInfo> out;
 	std::ifstream in("/etc/passwd");
@@ -439,6 +471,8 @@ private:
 
 	NodeKind currentNodeKind;
 	FXString contextUserName, contextGroupName;
+	bool isDC;
+	FXLabel* dcNoticeLabel;
 
 protected:
 	CompMgmt() {}
@@ -494,6 +528,8 @@ static void setListColumns(FXIconList* list, std::vector<std::pair<FXString,int>
 CompMgmt::CompMgmt(FXApp* a)
 	: FXMainWindow(a, "Computerverwaltung", NULL, NULL, DECOR_ALL, 0, 0, 820, 480, 0,0,0,0,0,0),
 	  currentNodeKind(NK_NONE) {
+
+	isDC = isDomainController();
 
 	topdock = new FXDockSite(this, FRAME_SUNKEN | DOCKSITE_NO_WRAP | LAYOUT_SIDE_TOP | LAYOUT_FILL_X);
 
@@ -557,6 +593,12 @@ CompMgmt::CompMgmt(FXApp* a)
 	btn = new FXButton(toolbar, "\tHilfe", icoHelp, this, ID_ABOUT, BUTTON_TOOLBAR|FRAME_RAISED|LAYOUT_CENTER_Y,0,0,0,0,2,2,2,2);
 
 	new FXSeparator(this, SEPARATOR_NONE|LAYOUT_FIX_HEIGHT, 0,0,0,2);
+
+	dcNoticeLabel = new FXLabel(this,
+		"Dieser Server ist ein Domänencontroller. Netzwerk-Anmeldekonten werden über \"Active Directory-Benutzer und -Computer\" verwaltet -- diese Ansicht zeigt nur noch lokale Linux-Systemkonten (SSH, sudo, Dienste), ohne Samba-Netzwerkfreigabe-Anbindung.",
+		NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 6,6,4,4);
+	dcNoticeLabel->setBackColor(FXRGB(255, 250, 205));
+	if (!isDC) dcNoticeLabel->hide();
 
 	splitter = new FXSplitter(this, LAYOUT_FILL_X|LAYOUT_FILL_Y|SPLITTER_TRACKING);
 
@@ -738,10 +780,10 @@ long CompMgmt::onUserProperties(FXObject*, FXSelector, void*) {
 	if (wantDisabled != u.locked) {
 		if (wantDisabled) {
 			runAsRoot({ FXString("usermod"), FXString("-L"), u.username });
-			runAsRoot({ FXString("smbpasswd"), FXString("-d"), u.username });
+			if (!isDC) runAsRoot({ FXString("smbpasswd"), FXString("-d"), u.username });
 		} else {
 			runAsRoot({ FXString("usermod"), FXString("-U"), u.username });
-			runAsRoot({ FXString("smbpasswd"), FXString("-e"), u.username });
+			if (!isDC) runAsRoot({ FXString("smbpasswd"), FXString("-e"), u.username });
 		}
 	}
 
@@ -772,8 +814,10 @@ long CompMgmt::onSetPassword(FXObject*, FXSelector, void*) {
 	std::string chpasswdInput = std::string(contextUserName.text()) + ":" + pw.text() + "\n";
 	runAsRootWithStdin({ FXString("chpasswd") }, chpasswdInput);
 
-	std::string smbInput = std::string(pw.text()) + "\n" + pw.text() + "\n";
-	runAsRootWithStdin({ FXString("smbpasswd"), FXString("-s"), FXString("-a"), contextUserName }, smbInput);
+	if (!isDC) {
+		std::string smbInput = std::string(pw.text()) + "\n" + pw.text() + "\n";
+		runAsRootWithStdin({ FXString("smbpasswd"), FXString("-s"), FXString("-a"), contextUserName }, smbInput);
+	}
 
 	// chpasswd/"smbpasswd -a" setzen den Passwort-Hash komplett neu und
 	// heben dabei nebenbei eine vorherige Sperre auf ("!"-Praefix bzw.
@@ -783,7 +827,7 @@ long CompMgmt::onSetPassword(FXObject*, FXSelector, void*) {
 	for (auto& u : users) {
 		if (u.username == contextUserName && u.locked) {
 			runAsRoot({ FXString("usermod"), FXString("-L"), contextUserName });
-			runAsRoot({ FXString("smbpasswd"), FXString("-d"), contextUserName });
+			if (!isDC) runAsRoot({ FXString("smbpasswd"), FXString("-d"), contextUserName });
 			break;
 		}
 	}
@@ -802,7 +846,7 @@ long CompMgmt::onDeleteUser(FXObject*, FXSelector, void*) {
 	        != MBOX_CLICKED_YES) {
 		return 1;
 	}
-	runAsRoot({ FXString("smbpasswd"), FXString("-x"), contextUserName });
+	if (!isDC) runAsRoot({ FXString("smbpasswd"), FXString("-x"), contextUserName });
 	int rc = runAsRoot({ FXString("userdel"), FXString("-r"), contextUserName });
 	if (rc == 0) {
 		onRefresh(NULL, 0, NULL);
@@ -871,13 +915,15 @@ bool CompMgmt::createUser(const FXString& username, const FXString& fullName, co
 	if (!password.empty()) {
 		std::string chpasswdInput = std::string(uname.text()) + ":" + password.text() + "\n";
 		runAsRootWithStdin({ FXString("chpasswd") }, chpasswdInput);
-		std::string smbInput = std::string(password.text()) + "\n" + password.text() + "\n";
-		runAsRootWithStdin({ FXString("smbpasswd"), FXString("-s"), FXString("-a"), uname }, smbInput);
+		if (!isDC) {
+			std::string smbInput = std::string(password.text()) + "\n" + password.text() + "\n";
+			runAsRootWithStdin({ FXString("smbpasswd"), FXString("-s"), FXString("-a"), uname }, smbInput);
+		}
 	}
 
 	if (disabled) {
 		runAsRoot({ FXString("usermod"), FXString("-L"), uname });
-		runAsRoot({ FXString("smbpasswd"), FXString("-d"), uname });
+		if (!isDC) runAsRoot({ FXString("smbpasswd"), FXString("-d"), uname });
 	}
 
 	onRefresh(NULL, 0, NULL);
