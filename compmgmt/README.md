@@ -57,6 +57,25 @@ make
 Voraussetzung: `samba`/`samba-common-bin` installiert (für
 `smbpasswd`/`pdbedit`).
 
+## Verhalten auf einem Domänencontroller
+
+![Hinweis-Banner auf einem Domänencontroller](../docs/compmgmt/screenshots/screenshot-domaenencontroller-hinweis.png)
+
+Anders als bei Windows verschwinden bei uns die lokalen Linux-Konten
+**nicht**, wenn der Server per `dcpromo` zum Domänencontroller wird --
+`samba-tool domain provision` ersetzt nur Sambas eigene Passwort-
+Datenbank, nicht die Unix-Konten selbst (`/etc/passwd` bleibt
+unangetastet). Diese Konten werden weiterhin für SSH/`sudo`/
+Systemdienste benötigt.
+
+Deshalb sperrt `compmgmt` auf einem Domänencontroller **nicht** wie im
+Original, sondern deutet um: ein gelber Hinweis-Banner erklärt, dass
+Netzwerk-Anmeldekonten jetzt über
+[`dsadmin`](../dsadmin/README.md) verwaltet werden, und alle
+`smbpasswd`-Aufrufe (Anlegen/Kennwort/Aktivieren/Deaktivieren/
+Löschen) werden übersprungen -- die reine Linux-Kontoverwaltung
+(`useradd`/`usermod`/`userdel`/`chpasswd`) läuft unverändert weiter.
+
 ## Bekannte Grenzen / mögliche nächste Schritte
 - Freigegebene Ordner (Freigaben, Sitzungen, Offene Dateien) fehlen
   noch komplett -- kommt als nächster Zweig.
