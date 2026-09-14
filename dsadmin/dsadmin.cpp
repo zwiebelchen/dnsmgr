@@ -1,0 +1,997 @@
+// dsadmin.cpp
+//
+// "Active Directory-Benutzer und -Computer" fuer ice2k -- Nachbau des
+// echten dsa.msc-Snapins. Backend: Samba-AD-Domaene via samba-tool
+// (user/group/ou/computer/gpo).
+//
+// Ergaenzt compmgmt (das nach der AD-Installation nur noch fuer
+// eigenstaendige Server zustaendig ist) um die Verwaltung von
+// Domaenenkonten. Enthaelt ausserdem den "Gruppenrichtlinie"-Reiter
+// (GPOs anlegen/verknuepfen -- der eigentliche Editor der
+// Administrativen Vorlagen ist ein eigener, spaeterer Baustein).
+
+#include <fx.h>
+#include <FXPNGIcon.h>
+#include <FXGIFIcon.h>
+#include "res/foxres.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <vector>
+#include <string>
+#include <set>
+#include <map>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+
+FXApp* app;
+static bool g_haveRoot = false;
+
+// ---------------------------------------------------------------------
+// Root-Rechte ueber i2ksudo -- identisches Muster wie in den anderen
+// ice2k-Tools.
+// ---------------------------------------------------------------------
+static int runAsRoot(const std::vector<FXString>& args) {
+	std::vector<char*> argv;
+	argv.push_back((char*)"i2ksudo");
+	for (auto& a : args) argv.push_back((char*)a.text());
+	argv.push_back(NULL);
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		execvp("i2ksudo", argv.data());
+		_exit(127);
+	} else if (pid > 0) {
+		int status = 0;
+		waitpid(pid, &status, 0);
+		if (WIFEXITED(status)) return WEXITSTATUS(status);
+		return -1;
+	}
+	return -1;
+}
+
+static int runAsRootCaptured(const std::vector<FXString>& args, std::string& output) {
+	std::vector<char*> argv;
+	argv.push_back((char*)"i2ksudo");
+	for (auto& a : args) argv.push_back((char*)a.text());
+	argv.push_back(NULL);
+
+	int pipefd[2];
+	if (pipe(pipefd) != 0) return -1;
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[0]);
+		close(pipefd[1]);
+		execvp("i2ksudo", argv.data());
+		_exit(127);
+	} else if (pid > 0) {
+		close(pipefd[1]);
+		char buf[4096];
+		ssize_t n;
+		while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) output.append(buf, n);
+		close(pipefd[0]);
+		int status = 0;
+		waitpid(pid, &status, 0);
+		if (WIFEXITED(status)) return WEXITSTATUS(status);
+		return -1;
+	}
+	return -1;
+}
+
+static std::vector<std::string> splitLines(const std::string& s) {
+	std::vector<std::string> out;
+	std::istringstream iss(s);
+	std::string line;
+	while (std::getline(iss, line)) {
+		if (!line.empty() && line.back() == '\r') line.pop_back();
+		out.push_back(line);
+	}
+	return out;
+}
+
+static std::string trimStr(const std::string& s) {
+	size_t a = s.find_first_not_of(" \t");
+	size_t b = s.find_last_not_of(" \t");
+	if (a == std::string::npos) return "";
+	return s.substr(a, b - a + 1);
+}
+
+// ---------------------------------------------------------------------
+// Domaenenstatus -- liest realm/Basis-DN aus smb.conf (unprivilegiert,
+// die Datei ist nach der Provisionierung 644, wie schon bei dcpromo).
+// ---------------------------------------------------------------------
+static std::string readFileUnprivileged(const char* path) {
+	std::ifstream in(path);
+	if (!in.is_open()) return "";
+	return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+static FXString smbConfValue(const std::string& conf, const char* key) {
+	for (auto& line : splitLines(conf)) {
+		size_t p = line.find('=');
+		if (p == std::string::npos) continue;
+		std::string k = trimStr(line.substr(0, p));
+		if (k != key) continue;
+		return FXString(trimStr(line.substr(p + 1)).c_str());
+	}
+	return "";
+}
+
+struct DomainInfo {
+	bool isDC = false;
+	FXString realm;      // z.B. ZWIEBELCHEN.ORG
+	FXString baseDN;     // z.B. DC=zwiebelchen,DC=org
+};
+
+static DomainInfo detectDomain() {
+	DomainInfo di;
+	std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
+	if (conf.empty()) return di;
+	FXString role = smbConfValue(conf, "server role");
+	if (role.find("domain controller") < 0) return di;
+	di.isDC = true;
+	di.realm = smbConfValue(conf, "realm");
+	FXString lower = di.realm;
+	lower.lower();
+	FXString dn;
+	int start = 0;
+	for (;;) {
+		int dot = lower.find('.', start);
+		FXString part = (dot >= 0) ? lower.mid(start, dot - start) : lower.mid(start, lower.length() - start);
+		if (part.empty()) break;
+		if (!dn.empty()) dn += ",";
+		dn += "DC=" + part;
+		if (dot < 0) break;
+		start = dot + 1;
+	}
+	di.baseDN = dn;
+	return di;
+}
+
+// ---------------------------------------------------------------------
+// Container/OU-Baum und Objektlisten -- ueber samba-tool, mit den
+// bekannten Einschraenkungen einer Kommandozeilen-Bruecke (etwas
+// langsamer als direktes LDAP, aber konsistent mit allen anderen
+// ice2k-Tools und ohne zusaetzliche Bibliotheksabhaengigkeit).
+// ---------------------------------------------------------------------
+enum ObjType { OBJ_OU, OBJ_USER, OBJ_GROUP, OBJ_COMPUTER, OBJ_CONTAINER, OBJ_OTHER };
+
+struct DirObject {
+	FXString name;        // Anzeigename (CN), z.B. "Max Mustermann"
+	FXString accountName; // sAMAccountName -- fuer Loeschen/Umbenennen etc. (bei
+	                       // Benutzern/Gruppen/Computern; sonst leer)
+	FXString dn;          // volle relative DN (ohne Basis-DN), z.B. "CN=Max Mustermann,CN=Users"
+	ObjType type;
+	FXString description;
+};
+
+static std::vector<FXString> listNames(const std::vector<FXString>& args) {
+	std::string out;
+	runAsRootCaptured(args, out);
+	std::vector<FXString> names;
+	for (auto& l : splitLines(out)) {
+		FXString n = trimStr(l).c_str();
+		if (!n.empty()) names.push_back(n);
+	}
+	return names;
+}
+
+// Listet alle direkten Kind-Container/OUs ab einer gegebenen relativen
+// DN (leer = Domaenenwurzel). Nur die klassifizierbaren Standard-
+// Container werden im Baum gezeigt (Users/Computers/Builtin/Domain
+// Controllers) plus alle echten OUs -- weitere technische Container
+// (Program Data, System, ...) blenden wir bewusst aus, wie im
+// Original auch nur nach Aktivieren der erweiterten Ansicht sichtbar.
+static const std::set<std::string> VISIBLE_TOP_CONTAINERS = {
+	"CN=Users", "CN=Computers", "CN=Builtin", "OU=Domain Controllers"
+};
+
+static std::vector<FXString> listTopContainers() {
+	std::vector<FXString> out;
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("listobjects"), FXString("") }, raw);
+	for (auto& l : splitLines(raw)) {
+		FXString n = trimStr(l).c_str();
+		if (n.empty()) continue;
+		if (VISIBLE_TOP_CONTAINERS.count(n.text()) || n.left(3) == "OU=") out.push_back(n);
+	}
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+// Objekte innerhalb eines Containers (relative DN, z.B. "CN=Users"),
+// mit Typklassifizierung per Abgleich gegen die jeweiligen
+// samba-tool-*-list-Ausgaben.
+// Baut eine Abbildung von relativer DN -> sAMAccountName fuer einen
+// Objekttyp, ueber Positions-Abgleich zwischen einem normalen
+// samba-tool-*-list-Aufruf und demselben Aufruf mit --full-dn (beide
+// liefern die Objekte in derselben Reihenfolge). Robuster als ein
+// Namensabgleich, da der CN einer Person haeufig ihr voller Name ist
+// (z.B. "Max Mustermann"), nicht der Anmeldename (z.B. "mmustermann").
+static std::map<std::string, FXString> buildDnToSamMap(const char* subcmd, const FXString& baseDN) {
+	std::map<std::string, FXString> out;
+	std::vector<FXString> plain = listNames({ FXString("samba-tool"), FXString(subcmd), FXString("list") });
+	std::vector<FXString> dns = listNames({ FXString("samba-tool"), FXString(subcmd), FXString("list"), FXString("--full-dn") });
+	size_t n = std::min(plain.size(), dns.size());
+	FXString suffix = "," + baseDN;
+	for (size_t i = 0; i < n; i++) {
+		FXString rel = dns[i];
+		if (rel.right(suffix.length()) == suffix) rel = rel.left(rel.length() - suffix.length());
+		out[rel.text()] = plain[i];
+	}
+	return out;
+}
+
+static std::vector<DirObject> listContainerObjects(const FXString& containerRelDN, const DomainInfo& domain) {
+	std::vector<DirObject> out;
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("listobjects"), containerRelDN }, raw);
+
+	auto userMap = buildDnToSamMap("user", domain.baseDN);
+	auto groupMap = buildDnToSamMap("group", domain.baseDN);
+	auto computerMap = buildDnToSamMap("computer", domain.baseDN);
+
+	for (auto& l : splitLines(raw)) {
+		FXString full = trimStr(l).c_str();
+		if (full.empty()) continue;
+		// Nur direkte Kinder dieses Containers (kein "," nach dem ersten Segment
+		// ausser dem Container selbst) -- listobjects liefert leider auch
+		// tiefer verschachtelte Objekte, die wir hier ausfiltern.
+		int firstComma = full.find(',');
+		FXString rest = (firstComma >= 0) ? full.mid(firstComma + 1, full.length() - firstComma - 1) : FXString("");
+		if (rest != containerRelDN) continue;
+
+		FXString cnPart = (firstComma >= 0) ? full.left(firstComma) : full;
+		FXString name = cnPart;
+		if (name.left(3) == "CN=") name = name.mid(3, name.length() - 3);
+		else if (name.left(3) == "OU=") name = name.mid(3, name.length() - 3);
+
+		DirObject obj;
+		obj.name = name;
+		obj.dn = full;
+		obj.type = OBJ_OTHER;
+		// Bekannte technische Container zuerst abfangen -- sonst kann z.B.
+		// der Container "CN=Users" faelschlich mit der GLEICHNAMIGEN
+		// eingebauten Gruppe "Users" (in Builtin) verwechselt werden.
+		static const std::set<std::string> KNOWN_CONTAINERS = {
+			"Users", "Computers", "Builtin", "System", "Program Data",
+			"ForeignSecurityPrincipals", "Infrastructure", "Keys",
+			"LostAndFound", "Managed Service Accounts", "NTDS Quotas",
+			"TPM Devices"
+		};
+		if (cnPart.left(3) == "OU=") obj.type = OBJ_OU;
+		else if (KNOWN_CONTAINERS.count(name.text())) obj.type = OBJ_CONTAINER;
+		else if (computerMap.count(full.text())) { obj.type = OBJ_COMPUTER; obj.accountName = computerMap[full.text()]; }
+		else if (groupMap.count(full.text())) { obj.type = OBJ_GROUP; obj.accountName = groupMap[full.text()]; }
+		else if (userMap.count(full.text())) { obj.type = OBJ_USER; obj.accountName = userMap[full.text()]; }
+		out.push_back(obj);
+	}
+	std::sort(out.begin(), out.end(), [](const DirObject& a, const DirObject& b) {
+		if (a.type != b.type) return a.type < b.type;
+		return a.name < b.name;
+	});
+	return out;
+}
+
+// ---------------------------------------------------------------------
+// CRUD-Hüllen um samba-tool.
+// ---------------------------------------------------------------------
+static bool createUser(const FXString& username, const FXString& password, const FXString& fullName,
+                        const FXString& ouRelDN, FXString& errorMsg) {
+	std::vector<FXString> args = { FXString("samba-tool"), FXString("user"), FXString("create"), username, password };
+	if (!fullName.empty()) { args.push_back(FXString("--given-name=") + fullName); }
+	if (!ouRelDN.empty()) { args.push_back(FXString("--userou=") + ouRelDN); }
+	std::string out;
+	int rc = runAsRootCaptured(args, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool deleteUser(const FXString& username, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("delete"), username }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool createGroup(const FXString& groupname, const FXString& ouRelDN, FXString& errorMsg) {
+	std::vector<FXString> args = { FXString("samba-tool"), FXString("group"), FXString("add"), groupname };
+	if (!ouRelDN.empty()) args.push_back(FXString("--groupou=") + ouRelDN);
+	std::string out;
+	int rc = runAsRootCaptured(args, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool deleteGroup(const FXString& groupname, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("delete"), groupname }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool createOU(const FXString& ouDN, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("add"), ouDN }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool deleteOU(const FXString& ouDN, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("delete"), ouDN }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// GPOs -- fuer den "Gruppenrichtlinie"-Reiter.
+// ---------------------------------------------------------------------
+struct GpoInfo {
+	FXString guid, displayName;
+};
+
+static std::vector<GpoInfo> listAllGpos() {
+	std::vector<GpoInfo> out;
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("listall") }, raw);
+	GpoInfo cur;
+	for (auto& l : splitLines(raw)) {
+		if (l.rfind("GPO", 0) == 0) {
+			size_t p = l.find(':');
+			if (p != std::string::npos) cur.guid = trimStr(l.substr(p + 1)).c_str();
+		} else if (l.rfind("display name", 0) == 0) {
+			size_t p = l.find(':');
+			if (p != std::string::npos) cur.displayName = trimStr(l.substr(p + 1)).c_str();
+			out.push_back(cur);
+			cur = GpoInfo();
+		}
+	}
+	return out;
+}
+
+// Verknuepfte GPOs (in Verknuepfungsreihenfolge) fuer eine Domaene/OU (volle DN).
+static std::vector<FXString> listLinkedGpoGuids(const FXString& fullDN) {
+	std::vector<FXString> out;
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("getlink"), fullDN }, raw);
+	for (auto& l : splitLines(raw)) {
+		size_t p = l.find('{');
+		size_t q = l.find('}');
+		if (p != std::string::npos && q != std::string::npos && q > p) {
+			out.push_back(FXString(l.substr(p, q - p + 1).c_str()));
+		}
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------
+// GPOs anlegen/verknuepfen/loesen sind LDAP-Schreibzugriffe auf einen
+// besonders geschuetzten Container (CN=Policies,CN=System) -- root
+// bzw. das Maschinenkonto des DC reichen dafuer NICHT aus (genau wie im
+// echten AD: nur Domain Admins duerfen GPOs anlegen). Lesen (listall/
+// getlink) funktioniert dagegen problemlos als root. Deshalb fragen wir
+// fuer die paar schreibenden GPO-Aktionen einmalig echte Administrator-
+// Anmeldedaten ab und cachen sie fuer die laufende Sitzung.
+static FXString g_adminUser, g_adminPass;
+static bool g_haveAdminCreds = false;
+
+class AdminCredsDialog : public FXDialogBox {
+	FXDECLARE(AdminCredsDialog)
+private:
+	FXTextField *userField, *pwField;
+protected:
+	AdminCredsDialog() {}
+public:
+	AdminCredsDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Administrator-Anmeldedaten", DECOR_TITLE | DECOR_BORDER, 0,0,360,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Für Gruppenrichtlinien-Änderungen werden Domain-\nAdmin-Anmeldedaten benötigt:");
+		new FXLabel(main, "Benutzername:");
+		userField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		userField->setText("administrator");
+		new FXLabel(main, "Kennwort:");
+		pwField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X | TEXTFIELD_PASSWD);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getUser() const { return userField->getText(); }
+	FXString getPassword() const { return pwField->getText(); }
+	virtual ~AdminCredsDialog() {}
+};
+FXIMPLEMENT(AdminCredsDialog, FXDialogBox, NULL, 0)
+
+// Gibt bei Erfolg "-U user%pass" als einzelnes Argument zurueck, sonst leer.
+static FXString ensureAdminCreds(FXWindow* owner) {
+	if (g_haveAdminCreds) return FXString("-U") + g_adminUser + "%" + g_adminPass;
+	AdminCredsDialog dlg(owner);
+	if (!dlg.execute(PLACEMENT_OWNER)) return "";
+	g_adminUser = dlg.getUser();
+	g_adminPass = dlg.getPassword();
+	g_haveAdminCreds = true;
+	return FXString("-U") + g_adminUser + "%" + g_adminPass;
+}
+
+static bool createGpo(FXWindow* owner, const FXString& displayName, FXString& errorMsg) {
+	FXString cred = ensureAdminCreds(owner);
+	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann kein GPO angelegt werden."; return false; }
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("create"), displayName, cred }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool linkGpo(FXWindow* owner, const FXString& guid, const FXString& containerFullDN, FXString& errorMsg) {
+	FXString cred = ensureAdminCreds(owner);
+	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann kein GPO verknüpft werden."; return false; }
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("setlink"), containerFullDN, guid, cred }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool unlinkGpo(FXWindow* owner, const FXString& guid, const FXString& containerFullDN, FXString& errorMsg) {
+	FXString cred = ensureAdminCreds(owner);
+	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann die Verknüpfung nicht entfernt werden."; return false; }
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("dellink"), containerFullDN, guid, cred }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// Dialog "Neuer Benutzer"
+// ---------------------------------------------------------------------
+class NewUserDialog : public FXDialogBox {
+	FXDECLARE(NewUserDialog)
+private:
+	FXTextField *fullNameField, *usernameField, *pwField, *pwConfirmField;
+protected:
+	NewUserDialog() {}
+public:
+	NewUserDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Neues Objekt - Benutzer", DECOR_TITLE | DECOR_BORDER, 0,0,380,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Vollständiger Name:");
+		fullNameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		new FXLabel(main, "Benutzeranmeldename:");
+		usernameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		new FXLabel(main, "Kennwort:");
+		pwField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X | TEXTFIELD_PASSWD);
+		new FXLabel(main, "Kennwort bestätigen:");
+		pwConfirmField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X | TEXTFIELD_PASSWD);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getFullName() const { return fullNameField->getText(); }
+	FXString getUsername() const { return usernameField->getText(); }
+	FXString getPassword() const { return pwField->getText(); }
+	FXString getConfirm() const { return pwConfirmField->getText(); }
+	virtual ~NewUserDialog() {}
+};
+FXIMPLEMENT(NewUserDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Neue Gruppe"
+// ---------------------------------------------------------------------
+class NewGroupDialog : public FXDialogBox {
+	FXDECLARE(NewGroupDialog)
+private:
+	FXTextField* nameField;
+protected:
+	NewGroupDialog() {}
+public:
+	NewGroupDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Neues Objekt - Gruppe", DECOR_TITLE | DECOR_BORDER, 0,0,360,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Gruppenname:");
+		nameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getName() const { return nameField->getText(); }
+	virtual ~NewGroupDialog() {}
+};
+FXIMPLEMENT(NewGroupDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Neue Organisationseinheit"
+// ---------------------------------------------------------------------
+class NewOUDialog : public FXDialogBox {
+	FXDECLARE(NewOUDialog)
+private:
+	FXTextField* nameField;
+protected:
+	NewOUDialog() {}
+public:
+	NewOUDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Neues Objekt - Organisationseinheit", DECOR_TITLE | DECOR_BORDER, 0,0,360,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Name:");
+		nameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getName() const { return nameField->getText(); }
+	virtual ~NewOUDialog() {}
+};
+FXIMPLEMENT(NewOUDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" von Domäne/OU -- mit dem "Gruppenrichtlinie"-
+// Reiter (Original-Vorbild: Screenshot des Nutzers). Der eigentliche
+// Editor der Administrativen Vorlagen ist ein eigener, spaeterer
+// Baustein -- hier nur Verknuepfen/Loesen/Anlegen von GPOs.
+// ---------------------------------------------------------------------
+class PropertiesDialog : public FXDialogBox {
+	FXDECLARE(PropertiesDialog)
+private:
+	FXString containerFullDN;
+	FXList* gpoList;
+	std::vector<FXString> linkedGuids;
+	std::map<FXString, FXString> guidToName;
+public:
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO };
+	long onNewGpo(FXObject*, FXSelector, void*);
+	long onAddGpo(FXObject*, FXSelector, void*);
+	long onRemoveGpo(FXObject*, FXSelector, void*);
+
+	void reloadList() {
+		gpoList->clearItems();
+		linkedGuids = listLinkedGpoGuids(containerFullDN);
+		auto allGpos = listAllGpos();
+		guidToName.clear();
+		for (auto& g : allGpos) guidToName[g.guid] = g.displayName;
+		for (auto& guid : linkedGuids) {
+			FXString label = guidToName.count(guid) ? guidToName[guid] : guid;
+			gpoList->appendItem(label);
+		}
+	}
+protected:
+	PropertiesDialog() {}
+public:
+	PropertiesDialog(FXWindow* owner, const FXString& title, const FXString& fullDN)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,420),
+		  containerFullDN(fullDN) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		new FXTabItem(tabs, "Gruppenrichtlinie");
+		FXVerticalFrame* gpoPage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXLabel(gpoPage, "Aktuelle Gruppenrichtlinienobjekt-Verknüpfungen für\n" + title + ":");
+		gpoList = new FXList(gpoPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		FXHorizontalFrame* gpoBtns = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		new FXButton(gpoBtns, "&Neu", NULL, this, ID_NEW_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+
+		reloadList();
+	}
+	virtual ~PropertiesDialog() {}
+};
+FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_NEW_GPO, PropertiesDialog::onNewGpo),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_ADD_GPO, PropertiesDialog::onAddGpo),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_REMOVE_GPO, PropertiesDialog::onRemoveGpo),
+};
+FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
+
+long PropertiesDialog::onNewGpo(FXObject*, FXSelector, void*) {
+	FXString name;
+	if (FXInputDialog::getString(name, this, "Neues Gruppenrichtlinienobjekt", "Name des neuen GPO:") ) {
+		if (name.trim().empty()) return 1;
+		FXString errorMsg;
+		if (!createGpo(this, name, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return 1;
+		}
+		auto all = listAllGpos();
+		FXString guid;
+		for (auto& g : all) if (g.displayName == name) guid = g.guid;
+		if (!guid.empty()) linkGpo(this, guid, containerFullDN, errorMsg);
+		reloadList();
+	}
+	return 1;
+}
+
+long PropertiesDialog::onAddGpo(FXObject*, FXSelector, void*) {
+	auto all = listAllGpos();
+	FXString choices;
+	std::vector<FXString> guids;
+	for (auto& g : all) {
+		if (std::find(linkedGuids.begin(), linkedGuids.end(), g.guid) != linkedGuids.end()) continue;
+		if (!choices.empty()) choices += "\n";
+		choices += g.displayName;
+		guids.push_back(g.guid);
+	}
+	if (guids.empty()) {
+		FXMessageBox::information(this, MBOX_OK, "Hinzufügen", "Es gibt keine weiteren, noch nicht verknüpften Gruppenrichtlinienobjekte.");
+		return 1;
+	}
+	FXint sel = FXMessageBox::information(this, MBOX_YES_NO, "GPO verknüpfen", "%s\n\nDas erste in der Liste jetzt verknüpfen?", choices.text());
+	if (sel == MBOX_CLICKED_YES) {
+		FXString errorMsg;
+		linkGpo(this, guids[0], containerFullDN, errorMsg);
+		reloadList();
+	}
+	return 1;
+}
+
+long PropertiesDialog::onRemoveGpo(FXObject*, FXSelector, void*) {
+	int idx = gpoList->getCurrentItem();
+	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
+	FXString errorMsg;
+	unlinkGpo(this, linkedGuids[idx], containerFullDN, errorMsg);
+	reloadList();
+	return 1;
+}
+
+// ---------------------------------------------------------------------
+// Hauptfenster
+// ---------------------------------------------------------------------
+class DsAdminWindow : public FXMainWindow {
+	FXDECLARE(DsAdminWindow)
+private:
+	FXMenuBar* menubar;
+	FXMenuPane *konsolemenu, *vorgangmenu, *hilfemenu;
+	FXToolBar* toolbar;
+	FXSplitter* splitter;
+	FXTreeList* tree;
+	FXIconList* list;
+
+	FXIcon *icoRoot, *icoFolder, *icoUser, *icoUsers, *icoServer;
+
+	DomainInfo domain;
+	std::map<FXTreeItem*, FXString> itemToRelDN; // Baum-Item -> relative DN des Containers
+	FXTreeItem* domainRootItem;
+	FXString currentContainerRelDN;
+	std::vector<DirObject> currentObjects;
+	FXString statusText;
+	bool propertiesFromList = false; // steuert onProperties(): Baum- oder Listen-Rechtsklick war die Quelle
+	FXLabel* statusLabel;
+
+protected:
+	DsAdminWindow() {}
+public:
+	enum {
+		ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT,
+		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_DELETE_OBJECT, ID_PROPERTIES
+	};
+	long onTreeChanged(FXObject*, FXSelector, void*);
+	long onTreeRightClick(FXObject*, FXSelector, void*);
+	long onListRightClick(FXObject*, FXSelector, void*);
+	long onRefresh(FXObject*, FXSelector, void*);
+	long onAbout(FXObject*, FXSelector, void*);
+	long onNewUser(FXObject*, FXSelector, void*);
+	long onNewGroup(FXObject*, FXSelector, void*);
+	long onNewOU(FXObject*, FXSelector, void*);
+	long onDeleteObject(FXObject*, FXSelector, void*);
+	long onProperties(FXObject*, FXSelector, void*);
+
+	DsAdminWindow(FXApp* a);
+	void loadTree();
+	void showContainer(FXString relDN);
+	virtual void create();
+	virtual ~DsAdminWindow() {}
+};
+
+FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
+	FXMAPFUNC(SEL_CHANGED, DsAdminWindow::ID_TREE, DsAdminWindow::onTreeChanged),
+	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DsAdminWindow::ID_TREE, DsAdminWindow::onTreeRightClick),
+	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DsAdminWindow::ID_LIST, DsAdminWindow::onListRightClick),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_REFRESH, DsAdminWindow::onRefresh),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_ABOUT, DsAdminWindow::onAbout),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_USER, DsAdminWindow::onNewUser),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_GROUP, DsAdminWindow::onNewGroup),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_OU, DsAdminWindow::onNewOU),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_DELETE_OBJECT, DsAdminWindow::onDeleteObject),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_PROPERTIES, DsAdminWindow::onProperties),
+};
+FXIMPLEMENT(DsAdminWindow, FXMainWindow, DsAdminWindowMap, ARRAYNUMBER(DsAdminWindowMap))
+
+DsAdminWindow::DsAdminWindow(FXApp* a)
+	: FXMainWindow(a, "Active Directory-Benutzer und -Computer", NULL, NULL, DECOR_ALL, 0, 0, 820, 480) {
+
+	domain = detectDomain();
+
+	FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
+
+	menubar = new FXMenuBar(main, LAYOUT_SIDE_TOP | LAYOUT_FILL_X | FRAME_RAISED);
+	konsolemenu = new FXMenuPane(this);
+	new FXMenuTitle(menubar, "&Konsole", NULL, konsolemenu);
+	new FXMenuCommand(konsolemenu, "&Beenden", NULL, getApp(), FXApp::ID_QUIT);
+	vorgangmenu = new FXMenuPane(this);
+	new FXMenuTitle(menubar, "&Vorgang", NULL, vorgangmenu);
+	new FXMenuCommand(vorgangmenu, "&Aktualisieren", NULL, this, ID_REFRESH);
+	hilfemenu = new FXMenuPane(this);
+	new FXMenuTitle(menubar, "&?", NULL, hilfemenu);
+	new FXMenuCommand(hilfemenu, "&Info...", NULL, this, ID_ABOUT);
+
+	toolbar = new FXToolBar(main, LAYOUT_SIDE_TOP | LAYOUT_FILL_X | FRAME_RAISED);
+	FXGIFIcon* icoRefresh = new FXGIFIcon(getApp(), resico_mmc_refresh);
+	new FXButton(toolbar, "\tAktualisieren", icoRefresh, this, ID_REFRESH, BUTTON_TOOLBAR|FRAME_RAISED|LAYOUT_CENTER_Y,0,0,0,0,2,2,2,2);
+
+	splitter = new FXSplitter(main, LAYOUT_FILL_X|LAYOUT_FILL_Y|SPLITTER_TRACKING);
+	FXPacker* treeframe = new FXPacker(splitter, FRAME_NORMAL|LAYOUT_FILL_Y, 0,0,260,0, 0,0,0,0);
+	tree = new FXTreeList(treeframe, this, ID_TREE,
+	                       SCROLLERS_DONT_TRACK|FRAME_NORMAL|LAYOUT_FILL_X|LAYOUT_FILL_Y|
+	                       TREELIST_SHOWS_BOXES|TREELIST_SHOWS_LINES|TREELIST_BROWSESELECT|TREELIST_ROOT_BOXES);
+	FXPacker* listframe = new FXPacker(splitter, FRAME_NORMAL|LAYOUT_FILL_Y|LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+	list = new FXIconList(listframe, this, ID_LIST,
+	                       ICONLIST_DETAILED|ICONLIST_BROWSESELECT|LAYOUT_FILL_X|LAYOUT_FILL_Y|FRAME_NORMAL);
+	list->appendHeader("Name", NULL, 200);
+	list->appendHeader("Typ", NULL, 140);
+	list->appendHeader("Beschreibung", NULL, 260);
+
+	statusLabel = new FXLabel(main, " ", NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 4,4,2,2);
+
+	icoRoot = new FXPNGIcon(getApp(), resico_network, IMAGE_NEAREST); icoRoot->create();
+	icoFolder = new FXPNGIcon(getApp(), resico_folder, IMAGE_NEAREST); icoFolder->create();
+	icoUser = new FXPNGIcon(getApp(), resico_user, IMAGE_NEAREST); icoUser->create();
+	icoUsers = new FXPNGIcon(getApp(), resico_users, IMAGE_NEAREST); icoUsers->create();
+	icoServer = new FXPNGIcon(getApp(), resico_server, IMAGE_NEAREST); icoServer->create();
+
+	loadTree();
+}
+
+void DsAdminWindow::loadTree() {
+	tree->clearItems();
+	itemToRelDN.clear();
+	if (!domain.isDC) {
+		FXTreeItem* it = tree->appendItem(0, "Kein Domänencontroller -- dieser Server hat keine Active-Directory-Domäne.", icoRoot, icoRoot);
+		(void)it;
+		return;
+	}
+	FXString rootLabel = "Active Directory-Benutzer und -Computer [" + domain.realm + "]";
+	FXTreeItem* rootIt = tree->appendItem(0, rootLabel, icoRoot, icoRoot);
+	domainRootItem = tree->appendItem(rootIt, domain.realm, icoServer, icoServer);
+	itemToRelDN[domainRootItem] = "";
+
+	for (auto& cont : listTopContainers()) {
+		FXString label = cont;
+		if (label.left(3) == "CN=") label = label.mid(3, label.length() - 3);
+		else if (label.left(3) == "OU=") label = label.mid(3, label.length() - 3);
+		FXTreeItem* it = tree->appendItem(domainRootItem, label, icoFolder, icoFolder);
+		itemToRelDN[it] = cont;
+	}
+	tree->expandTree(rootIt);
+	tree->expandTree(domainRootItem);
+}
+
+void DsAdminWindow::showContainer(FXString relDN) {
+	currentContainerRelDN = relDN;
+	currentObjects = listContainerObjects(relDN, domain);
+	list->clearItems();
+	for (auto& obj : currentObjects) {
+		const char* typeName = "Objekt";
+		FXIcon* ic = icoFolder;
+		switch (obj.type) {
+			case OBJ_USER: typeName = "Benutzer"; ic = icoUser; break;
+			case OBJ_GROUP: typeName = "Sicherheitsgruppe - Global"; ic = icoUsers; break;
+			case OBJ_COMPUTER: typeName = "Computer"; ic = icoServer; break;
+			case OBJ_OU: typeName = "Organisationseinheit"; ic = icoFolder; break;
+			case OBJ_CONTAINER: typeName = "Container"; ic = icoFolder; break;
+			default: typeName = "Objekt"; ic = icoFolder; break;
+		}
+		FXString txt = obj.name + "\t" + typeName + "\t" + obj.description;
+		list->appendItem(txt, ic, ic);
+	}
+	char buf[64];
+	snprintf(buf, sizeof(buf), "%d Objekt(e)", (int)currentObjects.size());
+	statusLabel->setText(buf);
+}
+
+long DsAdminWindow::onTreeChanged(FXObject*, FXSelector, void*) {
+	FXTreeItem* cur = tree->getCurrentItem();
+	if (!cur || !itemToRelDN.count(cur)) return 1;
+	showContainer(itemToRelDN[cur]);
+	return 1;
+}
+
+long DsAdminWindow::onRefresh(FXObject*, FXSelector, void*) {
+	domain = detectDomain();
+	loadTree();
+	if (!currentContainerRelDN.empty() || currentContainerRelDN == "") showContainer(currentContainerRelDN);
+	return 1;
+}
+
+long DsAdminWindow::onAbout(FXObject*, FXSelector, void*) {
+	FXMessageBox::information(this, MBOX_OK, "Über Active Directory-Benutzer und -Computer",
+		"Active Directory-Benutzer und -Computer für ice2k\n\n"
+		"Verwaltet Domänenkonten (Benutzer/Gruppen/Organisationseinheiten)\n"
+		"und Gruppenrichtlinien-Verknüpfungen einer Samba-AD-Domäne.");
+	return 1;
+}
+
+static bool isOU(const FXString& relDN) { return relDN.left(3) == "OU="; }
+
+static FXString relDNToFullDN(const FXString& relDN, const DomainInfo& domain) {
+	if (relDN.empty()) return domain.baseDN;
+	return relDN + "," + domain.baseDN;
+}
+
+long DsAdminWindow::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
+	FXEvent* ev = (FXEvent*)ptr;
+	FXTreeItem* item = tree->getItemAt(ev->win_x, ev->win_y);
+	if (!item || !itemToRelDN.count(item)) return 1;
+	tree->setCurrentItem(item);
+	tree->selectItem(item);
+	FXString relDN = itemToRelDN[item];
+
+	FXMenuPane menu(this);
+	FXMenuPane neuMenu(this);
+	new FXMenuCommand(&neuMenu, "&Benutzer...", NULL, this, ID_NEW_USER);
+	new FXMenuCommand(&neuMenu, "&Gruppe...", NULL, this, ID_NEW_GROUP);
+	new FXMenuCommand(&neuMenu, "&Organisationseinheit...", NULL, this, ID_NEW_OU);
+	new FXMenuCascade(&menu, "&Neu", NULL, &neuMenu);
+	new FXMenuSeparator(&menu);
+	if (relDN.empty() || isOU(relDN)) {
+		propertiesFromList = false;
+		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_PROPERTIES);
+		new FXMenuSeparator(&menu);
+	}
+	new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
+	menu.create();
+	menu.popup(NULL, ev->root_x, ev->root_y);
+	getApp()->runModalWhileShown(&menu);
+	return 1;
+}
+
+long DsAdminWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
+	FXEvent* ev = (FXEvent*)ptr;
+	FXint idx = list->getItemAt(ev->win_x, ev->win_y);
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	list->setCurrentItem(idx);
+	list->selectItem(idx);
+
+	FXMenuPane menu(this);
+	DirObject& obj = currentObjects[idx];
+	if (obj.type == OBJ_OU) {
+		propertiesFromList = true;
+		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_PROPERTIES);
+		new FXMenuSeparator(&menu);
+	}
+	new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_OBJECT);
+	menu.create();
+	menu.popup(NULL, ev->root_x, ev->root_y);
+	getApp()->runModalWhileShown(&menu);
+	return 1;
+}
+
+long DsAdminWindow::onNewUser(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Benutzer angelegt werden."); return 1; }
+	NewUserDialog dlg(this);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	if (dlg.getUsername().trim().empty()) return 1;
+	if (dlg.getPassword() != dlg.getConfirm()) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "Die Kennwörter stimmen nicht überein.");
+		return 1;
+	}
+	FXString errorMsg;
+	if (!createUser(dlg.getUsername().trim(), dlg.getPassword(), dlg.getFullName(), currentContainerRelDN, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onNewGroup(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Gruppe angelegt werden."); return 1; }
+	NewGroupDialog dlg(this);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	if (dlg.getName().trim().empty()) return 1;
+	FXString errorMsg;
+	if (!createGroup(dlg.getName().trim(), currentContainerRelDN, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onNewOU(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Organisationseinheit angelegt werden."); return 1; }
+	NewOUDialog dlg(this);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	FXString name = dlg.getName().trim();
+	if (name.empty()) return 1;
+	FXString ouDN = FXString("OU=") + name;
+	if (!currentContainerRelDN.empty()) ouDN += "," + currentContainerRelDN;
+	FXString errorMsg;
+	if (!createOU(ouDN, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onDeleteObject(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	DirObject obj = currentObjects[idx];
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden."); return 1; }
+	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	        "\"%s\" wirklich löschen?", obj.name.text()) != MBOX_CLICKED_YES) return 1;
+
+	FXString errorMsg;
+	bool ok = false;
+	switch (obj.type) {
+		case OBJ_USER: ok = deleteUser(obj.accountName, errorMsg); break;
+		case OBJ_GROUP: ok = deleteGroup(obj.accountName, errorMsg); break;
+		case OBJ_OU: ok = deleteOU(relDNToFullDN(obj.dn, domain), errorMsg); break;
+		default: errorMsg = "Dieser Objekttyp kann hier noch nicht gelöscht werden."; break;
+	}
+	if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onProperties(FXObject*, FXSelector, void*) {
+	// propertiesFromList unterscheidet, ob der Rechtsklick im Baum
+	// (Domänenwurzel/OU-Container) oder in der Liste (OU-Objekt) war --
+	// ohne das wuerde hier faelschlich der zuletzt in der Liste
+	// ausgewaehlte Eintrag herangezogen, auch wenn der Baum die
+	// eigentliche Quelle war.
+	FXString title, fullDN;
+	if (propertiesFromList) {
+		int listIdx = list->getCurrentItem();
+		if (listIdx < 0 || listIdx >= (int)currentObjects.size()) return 1;
+		DirObject& obj = currentObjects[listIdx];
+		title = obj.name;
+		fullDN = relDNToFullDN(obj.dn, domain);
+	} else {
+		FXTreeItem* cur = tree->getCurrentItem();
+		if (!cur || !itemToRelDN.count(cur)) return 1;
+		FXString relDN = itemToRelDN[cur];
+		title = relDN.empty() ? domain.realm : relDN;
+		fullDN = relDNToFullDN(relDN, domain);
+	}
+	PropertiesDialog dlg(this, title, fullDN);
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+void DsAdminWindow::create() {
+	FXMainWindow::create();
+	show(PLACEMENT_SCREEN);
+}
+
+int main(int argc, char* argv[]) {
+	FXApp application("DsAdmin", "Ice2KProj");
+	app = &application;
+	application.init(argc, argv);
+
+	g_haveRoot = (runAsRoot({ FXString("true") }) == 0);
+
+	DsAdminWindow* win = new DsAdminWindow(&application);
+	application.create();
+	win->show(PLACEMENT_SCREEN);
+
+	if (!g_haveRoot) {
+		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+			"Es wurden keine Root-Rechte erlangt.\n\n"
+			"Domänenobjekte können weiterhin angezeigt, aber nicht verändert werden.");
+	}
+
+	return application.run();
+}
