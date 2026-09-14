@@ -1097,6 +1097,117 @@ void DsAdminWindow::create() {
 	show(PLACEMENT_SCREEN);
 }
 
+// ---------------------------------------------------------------------
+// ADM-Vorlagen (Administrative Vorlagen fuer Gruppenrichtlinien) --
+// Microsoft bietet diese fuer Windows 2000/XP/2003 kostenlos zum
+// Download an: https://www.microsoft.com/en-us/download/details.aspx?id=18664
+// ("Group Policy ADM Files"), Paket "2000admsetup.msi" enthaelt
+// system.adm/inetres.adm/conf.adm/wmp.adm/wuau.adm fuer Windows 2000 SP4.
+// Das .msi selbst ist ein Windows-Installer-Paket -- wir entpacken es
+// unter Linux mit "msiextract" (aus dem Paket "msitools").
+// ---------------------------------------------------------------------
+static const char* ADM_DIR = "/usr/local/share/ice2k/adm";
+
+static bool haveAdmFiles() {
+	FXString path = FXString(ADM_DIR) + "/system.adm";
+	return access(path.text(), F_OK) == 0;
+}
+
+static bool haveMsiextract() {
+	return access("/usr/bin/msiextract", F_OK) == 0;
+}
+
+static bool installMsiextract(std::string& log, FXString& errorMsg) {
+	log += "Installiere msitools (zum Entpacken der .msi-Datei)...\n";
+	runAsRootCaptured({ FXString("apt-get"), FXString("update") }, log);
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("env"), FXString("DEBIAN_FRONTEND=noninteractive"),
+	                              FXString("apt-get"), FXString("install"), FXString("-y"),
+	                              FXString("-o"), FXString("Dpkg::Options::=--force-confold"),
+	                              FXString("msitools") }, out);
+	log += out + "\n";
+	if (rc != 0 || !haveMsiextract()) {
+		errorMsg = "Installation von msitools ist fehlgeschlagen (siehe Protokoll).";
+		return false;
+	}
+	log += "msitools erfolgreich installiert.\n";
+	return true;
+}
+
+// Versucht das .msi automatisch herunterzuladen. Da die Microsoft-
+// Downloadseite ihren tatsaechlichen Dateilink per JavaScript erzeugt,
+// ist dieser direkte Link ohne Garantie -- schlaegt er fehl, wird auf
+// den manuellen Weg zurueckgefallen (siehe downloadAndExtractAdmFiles).
+static bool tryAutoDownloadMsi(const FXString& destPath, std::string& log) {
+	log += "Versuche automatischen Download von " + std::string(destPath.text()) + "...\n";
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("wget"), FXString("-q"), FXString("-O"), destPath,
+	                              FXString("https://download.microsoft.com/download/f/0/0/f00b6d78-011f-42d5-b2e5-2f5e0f2e6b0c/2000admsetup.msi") }, out);
+	log += out + "\n";
+	if (rc != 0 || access(destPath.text(), F_OK) != 0) {
+		runAsRoot({ FXString("rm"), FXString("-f"), destPath });
+		return false;
+	}
+	return true;
+}
+
+static bool extractAdmFromMsi(const FXString& msiPath, std::string& log, FXString& errorMsg) {
+	log += "Entpacke ADM-Dateien aus " + std::string(msiPath.text()) + "...\n";
+	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(ADM_DIR) });
+	FXString tmpDir = "/tmp/ice2k-adm-extract";
+	runAsRoot({ FXString("rm"), FXString("-rf"), tmpDir });
+	runAsRoot({ FXString("mkdir"), FXString("-p"), tmpDir });
+
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("msiextract"), FXString("-C"), tmpDir, msiPath }, out);
+	log += out + "\n";
+	if (rc != 0) { errorMsg = "msiextract ist fehlgeschlagen (siehe Protokoll)."; return false; }
+
+	// Die .adm-Dateien liegen im MSI ueblicherweise direkt im Wurzel-
+	// verzeichnis oder einem Unterordner -- wir suchen rekursiv und
+	// kopieren alle Fundstellen in unser ADM-Verzeichnis.
+	out.clear();
+	rc = runAsRootCaptured({ FXString("bash"), FXString("-c"),
+		FXString("find '") + tmpDir + "' -iname '*.adm' -exec cp {} " + FXString(ADM_DIR) + "/ \\;" }, out);
+	runAsRoot({ FXString("rm"), FXString("-rf"), tmpDir });
+
+	if (!haveAdmFiles()) {
+		errorMsg = "Nach dem Entpacken wurden keine .adm-Dateien in " + FXString(ADM_DIR) + " gefunden.";
+		return false;
+	}
+	log += "ADM-Dateien erfolgreich nach " + std::string(ADM_DIR) + " kopiert.\n";
+	return true;
+}
+
+// Kompletter Ablauf: Werkzeuge pruefen/installieren, Download versuchen,
+// bei Fehlschlag manuell nachfragen (Datei-Auswahldialog fuer ein
+// bereits von Hand heruntergeladenes .msi), dann entpacken.
+static bool downloadAndExtractAdmFiles(FXWindow* owner, std::string& log, FXString& errorMsg) {
+	if (!haveMsiextract()) {
+		if (!installMsiextract(log, errorMsg)) return false;
+	}
+
+	FXString msiPath = "/tmp/2000admsetup.msi";
+	runAsRoot({ FXString("rm"), FXString("-f"), msiPath });
+
+	if (!tryAutoDownloadMsi(msiPath, log)) {
+		log += "Automatischer Download nicht erfolgreich.\n";
+		FXMessageBox::information(owner, MBOX_OK, "Manueller Download nötig",
+			"Der automatische Download hat nicht funktioniert.\n\n"
+			"Bitte lade das Paket \"2000admsetup.msi\" manuell von\n"
+			"https://www.microsoft.com/en-us/download/details.aspx?id=18664\n"
+			"herunter und wähle es im nächsten Dialog aus.");
+		FXString picked = FXFileDialog::getOpenFilename(owner, "2000admsetup.msi auswählen", FXSystem::getHomeDirectory(), "MSI-Dateien (*.msi)");
+		if (picked.empty()) { errorMsg = "Kein Download und keine Datei ausgewählt."; return false; }
+		std::string out;
+		runAsRootCaptured({ FXString("cp"), picked, msiPath }, out);
+	}
+
+	bool ok = extractAdmFromMsi(msiPath, log, errorMsg);
+	runAsRoot({ FXString("rm"), FXString("-f"), msiPath });
+	return ok;
+}
+
 int main(int argc, char* argv[]) {
 	FXApp application("DsAdmin", "Ice2KProj");
 	app = &application;
@@ -1112,6 +1223,20 @@ int main(int argc, char* argv[]) {
 		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\n"
 			"Domänenobjekte können weiterhin angezeigt, aber nicht verändert werden.");
+	} else if (!haveAdmFiles()) {
+		if (FXMessageBox::question(win, MBOX_YES_NO, "ADM-Vorlagen nicht gefunden",
+		        "Für den Gruppenrichtlinien-Editor werden die administrativen\n"
+		        "Vorlagen (.adm-Dateien) von Windows 2000 benötigt.\n\n"
+		        "Microsoft bietet diese kostenlos zum Download an. Jetzt\n"
+		        "herunterladen und einrichten?") == MBOX_CLICKED_YES) {
+			std::string log;
+			FXString errorMsg;
+			if (!downloadAndExtractAdmFiles(win, log, errorMsg)) {
+				FXMessageBox::error(win, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
+			} else {
+				FXMessageBox::information(win, MBOX_OK, "Fertig", "ADM-Vorlagen wurden erfolgreich eingerichtet.");
+			}
+		}
 	}
 
 	return application.run();
