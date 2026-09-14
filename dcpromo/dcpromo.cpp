@@ -18,6 +18,7 @@
 #include <fx.h>
 #include <FXPNGIcon.h>
 #include <FXGIFIcon.h>
+#include <FXThread.h>
 #include "res/foxres.h"
 
 #include <stdio.h>
@@ -25,7 +26,9 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/wait.h>
+#include <atomic>
 #include <vector>
 #include <string>
 #include <fstream>
@@ -34,6 +37,15 @@
 
 FXApp* app;
 static bool g_haveRoot = false;
+
+// Geteilter Zustand zwischen dem Hintergrund-Thread (fuehrt
+// samba-tool/apt-get aus) und dem GUI-Thread (pollt per Timer, ohne
+// dabei selbst zu blockieren -- das Fenster bleibt die ganze Zeit
+// bedienbar/repaintbar).
+static std::atomic<bool> g_workerDone(false);
+static bool g_workerResult = false;
+static FXString g_workerErrorMsg;
+static std::string g_workerLog;
 
 static const char* SMB_CONF = "/etc/samba/smb.conf";
 static const char* BIND_LOCAL = "/etc/bind/named.conf.local";
@@ -489,6 +501,37 @@ static bool migrateToModernAd(const FXString& dnsName, std::string& log, FXStrin
 }
 
 // ---------------------------------------------------------------------
+// Fuehrt die eigentliche (potenziell mehrminuetige) Arbeit in einem
+// Hintergrund-Thread aus, damit die GUI waehrenddessen bedienbar
+// bleibt und nicht wie abgestuerzt wirkt.
+// ---------------------------------------------------------------------
+class ProvisionWorker : public FXThread {
+public:
+	bool isMigration = false;
+	FXString dnsName, netbios, adminPw, realm;
+	bool win2kCompatible = false;
+	std::vector<FXString> missingPkgs;
+
+	virtual FXint run() {
+		std::string log;
+		FXString errorMsg;
+		bool ok = true;
+		if (!missingPkgs.empty()) {
+			ok = installMissingPackages(missingPkgs, log, errorMsg);
+		}
+		if (ok) {
+			if (isMigration) ok = migrateToModernAd(realm, log, errorMsg);
+			else ok = provisionDomain(dnsName, netbios, adminPw, win2kCompatible, log, errorMsg);
+		}
+		g_workerLog = log;
+		g_workerResult = ok;
+		g_workerErrorMsg = errorMsg;
+		g_workerDone = true;
+		return 0;
+	}
+};
+
+// ---------------------------------------------------------------------
 // Assistent (Hauptfenster) -- Seiten per FXSwitcher, mit
 // Zurück/Weiter/Abbrechen/Fertig-stellen-Navigation, wie im Original.
 // ---------------------------------------------------------------------
@@ -528,13 +571,15 @@ private:
 
 	DomainState domainState;
 	bool migrating; // true, wenn PAGE_RUNNING fuer die Migration statt Neuprovisionierung laeuft
+	ProvisionWorker* worker = NULL;
+	time_t runStartTime = 0;
 
 protected:
 	DcPromoWizard() {}
 public:
 	enum {
 		ID_BACK = FXMainWindow::ID_LAST, ID_NEXT, ID_CANCEL, ID_FINISH, ID_MIGRATE,
-		ID_DNSCHOICE_WIN2K, ID_DNSCHOICE_MODERN, ID_DNSNAME_CHANGED, ID_NETBIOS_CHANGED
+		ID_DNSCHOICE_WIN2K, ID_DNSCHOICE_MODERN, ID_DNSNAME_CHANGED, ID_NETBIOS_CHANGED, ID_POLLTIMER
 	};
 
 	long onBack(FXObject*, FXSelector, void*);
@@ -542,16 +587,15 @@ public:
 	long onCancelBtn(FXObject*, FXSelector, void*);
 	long onFinish(FXObject*, FXSelector, void*);
 	long onMigrate(FXObject*, FXSelector, void*);
+	long onPollTimer(FXObject*, FXSelector, void*);
 	long onDnsChoice(FXObject*, FXSelector, void*);
 	long onDnsNameChanged(FXObject*, FXSelector, void*);
 	long onNetbiosChanged(FXObject*, FXSelector, void*);
 
 	DcPromoWizard(FXApp* a);
 	void gotoPage(int page);
-	void runProvisioningNow(const std::vector<FXString>& missingPkgs);
 	void logSet(const FXString& text);
 	void logAppend(const FXString& text);
-	void runMigrationNow(const std::vector<FXString>& missingPkgs);
 	virtual void create();
 	virtual ~DcPromoWizard() {}
 };
@@ -566,6 +610,7 @@ FXDEFMAP(DcPromoWizard) DcPromoWizardMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DcPromoWizard::ID_DNSCHOICE_MODERN, DcPromoWizard::onDnsChoice),
 	FXMAPFUNC(SEL_CHANGED, DcPromoWizard::ID_DNSNAME_CHANGED, DcPromoWizard::onDnsNameChanged),
 	FXMAPFUNC(SEL_CHANGED, DcPromoWizard::ID_NETBIOS_CHANGED, DcPromoWizard::onNetbiosChanged),
+	FXMAPFUNC(SEL_TIMEOUT, DcPromoWizard::ID_POLLTIMER, DcPromoWizard::onPollTimer),
 };
 FXIMPLEMENT(DcPromoWizard, FXMainWindow, DcPromoWizardMap, ARRAYNUMBER(DcPromoWizardMap))
 
@@ -702,7 +747,7 @@ void DcPromoWizard::gotoPage(int page) {
 	} else if (page == PAGE_RUNNING) {
 		btnBack->disable();
 		btnCancel->hide();
-		btnNext->setText(migrating ? "&Weiter >" : "&Weiter >");
+		btnNext->disable(); // wird von onPollTimer wieder aktiviert, sobald der Hintergrund-Thread fertig ist
 	} else if (page == PAGE_FINISH) {
 		btnBack->hide(); btnNext->hide(); btnCancel->hide();
 		btnFinish->show();
@@ -817,9 +862,20 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 		}
 		migrating = false;
 		gotoPage(PAGE_RUNNING);
-		getApp()->repaint();
-		getApp()->flush();
-		runProvisioningNow(missing);
+
+		worker = new ProvisionWorker();
+		worker->dnsName = dnsNameField->getText().trim();
+		worker->netbios = netbiosField->getText().trim();
+		worker->adminPw = adminPwField->getText();
+		worker->win2kCompatible = rbWin2k->getCheck();
+		worker->missingPkgs = missing;
+		worker->isMigration = false;
+		g_workerDone = false;
+		runStartTime = time(NULL);
+		logSet("Wird ausgeführt -- das kann je nach System mehrere Minuten dauern.\n"
+		       "Das Fenster bleibt währenddessen bedienbar.\n\nVerstrichene Zeit: 0 s");
+		worker->start();
+		getApp()->addTimeout(this, ID_POLLTIMER, 300);
 
 	} else if (cur == PAGE_RUNNING) {
 		gotoPage(PAGE_FINISH);
@@ -864,9 +920,17 @@ long DcPromoWizard::onMigrate(FXObject*, FXSelector, void*) {
 	}
 	migrating = true;
 	gotoPage(PAGE_RUNNING);
-	getApp()->repaint();
-	getApp()->flush();
-	runMigrationNow(missing);
+
+	worker = new ProvisionWorker();
+	worker->realm = domainState.realm;
+	worker->missingPkgs = missing;
+	worker->isMigration = true;
+	g_workerDone = false;
+	runStartTime = time(NULL);
+	logSet("Wird ausgeführt -- das kann je nach System mehrere Minuten dauern.\n"
+	       "Das Fenster bleibt währenddessen bedienbar.\n\nVerstrichene Zeit: 0 s");
+	worker->start();
+	getApp()->addTimeout(this, ID_POLLTIMER, 300);
 	return 1;
 }
 
@@ -884,54 +948,30 @@ void DcPromoWizard::logAppend(const FXString& text) {
 	getApp()->flush();
 }
 
-void DcPromoWizard::runProvisioningNow(const std::vector<FXString>& missingPkgs) {
-	std::string log;
-	FXString errorMsg;
-
-	if (!missingPkgs.empty()) {
-		if (!installMissingPackages(missingPkgs, log, errorMsg)) {
-			logSet(log.c_str());
-			logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
-			return;
-		}
-		logSet(log.c_str());
+long DcPromoWizard::onPollTimer(FXObject*, FXSelector, void*) {
+	if (!g_workerDone) {
+		long elapsed = (long)(time(NULL) - runStartTime);
+		logSet(FXString("Wird ausgeführt -- das kann je nach System mehrere Minuten dauern.\n"
+		                 "Das Fenster bleibt währenddessen bedienbar.\n\nVerstrichene Zeit: ")
+		       + FXString(std::to_string(elapsed).c_str()) + " s");
+		getApp()->addTimeout(this, ID_POLLTIMER, 300);
+		return 1;
 	}
 
-	bool ok = provisionDomain(dnsNameField->getText().trim(), netbiosField->getText().trim(),
-	                           adminPwField->getText(), rbWin2k->getCheck(), log, errorMsg);
-	logSet(log.c_str());
-	if (!ok) {
-		logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	worker->join();
+	delete worker;
+	worker = NULL;
+
+	logSet(g_workerLog.c_str());
+	if (!g_workerResult) {
+		logAppend(("\nFEHLER: " + std::string(g_workerErrorMsg.text()) + "\n").c_str());
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", g_workerErrorMsg.text());
 	} else {
 		logAppend("\nErfolgreich abgeschlossen.\n");
+		if (migrating) domainState = detectDomainState();
 	}
-}
-
-void DcPromoWizard::runMigrationNow(const std::vector<FXString>& missingPkgs) {
-	std::string log;
-	FXString errorMsg;
-
-	if (!missingPkgs.empty()) {
-		if (!installMissingPackages(missingPkgs, log, errorMsg)) {
-			logSet(log.c_str());
-			logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
-			return;
-		}
-		logSet(log.c_str());
-	}
-
-	bool ok = migrateToModernAd(domainState.realm, log, errorMsg);
-	logSet(log.c_str());
-	if (!ok) {
-		logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
-	} else {
-		logAppend("\nErfolgreich abgeschlossen.\n");
-		domainState = detectDomainState();
-	}
+	btnNext->enable();
+	return 1;
 }
 
 void DcPromoWizard::create() {
