@@ -547,6 +547,13 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 		std::string conf = readFileUnprivileged(SMB_CONF);
 		conf = smbConfSetOrRemove(conf, "server min protocol", "NT1");
 		conf = smbConfSetOrRemove(conf, "ntlm auth", "ntlmv1-permitted");
+		// CVE-2022-38023: Samba lehnt MD5-basierte Netlogon-Schannel-
+		// Verschluesselung seit diesem Sicherheitsfix standardmaessig ab --
+		// Windows 2000 kann aber nur MD5, nicht das modernere AES. Ohne
+		// dies scheitert der Domänenbeitritt an genau der Stelle, an der
+		// das Computerkonto den sicheren Kanal aufbaut ("NT_STATUS_
+		// DOWNGRADE_DETECTED" im Samba-Log).
+		conf = smbConfSetOrRemove(conf, "server reject md5 schannel", "no");
 		writeFileAsRoot(SMB_CONF, conf);
 	}
 
