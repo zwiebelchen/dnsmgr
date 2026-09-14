@@ -41,9 +41,16 @@ Ende-zu-Ende gegen eine echte Domäne und ein echtes GPO getestet --
 alle Feldtypen (Checkbox/Text/Zahl/Dropdown), byte-genaue Verifikation
 des Dateiinhalts, Rundlauf über einen kompletten Programmneustart.
 
-Bekannte Grenzen dieser ersten Version: nur Computerkonfiguration
-(nicht Benutzerkonfiguration), nur der erste Part einer Richtlinie
-mit mehreren Parts.
+Unterstützt sowohl Computer- als auch Benutzerkonfiguration (`CLASS
+MACHINE`/`CLASS USER`, jeweils eigener Baum-Wurzelknoten und eigene
+`Registry.pol` im SYSVOL) sowie Richtlinien mit mehreren Parts (jeder
+Part bekommt sein eigenes Eingabefeld und seinen eigenen
+Registry.pol-Eintrag). `GPT.INI` kodiert Computer-/Benutzer-Version
+getrennt und wird beim Speichern gezielt nur für den tatsächlich
+geänderten Zweig erhöht.
+
+Bekannte Grenzen dieser Version: keine Mehrfachauswahl/Verschieben von
+Richtlinien.
 
 ## Gruppenmitgliedschaft
 
