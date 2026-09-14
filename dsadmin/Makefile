@@ -9,7 +9,7 @@ LDFLAGS = `fox-config --libs`
 PREFIX = /usr/local
 
 ICONS = res/*/*.gif res/*/*.png res/*.gif
-SOURCES = dsadmin.cpp
+SOURCES = dsadmin.cpp admparser.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 EXECUTABLE = dsadmin
 
@@ -25,8 +25,11 @@ res/foxres.h: $(ICONS)
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
 
+test_admparser: test_admparser.cpp admparser.cpp
+	$(CC) -Wall -std=c++17 -o test_admparser test_admparser.cpp admparser.cpp
+
 clean:
-	rm -f res/foxres.h $(OBJECTS) $(EXECUTABLE)
+	rm -f res/foxres.h $(OBJECTS) $(EXECUTABLE) test_admparser
 
 install:
 	cp $(EXECUTABLE) $(PREFIX)/bin/$(EXECUTABLE)

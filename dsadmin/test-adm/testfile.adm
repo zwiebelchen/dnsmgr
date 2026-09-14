@@ -1,0 +1,84 @@
+CLASS MACHINE
+
+CATEGORY !!Cat_Root
+  KEYNAME "Software\Policies\IceTest"
+
+  CATEGORY !!Cat_Sub
+    POLICY !!Pol_Simple
+      EXPLAIN !!Explain_Simple
+      VALUENAME "SimpleOnOff"
+      VALUEON NUMERIC 1
+      VALUEOFF NUMERIC 0
+    END POLICY
+
+    POLICY !!Pol_Text
+      EXPLAIN !!Explain_Text
+      PART !!Part_TextLabel EDITTEXT
+        VALUENAME "SomeText"
+        DEFAULT "Standardwert"
+        MAXLEN 255
+      END PART
+    END POLICY
+
+    POLICY !!Pol_Number
+      EXPLAIN "Direkt eingebetteter Erklärungstext ohne Stringtabelle."
+      PART !!Part_NumberLabel NUMERIC
+        VALUENAME "SomeNumber"
+        MIN 0
+        MAX 100
+        DEFAULT 42
+      END PART
+    END POLICY
+
+    POLICY !!Pol_Choice
+      EXPLAIN !!Explain_Choice
+      PART !!Part_ChoiceLabel DROPDOWNLIST
+        VALUENAME "SomeChoice"
+        ITEMLIST
+          NAME !!Item_One VALUE NUMERIC 1
+          NAME !!Item_Two VALUE NUMERIC 2
+          NAME !!Item_Three VALUE NUMERIC 3
+        END ITEMLIST
+      END PART
+    END POLICY
+
+    ; Das hier ist ein Kommentar und sollte komplett ignoriert werden.
+    POLICY !!Pol_Checkbox
+      EXPLAIN !!Explain_Checkbox
+      PART !!Part_CheckboxLabel CHECKBOX
+        VALUENAME "SomeCheckbox"
+        DEFAULT NUMERIC 1
+      END PART
+    END POLICY
+  END CATEGORY
+END CATEGORY
+
+CATEGORY !!Cat_Second
+  POLICY !!Pol_Second
+    EXPLAIN !!Explain_Second
+    VALUENAME "ZweiteKategorieWert"
+  END POLICY
+END CATEGORY
+
+[strings]
+Cat_Root="Ice2K Testeinstellungen"
+Cat_Sub="Testrichtlinien"
+Pol_Simple="Einfache An/Aus-Richtlinie"
+Explain_Simple="Dies ist eine einfache Checkbox-Richtlinie zum Testen."
+Pol_Text="Text-Richtlinie"
+Explain_Text="Diese Richtlinie erlaubt einen Freitext-Wert."
+Pol_Number="Zahlen-Richtlinie"
+Pol_Choice="Auswahl-Richtlinie"
+Explain_Choice="Diese Richtlinie bietet eine Dropdown-Auswahl."
+Item_One="Erste Option"
+Item_Two="Zweite Option"
+Item_Three="Dritte Option"
+Part_TextLabel="Textfeld"
+Part_NumberLabel="Zahlenfeld"
+Part_ChoiceLabel="Auswahlfeld"
+Pol_Checkbox="Checkbox-Richtlinie"
+Explain_Checkbox="Diese Richtlinie testet einen CHECKBOX-Part mit NUMERIC-Default."
+Part_CheckboxLabel="Kontrollkästchen"
+Cat_Second="Zweite, eigenständige Hauptkategorie"
+Pol_Second="Richtlinie in der zweiten Kategorie"
+Explain_Second="Testet, dass mehrere Top-Level-Kategorien unter einer CLASS funktionieren."
