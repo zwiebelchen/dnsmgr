@@ -670,6 +670,7 @@ private:
 	bool wasRemoval = false; // true, wenn PAGE_RUNNING fuer "Active Directory entfernen" laeuft
 	ProvisionWorker* worker = NULL;
 	time_t runStartTime = 0;
+	int initialPage = 0;
 
 protected:
 	DcPromoWizard() {}
@@ -824,7 +825,7 @@ DcPromoWizard::DcPromoWizard(FXApp* a)
 	btnCancel = new FXButton(btnf, "&Abbrechen", NULL, this, ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
 	btnFinish = new FXButton(btnf, "&Schließen", NULL, this, ID_FINISH, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
 
-	gotoPage(domainState.isProvisioned ? PAGE_STATUS : PAGE_WELCOME);
+	initialPage = domainState.isProvisioned ? PAGE_STATUS : PAGE_WELCOME;
 }
 
 void DcPromoWizard::gotoPage(int page) {
@@ -869,6 +870,16 @@ void DcPromoWizard::gotoPage(int page) {
 		btnBack->hide(); btnNext->hide(); btnCancel->hide();
 		btnFinish->show();
 	}
+
+	// Nach jedem Seitenwechsel Layout und Darstellung explizit erneuern --
+	// ohne das kam es vor, dass eine neu eingeblendete Schaltflaeche (z.B.
+	// "Schliessen" auf der Fertigstellen-Seite) unsichtbar blieb, obwohl
+	// sie laut FOX-Objektmodell bereits sichtbar war.
+	recalc();
+	layout();
+	getApp()->forceRefresh();
+	getApp()->repaint();
+	getApp()->flush(true);
 }
 
 long DcPromoWizard::onDnsNameChanged(FXObject*, FXSelector, void*) {
@@ -1126,6 +1137,7 @@ long DcPromoWizard::onPollTimer(FXObject*, FXSelector, void*) {
 void DcPromoWizard::create() {
 	FXMainWindow::create();
 	show(PLACEMENT_SCREEN);
+	gotoPage(initialPage);
 }
 
 int main(int argc, char* argv[]) {
