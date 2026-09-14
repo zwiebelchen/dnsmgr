@@ -81,7 +81,10 @@ Voraussetzung: `samba`, `samba-ad-provision`, `samba-dsdb-modules`,
 ## Bekannte Grenzen
 - Kein echtes Fortschritts-Streaming während `samba-tool domain
   provision` läuft (kann je nach System spürbar dauern) -- das
-  Protokoll erscheint erst, wenn der Befehl fertig ist.
+  Protokoll erscheint erst, wenn der Befehl fertig ist. Die GUI selbst
+  blockiert währenddessen aber nicht mehr (läuft in einem
+  Hintergrund-Thread) und zeigt eine hochzählende "Verstrichene
+  Zeit"-Anzeige, damit klar ist, dass der Assistent noch lebt.
 - Dienste-Neustart über `systemctl` -- auf Systemen ohne systemd
   (z.B. reine Testcontainer) muss man `bind9`/`samba-ad-dc` danach
   manuell starten.
