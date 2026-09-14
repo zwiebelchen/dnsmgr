@@ -58,6 +58,17 @@ Der Assistent erkennt beim Start automatisch, ob schon eine Domäne
 existiert (liest `smb.conf`), und zeigt dann eine Status-Seite mit
 diesem Migrations-Knopf statt erneut zu provisionieren.
 
+## Fehlende Pakete
+
+Bevor provisioniert oder migriert wird, prüft der Assistent, ob
+`samba`, `samba-common-bin`, `samba-ad-provision`,
+`samba-dsdb-modules`, `samba-vfs-modules`, `winbind` und `bind9`
+installiert sind. Fehlt etwas, fragt ein Dialog nach, ob es per
+`apt-get` nachinstalliert werden soll -- nicht-interaktiv und mit
+`--force-confold`, damit ein Konfigurationsdatei-Konflikt (z.B. bei
+`named.conf.local`, das `dnsmgr` ja schon verwaltet) nicht hängen
+bleibt, sondern die bestehende Datei automatisch behält.
+
 ## Bauen
 ```sh
 cd dcpromo
