@@ -26,6 +26,25 @@ Domänendatenbank. `dsadmin` übernimmt genau das: die Verwaltung von
   Editor der Administrativen Vorlagen ist ein eigener, späterer
   Baustein (siehe unten)
 
+## Gruppenrichtlinienobjekt-Editor
+
+Der "&Bearbeiten..."-Button im Gruppenrichtlinie-Reiter öffnet den
+vollständigen Editor: Baum links (Kategorien aus den zusammengeführten
+`.adm`-Dateien), Liste rechts (Richtlinien mit Status). Doppelklick
+öffnet Nicht konfiguriert/Aktiviert/Deaktiviert plus das passende
+Eingabefeld (Checkbox/Textfeld/Zahlenfeld/Dropdown). "Speichern"
+schreibt die Änderungen in die echte `Registry.pol` des GPOs unter
+`/var/lib/samba/sysvol/<Domäne>/Policies/{GUID}/MACHINE/Registry.pol`
+und erhöht die `GPT.INI`-Versionsnummer.
+
+Ende-zu-Ende gegen eine echte Domäne und ein echtes GPO getestet --
+alle Feldtypen (Checkbox/Text/Zahl/Dropdown), byte-genaue Verifikation
+des Dateiinhalts, Rundlauf über einen kompletten Programmneustart.
+
+Bekannte Grenzen dieser ersten Version: nur Computerkonfiguration
+(nicht Benutzerkonfiguration), nur der erste Part einer Richtlinie
+mit mehreren Parts.
+
 ## Gruppenmitgliedschaft
 
 "Eigenschaften" auf einer Sicherheitsgruppe öffnet eine
