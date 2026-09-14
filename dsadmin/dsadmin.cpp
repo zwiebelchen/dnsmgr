@@ -16,6 +16,7 @@
 #include "res/foxres.h"
 #include "admparser.h"
 #include "regpol.h"
+#include "aas.h"
 #include <algorithm>
 #include <map>
 #include <tuple>
@@ -94,6 +95,7 @@ static PolicyState determinePolicyState(const AdmPolicy& pol, const std::string&
 #include <set>
 #include <map>
 #include <fstream>
+#include <ctime>
 #include <sstream>
 #include <algorithm>
 
@@ -659,7 +661,276 @@ static bool downloadAndExtractAdmFiles(FXWindow* owner, std::string& log, FXStri
 }
 
 // ---------------------------------------------------------------------
-// ADM-Dateien laden und zusammenfuehren -- mehrere .adm-Dateien
+// Softwareinstallation (GPO-Erweiterung) -- legt ein
+// PackageRegistration-Objekt in Active Directory an und schreibt die
+// zugehoerige .aas-Datei nach SYSVOL, nach [MS-GPSI]. Die noetigen
+// AD-Objektklassen (Package-Registration, Class-Store) sind Teil des
+// Standard-AD-Schemas und liegen auch bei Samba bereits vor.
+// ---------------------------------------------------------------------
+static const char* GPSI_CSE_GUID = "{C6DC5466-785A-11D2-84D0-00C04FB169F7}";
+static const char* GPSI_TOOL_GUID_USER = "{BACF5C8A-A3C7-11D1-A760-00C04FB9603F}";
+static const char* GPSI_TOOL_GUID_MACHINE = "{942A8E4F-A261-11D1-A760-00C04FB9603F}";
+
+// Fuehrt ldapadd/ldapmodify mit einer LDIF-Datei gegen den lokalen
+// Samba-AD-DC aus. Admin-Anmeldedaten wie bei GPOs/geschuetzten
+// Gruppen -- root reicht fuer diese LDAP-Schreibzugriffe nicht.
+static bool runLdapChange(FXWindow* owner, const FXString& realm, const std::string& ldif, bool isAdd, std::string& log, FXString& errorMsg) {
+	if (ensureAdminCreds(owner).empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann nichts in AD angelegt werden."; return false; }
+
+	FXString ldifPath = "/tmp/ice2k-ldapchange.ldif";
+	std::ofstream out(ldifPath.text());
+	out << ldif;
+	out.close();
+	runAsRoot({ FXString("chmod"), FXString("666"), ldifPath });
+
+	std::string cmdOut;
+	int rc = runAsRootCaptured({
+		FXString("env"), FXString("LDAPTLS_REQCERT=never"),
+		FXString(isAdd ? "ldapadd" : "ldapmodify"),
+		FXString("-H"), FXString("ldap://127.0.0.1"), FXString("-Z"), FXString("-x"),
+		FXString("-D"), g_adminUser + "@" + realm,
+		FXString("-w"), g_adminPass,
+		FXString("-f"), ldifPath
+	}, cmdOut);
+	log += cmdOut + "\n";
+	runAsRoot({ FXString("rm"), FXString("-f"), ldifPath });
+	// "Already exists" ist fuer unsere idempotenten Create-Aufrufe kein
+	// Fehler -- der Aufrufer entscheidet selbst, ob das in Ordnung ist.
+	if (rc != 0 && cmdOut.find("Already exists") == std::string::npos) {
+		errorMsg = "LDAP-Änderung fehlgeschlagen (siehe Protokoll).";
+		return false;
+	}
+	return true;
+}
+
+// Liest den Wert eines einzelnen Attributs eines AD-Objekts (leerer
+// String, wenn nicht vorhanden oder bei Fehler).
+static std::string readLdapAttribute(FXWindow* owner, const FXString& realm, const std::string& dn, const std::string& attr) {
+	if (ensureAdminCreds(owner).empty()) return "";
+	std::string out;
+	// "-o ldif-wrap=no -LLL" ist entscheidend -- ohne das bricht ldapsearch
+	// lange Werte ueber mehrere Zeilen um, und ein einfaches grep der
+	// ersten Zeile wuerde den Wert (z.B. gPCMachineExtensionNames mit
+	// mehreren GUID-Paaren) mitten im Text abschneiden.
+	runAsRootCaptured({
+		FXString("bash"), FXString("-c"),
+		FXString("LDAPTLS_REQCERT=never ldapsearch -H ldap://127.0.0.1 -Z -x -o ldif-wrap=no -LLL -D '") + g_adminUser + "@" + realm +
+			"' -w '" + g_adminPass + "' -b '" + dn.c_str() + "' -s base '(objectClass=*)' " + attr.c_str() + " 2>/dev/null | grep '^" + attr.c_str() + ":' | sed 's/^" + attr.c_str() + ": //'"
+	}, out);
+	while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+	return out;
+}
+
+static std::string base64Encode(const std::vector<uint8_t>& data) {
+	static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	std::string out;
+	size_t i = 0;
+	while (i + 3 <= data.size()) {
+		uint32_t n = ((uint32_t)data[i] << 16) | ((uint32_t)data[i + 1] << 8) | data[i + 2];
+		out += tbl[(n >> 18) & 0x3F]; out += tbl[(n >> 12) & 0x3F]; out += tbl[(n >> 6) & 0x3F]; out += tbl[n & 0x3F];
+		i += 3;
+	}
+	size_t rem = data.size() - i;
+	if (rem == 1) {
+		uint32_t n = (uint32_t)data[i] << 16;
+		out += tbl[(n >> 18) & 0x3F]; out += tbl[(n >> 12) & 0x3F]; out += "==";
+	} else if (rem == 2) {
+		uint32_t n = ((uint32_t)data[i] << 16) | ((uint32_t)data[i + 1] << 8);
+		out += tbl[(n >> 18) & 0x3F]; out += tbl[(n >> 12) & 0x3F]; out += tbl[(n >> 6) & 0x3F]; out += "=";
+	}
+	return out;
+}
+
+// Wandelt eine geschweift geklammerte GUID-Zeichenkette in die base64-
+// kodierte 16-Byte-Binaerform, wie sie AD fuer Octet-String-Attribute
+// wie "productCode" erwartet (Data1/2/3 little-endian, Data4 wie im
+// String -- das uebliche Windows-GUID-Binaerformat). Ohne diese
+// Kodierung lehnt Samba/AD den Wert mit "Invalid syntax" ab, da das
+// Schema fuer productCode attributeSyntax 2.5.5.10 (Octet String)
+// vorschreibt, keine Textform.
+static std::string guidStringToBase64Binary(const std::string& guidStr) {
+	std::string hex;
+	for (char c : guidStr) if (isxdigit((unsigned char)c)) hex += c;
+	if (hex.size() < 32) return "";
+	auto hexVal = [](char c) -> int { if (c >= '0' && c <= '9') return c - '0'; return tolower(c) - 'a' + 10; };
+	auto byteAt = [&](size_t pos) -> uint8_t { return (uint8_t)((hexVal(hex[pos]) << 4) | hexVal(hex[pos + 1])); };
+	std::vector<uint8_t> b(16);
+	b[0] = byteAt(6);  b[1] = byteAt(4);  b[2] = byteAt(2);  b[3] = byteAt(0);   // Data1, little-endian
+	b[4] = byteAt(10); b[5] = byteAt(8);                                        // Data2, little-endian
+	b[6] = byteAt(14); b[7] = byteAt(12);                                       // Data3, little-endian
+	for (int i = 0; i < 8; i++) b[8 + i] = byteAt(16 + i * 2);                  // Data4, wie im String
+	return base64Encode(b);
+}
+
+static std::string generateNewGuidUpper() {
+	std::string out;
+	runAsRootCaptured({ FXString("cat"), FXString("/proc/sys/kernel/random/uuid") }, out);
+	while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+	for (auto& c : out) c = toupper((unsigned char)c);
+	return "{" + out + "}";
+}
+
+// Haengt das CSE+Werkzeug-GUID-Paar der Softwareinstallation an
+// gPCMachineExtensionNames/gPCUserExtensionNames an, falls es dort
+// noch nicht steht -- sonst wuerde ein echter Client die Erweiterung
+// nie aufrufen, selbst wenn Pakete vorhanden sind.
+static bool ensureSoftwareInstallExtensionRegistered(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine, std::string& log, FXString& errorMsg) {
+	std::string attrName = isMachine ? "gPCMachineExtensionNames" : "gPCUserExtensionNames";
+	std::string toolGuid = isMachine ? GPSI_TOOL_GUID_MACHINE : GPSI_TOOL_GUID_USER;
+	std::string ourPair = std::string("[") + GPSI_CSE_GUID + toolGuid + "]";
+
+	std::string curVal = readLdapAttribute(owner, realm, gpoObjectDn, attrName);
+	if (curVal.find(GPSI_CSE_GUID) != std::string::npos) return true; // schon registriert
+
+	std::string newVal = curVal + ourPair;
+	std::string ldif = "dn: " + gpoObjectDn + "\n"
+	                    "changetype: modify\n"
+	                    "replace: " + attrName + "\n" +
+	                    attrName + ": " + newVal + "\n";
+	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
+}
+
+// Legt "CN=Class Store" und "CN=Packages,CN=Class Store" unter dem
+// angegebenen skopierten GPO-DN an, falls sie noch nicht existieren.
+static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, const std::string& scopedGpoDn, std::string& log, FXString& errorMsg) {
+	std::string classStoreDn = "CN=Class Store," + scopedGpoDn;
+	std::string ldif1 = "dn: " + classStoreDn + "\n"
+	                     "changetype: add\n"
+	                     "objectClass: classStore\n"
+	                     "description: Application Store\n";
+	if (!runLdapChange(owner, realm, ldif1, true, log, errorMsg)) return false;
+
+	std::string packagesDn = "CN=Packages," + classStoreDn;
+	std::string ldif2 = "dn: " + packagesDn + "\n"
+	                     "changetype: add\n"
+	                     "objectClass: classStore\n"
+	                     "description: Application Packages\n";
+	if (!runLdapChange(owner, realm, ldif2, true, log, errorMsg)) return false;
+	return true;
+}
+
+// Aktualisiert den Zeitstempel von "CN=Class Store", damit andere
+// Clients/Werkzeuge den Container als gueltig ansehen.
+static bool bumpClassStoreConfirmation(FXWindow* owner, const FXString& realm, const std::string& classStoreDn, std::string& log, FXString& errorMsg) {
+	std::string ldif = "dn: " + classStoreDn + "\n"
+	                    "changetype: modify\n"
+	                    "replace: lastUpdateSequence\n"
+	                    "lastUpdateSequence: " + std::to_string((long long)time(NULL)) + "\n-\n"
+	                    "replace: displayName\n"
+	                    "displayName: Application Store\n";
+	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
+}
+
+// Liest ProductCode/ProductName/ProductVersion/Manufacturer aus der
+// Property-Tabelle einer .msi (per "msiinfo export", Teil von
+// msitools, siehe haveMsiextract()).
+static std::map<std::string, std::string> extractMsiProperties(const std::string& msiPath) {
+	std::map<std::string, std::string> props;
+	std::string out;
+	runAsRootCaptured({ FXString("msiinfo"), FXString("export"), FXString(msiPath.c_str()), FXString("Property") }, out);
+	auto lines = splitLines(out);
+	// Zeilen 0-2 sind Kopf/Typen/Schluessel-Wiederholung (siehe idt-Format),
+	// die eigentlichen Werte beginnen ab Zeile 3.
+	for (size_t i = 3; i < lines.size(); i++) {
+		FXString l = lines[i].c_str();
+		int tab = l.find('\t');
+		if (tab < 0) continue;
+		FXString key = l.left(tab);
+		FXString val = l.mid(tab + 1, l.length() - tab - 1);
+		props[key.text()] = val.text();
+	}
+	return props;
+}
+
+struct SoftwarePackageParams {
+	std::string localMsiPath;   // lokal lesbarer Pfad zur .msi (fuer msiinfo)
+	std::string msiUncPath;     // vollstaendiger UNC-Pfad, wie ein Client ihn erreicht
+	bool assignedPerMachine;    // true = Computerkonfiguration, false = Benutzerkonfiguration
+	bool published;             // nur relevant fuer Benutzerkonfiguration (assignedPerMachine=false)
+};
+
+// Kompletter Ablauf: MSI-Metadaten lesen, .aas-Datei schreiben,
+// PackageRegistration-Objekt in AD anlegen, GPO-Erweiterungsliste
+// aktualisieren.
+static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid,
+                                const SoftwarePackageParams& params, std::string& log, FXString& errorMsg) {
+	if (!haveMsiextract()) {
+		if (!installMsiextract(log, errorMsg)) return false;
+	}
+
+	auto props = extractMsiProperties(params.localMsiPath);
+	if (!props.count("ProductCode")) { errorMsg = "Konnte ProductCode nicht aus der .msi lesen (siehe Protokoll)."; return false; }
+
+	AasPackageInfo info;
+	info.productName = props.count("ProductName") ? props["ProductName"] : "Unbekanntes Produkt";
+	info.productCodeGuid = props["ProductCode"];
+	info.packageCodeGuid = generateNewGuidUpper(); // eigener Package Code fuer diese Bereitstellung
+	info.versionString = props.count("ProductVersion") ? props["ProductVersion"] : "1.0.0";
+	info.msiUncPath = params.msiUncPath;
+	info.assignedPerMachine = params.assignedPerMachine;
+	info.langId = 1031;
+
+	std::string packageGuid = generateNewGuidUpper();
+	FXString realmLower = domain.realm; realmLower.lower();
+	std::string scope = params.assignedPerMachine ? "Machine" : "User";
+	std::string scopedGpoDn = "CN=" + scope + ",CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+	std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+	std::string classStoreDn = "CN=Class Store," + scopedGpoDn;
+	std::string packagesDn = "CN=Packages," + classStoreDn;
+	std::string packageDn = "CN=" + packageGuid + "," + packagesDn;
+
+	if (!ensureClassStoreAndPackages(owner, domain.realm, scopedGpoDn, log, errorMsg)) return false;
+
+	// .aas-Datei schreiben -- lokal, dann als root nach SYSVOL kopieren.
+	std::string sysvolScopeDir = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" +
+	                              std::string(gpoGuid.text()) + "/" + (params.assignedPerMachine ? "MACHINE" : "USER");
+	std::string appsDir = sysvolScopeDir + "/Applications";
+	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(appsDir.c_str()) });
+	std::string aasLocalTmp = "/tmp/ice2k-package.aas";
+	std::string aasErrorMsg;
+	if (!writeAasFile(aasLocalTmp, info, aasErrorMsg)) { errorMsg = aasErrorMsg.c_str(); return false; }
+	std::string aasDestPath = appsDir + "/" + packageGuid + ".aas";
+	int rc = runAsRoot({ FXString("cp"), FXString(aasLocalTmp.c_str()), FXString(aasDestPath.c_str()) });
+	runAsRoot({ FXString("rm"), FXString("-f"), FXString(aasLocalTmp.c_str()) });
+	if (rc != 0) { errorMsg = "Konnte .aas-Datei nicht nach SYSVOL kopieren."; return false; }
+
+	// UNC-Pfad zur .aas-Datei fuer das msiScriptPath-Attribut.
+	std::string msiScriptPath = "\\\\" + std::string(realmLower.text()) + "\\sysvol\\" + std::string(realmLower.text()) +
+	                             "\\Policies\\" + std::string(gpoGuid.text()) + "\\" + scope + "\\Applications\\" + packageGuid + ".aas";
+
+	std::string msiScriptName = params.assignedPerMachine ? "A" : (params.published ? "P" : "A");
+	// packageFlags: Bit 0x10 MUSS immer gesetzt sein; dazu Assigned (0x800)
+	// oder Published (0x8), je nach Bereitstellungsart.
+	uint32_t packageFlags = 0x10;
+	if (!params.assignedPerMachine && params.published) packageFlags |= 0x8; // ACTFLG_Published
+	else packageFlags |= 0x800; // ACTFLG_Assigned
+
+	std::string ldif = "dn: " + packageDn + "\n"
+	                    "changetype: add\n"
+	                    "objectClass: packageRegistration\n"
+	                    "displayName: " + info.productName + "\n"
+	                    "packageName: " + info.productName + "\n"
+	                    "packageType: 5\n"
+	                    "packageFlags: " + std::to_string(packageFlags) + "\n"
+	                    "msiScriptName: " + msiScriptName + "\n"
+	                    "msiScriptPath: " + msiScriptPath + "\n"
+	                    "msiFileList: 0:" + params.msiUncPath + "\n"
+	                    "productCode:: " + guidStringToBase64Binary(info.productCodeGuid) + "\n"
+	                    "versionNumberHi: 0\n"
+	                    "versionNumberLo: 0\n"
+	                    "revision: 1\n"
+	                    "localeID: " + std::to_string(info.langId) + "\n"
+	                    "machineArchitecture: 0\n";
+	if (props.count("Manufacturer")) ldif += "vendor: " + props["Manufacturer"] + "\n";
+	if (!runLdapChange(owner, domain.realm, ldif, true, log, errorMsg)) return false;
+
+	if (!bumpClassStoreConfirmation(owner, domain.realm, classStoreDn, log, errorMsg)) return false;
+	if (!ensureSoftwareInstallExtensionRegistered(owner, domain.realm, gpoObjectDn, params.assignedPerMachine, log, errorMsg)) return false;
+
+	return true;
+}
+
+
 // (system.adm, inetres.adm, ...) tragen oft zu denselben Ober-
 // kategorien bei (z.B. "Windows-Komponenten"). Wir fuehren
 // gleichnamige Kategorien rekursiv zusammen, damit im Baum keine
@@ -1301,6 +1572,60 @@ FXIMPLEMENT(AdmEditorDialog, FXDialogBox, AdmEditorDialogMap, ARRAYNUMBER(AdmEdi
 // Editor der Administrativen Vorlagen ist ein eigener, spaeterer
 // Baustein -- hier nur Verknuepfen/Loesen/Anlegen von GPOs.
 // ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// Dialog zum Hinzufuegen eines Softwareinstallations-Pakets --
+// minimale erste Version: lokaler Pfad (zum Lesen der .msi-Metadaten)
+// + UNC-Pfad (wie ein Client zugreift) + Zuweisen/Veroeffentlichen.
+// ---------------------------------------------------------------------
+class SoftwareInstallDialog : public FXDialogBox {
+	FXDECLARE(SoftwareInstallDialog)
+private:
+	FXTextField *localPathField, *uncPathField;
+	FXint modeVar = 0; // 0=Computer zuweisen, 1=Benutzer zuweisen, 2=Benutzer veroeffentlichen
+	FXDataTarget* modeTarget = NULL;
+protected:
+	SoftwareInstallDialog() {}
+public:
+	enum { ID_BROWSE = FXDialogBox::ID_LAST };
+	long onBrowse(FXObject*, FXSelector, void*) {
+		FXString picked = FXFileDialog::getOpenFilename(this, ".msi-Datei auswählen", FXSystem::getHomeDirectory(), "MSI-Dateien (*.msi)");
+		if (!picked.empty()) localPathField->setText(picked);
+		return 1;
+	}
+	SoftwareInstallDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Software installieren", DECOR_TITLE | DECOR_BORDER, 0,0,480,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Lokaler Pfad zur .msi-Datei (zum Lesen der Paketangaben):");
+		FXHorizontalFrame* pf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		localPathField = new FXTextField(pf, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		new FXButton(pf, "&Durchsuchen...", NULL, this, ID_BROWSE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXLabel(main, "UNC-Netzwerkpfad, unter dem Clients die Datei erreichen\n(z.B. \\\\server\\freigabe\\pfad\\datei.msi):");
+		uncPathField = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+
+		modeTarget = new FXDataTarget(modeVar);
+		FXGroupBox* group = new FXGroupBox(main, "Bereitstellungsart", GROUPBOX_NORMAL | FRAME_GROOVE | LAYOUT_FILL_X);
+		FXVerticalFrame* radioFrame = new FXVerticalFrame(group, LAYOUT_FILL_X);
+		new FXRadioButton(radioFrame, "Computer zuweisen (Installation beim Hochfahren)", modeTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(radioFrame, "Benutzer zuweisen (Installation bei Anmeldung)", modeTarget, FXDataTarget::ID_OPTION + 1);
+		new FXRadioButton(radioFrame, "Benutzer veröffentlichen (in Software-Katalog verfügbar)", modeTarget, FXDataTarget::ID_OPTION + 2);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	SoftwarePackageParams getParams() const {
+		SoftwarePackageParams p;
+		p.localMsiPath = localPathField->getText().text();
+		p.msiUncPath = uncPathField->getText().text();
+		p.assignedPerMachine = (modeVar == 0);
+		p.published = (modeVar == 2);
+		return p;
+	}
+	virtual ~SoftwareInstallDialog() { delete modeTarget; }
+};
+FXIMPLEMENT(SoftwareInstallDialog, FXDialogBox, NULL, 0)
+
 class PropertiesDialog : public FXDialogBox {
 	FXDECLARE(PropertiesDialog)
 private:
@@ -1310,11 +1635,12 @@ private:
 	std::vector<FXString> linkedGuids;
 	std::map<FXString, FXString> guidToName;
 public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO };
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE };
 	long onNewGpo(FXObject*, FXSelector, void*);
 	long onAddGpo(FXObject*, FXSelector, void*);
 	long onRemoveGpo(FXObject*, FXSelector, void*);
 	long onEditGpo(FXObject*, FXSelector, void*);
+	long onInstallSoftware(FXObject*, FXSelector, void*);
 
 	void reloadList() {
 		gpoList->clearItems();
@@ -1345,6 +1671,7 @@ public:
 		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "Software &installieren...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -1359,6 +1686,7 @@ FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_ADD_GPO, PropertiesDialog::onAddGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_REMOVE_GPO, PropertiesDialog::onRemoveGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_EDIT_GPO, PropertiesDialog::onEditGpo),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_INSTALL_SOFTWARE, PropertiesDialog::onInstallSoftware),
 };
 FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
 
@@ -1436,6 +1764,35 @@ long PropertiesDialog::onEditGpo(FXObject*, FXSelector, void*) {
 	}
 	AdmEditorDialog dlg(this, std::move(machineCats), std::move(userCats), machinePolPath, userPolPath, gptIniPath);
 	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long PropertiesDialog::onInstallSoftware(FXObject*, FXSelector, void*) {
+	int idx = gpoList->getCurrentItem();
+	if (idx < 0 || idx >= (int)linkedGuids.size()) {
+		FXMessageBox::information(this, MBOX_OK, "Kein GPO ausgewählt", "Bitte zuerst ein Gruppenrichtlinienobjekt aus der Liste auswählen.");
+		return 1;
+	}
+	FXString guid = linkedGuids[idx];
+	SoftwareInstallDialog dlg(this);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	SoftwarePackageParams params = dlg.getParams();
+	if (params.localMsiPath.empty() || params.msiUncPath.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
+		return 1;
+	}
+	DomainInfo domain = detectDomain();
+	if (domain.realm.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "Domäne konnte nicht ermittelt werden.");
+		return 1;
+	}
+	std::string log;
+	FXString errorMsg;
+	if (!addSoftwarePackage(this, domain, guid, params, log, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
+		return 1;
+	}
+	FXMessageBox::information(this, MBOX_OK, "Fertig", "Das Paket wurde erfolgreich bereitgestellt.");
 	return 1;
 }
 
