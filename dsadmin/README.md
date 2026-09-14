@@ -26,6 +26,14 @@ Domänendatenbank. `dsadmin` übernimmt genau das: die Verwaltung von
   Editor der Administrativen Vorlagen ist ein eigener, späterer
   Baustein (siehe unten)
 
+## Gruppenmitgliedschaft
+
+"Eigenschaften" auf einer Sicherheitsgruppe öffnet eine
+Mitgliederliste mit Hinzufügen/Entfernen (`samba-tool group
+addmembers`/`removemembers`/`listmembers`) -- für besonders
+geschützte Gruppen greift bei Bedarf derselbe Administrator-
+Anmeldedaten-Fallback wie bei GPOs.
+
 ## Anzeigename vs. Anmeldename
 
 Der Anzeigename eines Objekts (CN, z.B. "Max Mustermann") und sein
@@ -59,7 +67,6 @@ make
 - Nur eine Ebene von Organisationseinheiten unter der Domänenwurzel
   wird im Baum abgebildet (keine rekursive Verschachtelung).
 - Kein Umbenennen, kein Verschieben zwischen Containern/OUs.
-- Kein Editieren von Gruppenmitgliedschaften direkt in diesem Tool.
 - Bekannte, ungelöste Einschränkung aus dem Testen: Das Eingabefeld
   für einen neuen GPO-Namen (aus dem bereits modalen Eigenschaften-
   Dialog heraus geöffnet) nahm in der Xvfb-Testumgebung ohne
