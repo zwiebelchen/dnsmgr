@@ -15,6 +15,7 @@ jeweiligen Unterordner.
 |---|---|---|---|
 | [`dnsmgr/`](dnsmgr/README.md) | DNS-Manager | BIND9 | umfangreich (Zonen, alle gängigen Record-Typen, Root via `i2ksudo`) |
 | [`dhcpmgr/`](dhcpmgr/README.md) | DHCP-Manager | Kea DHCP | Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen, Root via `i2ksudo` |
+| [`compmgmt/`](compmgmt/README.md) | Computerverwaltung (Lokale Benutzer und Gruppen) | Linux-User/-Gruppen + Samba | Benutzer/Gruppen anlegen/bearbeiten/löschen, Root via `i2ksudo`; Freigegebene Ordner folgen |
 
 ## Gemeinsame Bausteine
 
@@ -32,6 +33,7 @@ Alle Programme teilen sich denselben Grundaufbau:
 ```sh
 cd dnsmgr && make && ./dnsmgr
 cd dhcpmgr && make && ./dhcpmgr
+cd compmgmt && make && ./compmgmt
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,
