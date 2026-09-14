@@ -505,6 +505,16 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 	if (rc != 0) { errorMsg = "samba-tool domain provision ist fehlgeschlagen (siehe Protokoll)."; return false; }
 	log += "Provisionierung abgeschlossen.\n";
 
+	// Der klassische smbd/nmbd/winbind-Dienst (z.B. von compmgmt als
+	// Datei-Server genutzt) kollidiert mit samba-ad-dc -- der vereinheit-
+	// lichte AD-DC-Prozess uebernimmt SMB/NetBIOS/Winbind selbst. Ohne
+	// dies zu stoppen, scheitert samba-ad-dc beim Start (z.B. "nmbd is
+	// already running").
+	log += "Stoppe klassische Samba-Dienste (smbd/nmbd/winbind), die mit samba-ad-dc kollidieren würden...\n";
+	runAsRoot({ FXString("systemctl"), FXString("disable"), FXString("--now"), FXString("smbd") });
+	runAsRoot({ FXString("systemctl"), FXString("disable"), FXString("--now"), FXString("nmbd") });
+	runAsRoot({ FXString("systemctl"), FXString("disable"), FXString("--now"), FXString("winbind") });
+
 	if (win2kCompatible) {
 		log += "Stelle BIND9 auf Port " + std::to_string(BIND_ALT_PORT) + " um (Samba braucht Port 53 für sich)...\n";
 		if (!configureBindForWin2k(errorMsg)) return false;
@@ -605,11 +615,12 @@ static bool removeActiveDirectory(std::string& log, FXString& errorMsg) {
 	restoreBackupOrLeaveAlone(BIND_LOCAL);
 	restoreBackupOrLeaveAlone(BIND_OPTIONS);
 
-	log += "Starte bind9 und smbd/nmbd neu, deaktiviere samba-ad-dc...\n";
+	log += "Starte bind9 und smbd/nmbd/winbind neu, deaktiviere samba-ad-dc...\n";
 	bool r1 = runAsRoot({ FXString("systemctl"), FXString("disable"), FXString("--now"), FXString("samba-ad-dc") }) == 0;
 	bool r2 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") }) == 0;
-	bool r3 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("smbd") }) == 0;
-	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("nmbd") });
+	bool r3 = runAsRoot({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString("smbd") }) == 0;
+	runAsRoot({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString("nmbd") });
+	runAsRoot({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString("winbind") });
 	if (!r1 || !r2 || !r3) {
 		log += "Achtung: Dienste konnten nicht automatisch umgestellt werden -- bitte manuell prüfen.\n";
 	} else {
