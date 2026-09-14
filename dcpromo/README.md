@@ -42,6 +42,31 @@ Integration nötig ist, noch nicht -- das kam erst mit Windows Server
 Beide Wege wurden Ende-zu-Ende getestet und funktionieren
 nebeneinander mit den von `dnsmgr` verwalteten Zonen.
 
+## Active Directory entfernen
+
+Genau wie im Original: `dcpromo` auf einem bestehenden Domänencontroller
+noch einmal auszuführen bietet an, Active Directory wieder zu entfernen
+und den Server zu einem eigenständigen Server mit lokaler
+Benutzerverwaltung zu machen. Da dieser Assistent nur "einziger
+Domänencontroller einer eigenen Domäne" unterstützt, bedeutet das:
+Domäne komplett auflösen.
+
+Der Button **"Active Directory entfernen..."** auf der Status-Seite
+warnt deutlich (alle Domänendaten gehen verloren, nicht rückgängig
+machbar) und macht dann:
+1. `samba-ad-dc`/`bind9` stoppen
+2. AD-Datenbank entfernen (`/var/lib/samba/private`, `sysvol`,
+   `bind-dns`)
+3. Ursprüngliche `smb.conf`/`named.conf.local`/`named.conf.options`
+   wiederherstellen (oder ersatzlos entfernen, falls es vorher keine
+   gab)
+4. `bind9`/`smbd`/`nmbd` neu starten, `samba-ad-dc` deaktivieren
+
+Getestet: kompletter Zyklus (provisionieren -> entfernen) -- danach
+ist `named.conf.local` byte-identisch mit dem ursprünglichen,
+`dnsmgr`-verwalteten Zustand, und der Assistent zeigt beim nächsten
+Start wieder die normale Willkommen-Seite.
+
 ## Migration: "Windows-2000-Kompatibilität aufheben"
 
 Wurde die Domäne Windows-2000-kompatibel angelegt, lässt sich später
