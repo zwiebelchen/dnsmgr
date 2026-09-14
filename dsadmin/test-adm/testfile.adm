@@ -60,6 +60,23 @@ CATEGORY !!Cat_Second
   END POLICY
 END CATEGORY
 
+CLASS USER
+
+CATEGORY !!Cat_UserRoot
+  KEYNAME "Software\Policies\IceTestUser"
+  POLICY !!Pol_MultiPart
+    EXPLAIN !!Explain_MultiPart
+    PART !!Part_First EDITTEXT
+      VALUENAME "FirstValue"
+      DEFAULT "Erster Standardwert"
+    END PART
+    PART !!Part_Second EDITTEXT
+      VALUENAME "SecondValue"
+      DEFAULT "Zweiter Standardwert"
+    END PART
+  END POLICY
+END CATEGORY
+
 [strings]
 Cat_Root="Ice2K Testeinstellungen"
 Cat_Sub="Testrichtlinien"
@@ -82,3 +99,9 @@ Part_CheckboxLabel="Kontrollkästchen"
 Cat_Second="Zweite, eigenständige Hauptkategorie"
 Pol_Second="Richtlinie in der zweiten Kategorie"
 Explain_Second="Testet, dass mehrere Top-Level-Kategorien unter einer CLASS funktionieren."
+
+Cat_UserRoot="Benutzer-Testeinstellungen"
+Pol_MultiPart="Mehrfach-Part-Richtlinie"
+Explain_MultiPart="Diese Richtlinie testet zwei unabhaengige Textfelder in einer Richtlinie."
+Part_First="Erstes Feld"
+Part_Second="Zweites Feld"
