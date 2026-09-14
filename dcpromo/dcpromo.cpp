@@ -346,6 +346,7 @@ static bool configureBindForWin2k(FXString& errorMsg) {
 	if (opts.empty()) { errorMsg = "named.conf.options nicht gefunden."; return false; }
 
 	bindOptionsRemoveLineContaining(opts, "listen-on port");
+	bindOptionsRemoveLineContaining(opts, "listen-on-v6");
 	bindOptionsRemoveLineContaining(opts, "tkey-gssapi-keytab");
 	bindOptionsRemoveLineContaining(opts, "minimal-responses yes;");
 
@@ -354,6 +355,11 @@ static bool configureBindForWin2k(FXString& errorMsg) {
 		errorMsg = "Konnte named.conf.options nicht anpassen (Marker fehlt).";
 		return false;
 	}
+	// Ohne diese Zeile lauscht BIND9 per IPv6 unveraendert auf dem
+	// Standardport 53 weiter (die "listen-on port"-Zeile oben betrifft
+	// nur IPv4!) -- das kollidiert mit Sambas eigenem DNS-Server, der
+	// im Windows-2000-kompatiblen Modus Port 53 fuer sich braucht.
+	bindOptionsAddLine(opts, "dnssec-validation auto;", "listen-on-v6 { none; };");
 	return writeFileAsRoot(BIND_OPTIONS, opts);
 }
 
@@ -461,6 +467,15 @@ static std::string smbConfSetOrRemove(const std::string& conf, const char* key, 
 // neue Gesamtstruktur -- die einzige Variante, die dieser Assistent
 // unterstuetzt; siehe README fuer die bewusst weggelassenen Faelle).
 // ---------------------------------------------------------------------
+// Ein "systemctl restart" kann selbst mit Erfolg zurueckkommen, auch
+// wenn der Dienst Sekunden spaeter abstuerzt (z.B. durch einen
+// Portkonflikt). Deshalb nach dem Neustart den TATSAECHLICHEN Status
+// abfragen statt uns nur auf den Rueckgabewert von "restart" zu
+// verlassen.
+static bool isServiceActive(const FXString& name) {
+	return runAsRoot({ FXString("systemctl"), FXString("is-active"), FXString("--quiet"), name }) == 0;
+}
+
 static bool provisionDomain(const FXString& dnsName, const FXString& netbios, const FXString& adminPass,
                              bool win2kCompatible, std::string& log, FXString& errorMsg) {
 	log += "Bestehende smb.conf sichern (falls vorhanden)...\n";
@@ -499,12 +514,19 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 	}
 
 	log += "Starte kea-dhcp4-server unveraendert weiter; starte bind9 und samba neu...\n";
-	bool r1 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") }) == 0;
-	bool r2 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") }) == 0;
-	if (!r1 || !r2) {
-		log += "Achtung: bind9/samba-ad-dc konnten nicht automatisch neu gestartet werden -- bitte manuell prüfen.\n";
+	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") });
+	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") });
+	sleep(2); // kurz warten, damit ein Absturz kurz nach dem Start erkannt wird
+	bool bindOk = isServiceActive("bind9");
+	bool sambaOk = isServiceActive("samba-ad-dc");
+	if (!bindOk || !sambaOk) {
+		log += "Achtung: ";
+		if (!bindOk) log += "bind9 läuft nicht (mehr). ";
+		if (!sambaOk) log += "samba-ad-dc läuft nicht (mehr). ";
+		log += "Bitte 'systemctl status bind9'/'systemctl status samba-ad-dc' und\n"
+		       "'journalctl -xeu <dienst>' prüfen.\n";
 	} else {
-		log += "Dienste neu gestartet.\n";
+		log += "bind9 und samba-ad-dc laufen.\n";
 	}
 	return true;
 }
@@ -538,12 +560,19 @@ static bool migrateToModernAd(const FXString& dnsName, std::string& log, FXStrin
 	if (!configureBindForModernAd(dnsName, errorMsg)) return false;
 
 	log += "Starte bind9 und samba-ad-dc neu...\n";
-	bool r1 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") }) == 0;
-	bool r2 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") }) == 0;
-	if (!r1 || !r2) {
-		log += "Achtung: bind9/samba-ad-dc konnten nicht automatisch neu gestartet werden -- bitte manuell prüfen.\n";
+	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") });
+	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") });
+	sleep(2);
+	bool bindOk = isServiceActive("bind9");
+	bool sambaOk = isServiceActive("samba-ad-dc");
+	if (!bindOk || !sambaOk) {
+		log += "Achtung: ";
+		if (!bindOk) log += "bind9 läuft nicht (mehr). ";
+		if (!sambaOk) log += "samba-ad-dc läuft nicht (mehr). ";
+		log += "Bitte 'systemctl status bind9'/'systemctl status samba-ad-dc' und\n"
+		       "'journalctl -xeu <dienst>' prüfen.\n";
 	} else {
-		log += "Dienste neu gestartet.\n";
+		log += "bind9 und samba-ad-dc laufen.\n";
 	}
 	log += "Migration abgeschlossen -- Windows-2000-Kompatibilität wurde aufgehoben.\n";
 	return true;
