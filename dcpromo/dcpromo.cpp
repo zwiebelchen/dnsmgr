@@ -549,6 +549,8 @@ public:
 	DcPromoWizard(FXApp* a);
 	void gotoPage(int page);
 	void runProvisioningNow(const std::vector<FXString>& missingPkgs);
+	void logSet(const FXString& text);
+	void logAppend(const FXString& text);
 	void runMigrationNow(const std::vector<FXString>& missingPkgs);
 	virtual void create();
 	virtual ~DcPromoWizard() {}
@@ -754,6 +756,31 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 			FXMessageBox::error(this, MBOX_OK, "Kennwörter stimmen nicht überein", "Die beiden eingegebenen Kennwörter sind unterschiedlich.");
 			return 1;
 		}
+		{
+			// Samba lehnt zu kurze/zu einfache Administrator-Kennwoerter beim
+			// Provisionieren ab ("does not meet the default minimum password
+			// length requirement") -- lieber vorher pruefen als das erst nach
+			// Paketinstallation+Provisionierungsversuch scheitern zu lassen.
+			FXString pw = adminPwField->getText();
+			bool hasLower = false, hasUpper = false, hasDigit = false, hasSpecial = false;
+			for (FXint i = 0; i < pw.length(); ++i) {
+				FXchar c = pw[i];
+				if (islower((unsigned char)c)) hasLower = true;
+				else if (isupper((unsigned char)c)) hasUpper = true;
+				else if (isdigit((unsigned char)c)) hasDigit = true;
+				else hasSpecial = true;
+			}
+			int classes = (hasLower ? 1 : 0) + (hasUpper ? 1 : 0) + (hasDigit ? 1 : 0) + (hasSpecial ? 1 : 0);
+			if (pw.length() < 7 || classes < 3) {
+				FXMessageBox::error(this, MBOX_OK, "Kennwort zu einfach",
+					"Das Administrator-Kennwort muss mindestens 7 Zeichen lang sein und\n"
+					"mindestens 3 der 4 folgenden Kategorien enthalten: Kleinbuchstaben,\n"
+					"Großbuchstaben, Ziffern, Sonderzeichen.\n\n"
+					"(Das verlangt Samba selbst beim Provisionieren -- ohne diese Prüfung\n"
+					"würde der Assistent erst nach der Paketinstallation scheitern.)");
+				return 1;
+			}
+		}
 		gotoPage(PAGE_DNSCHOICE);
 
 	} else if (cur == PAGE_DNSCHOICE) {
@@ -843,30 +870,42 @@ long DcPromoWizard::onMigrate(FXObject*, FXSelector, void*) {
 	return 1;
 }
 
+void DcPromoWizard::logSet(const FXString& text) {
+	logText->setText(text);
+	logText->makePositionVisible(logText->getLength());
+	getApp()->repaint();
+	getApp()->flush();
+}
+
+void DcPromoWizard::logAppend(const FXString& text) {
+	logText->appendText(text);
+	logText->makePositionVisible(logText->getLength());
+	getApp()->repaint();
+	getApp()->flush();
+}
+
 void DcPromoWizard::runProvisioningNow(const std::vector<FXString>& missingPkgs) {
 	std::string log;
 	FXString errorMsg;
 
 	if (!missingPkgs.empty()) {
 		if (!installMissingPackages(missingPkgs, log, errorMsg)) {
-			logText->setText(log.c_str());
-			logText->appendText(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
+			logSet(log.c_str());
+			logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
 			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 			return;
 		}
-		logText->setText(log.c_str());
-		getApp()->repaint();
-		getApp()->flush();
+		logSet(log.c_str());
 	}
 
 	bool ok = provisionDomain(dnsNameField->getText().trim(), netbiosField->getText().trim(),
 	                           adminPwField->getText(), rbWin2k->getCheck(), log, errorMsg);
-	logText->setText(log.c_str());
+	logSet(log.c_str());
 	if (!ok) {
-		logText->appendText(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
+		logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	} else {
-		logText->appendText("\nErfolgreich abgeschlossen.\n");
+		logAppend("\nErfolgreich abgeschlossen.\n");
 	}
 }
 
@@ -876,23 +915,21 @@ void DcPromoWizard::runMigrationNow(const std::vector<FXString>& missingPkgs) {
 
 	if (!missingPkgs.empty()) {
 		if (!installMissingPackages(missingPkgs, log, errorMsg)) {
-			logText->setText(log.c_str());
-			logText->appendText(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
+			logSet(log.c_str());
+			logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
 			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 			return;
 		}
-		logText->setText(log.c_str());
-		getApp()->repaint();
-		getApp()->flush();
+		logSet(log.c_str());
 	}
 
 	bool ok = migrateToModernAd(domainState.realm, log, errorMsg);
-	logText->setText(log.c_str());
+	logSet(log.c_str());
 	if (!ok) {
-		logText->appendText(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
+		logAppend(("\nFEHLER: " + std::string(errorMsg.text()) + "\n").c_str());
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	} else {
-		logText->appendText("\nErfolgreich abgeschlossen.\n");
+		logAppend("\nErfolgreich abgeschlossen.\n");
 		domainState = detectDomainState();
 	}
 }
