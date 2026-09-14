@@ -293,7 +293,33 @@ static void bindOptionsRemoveLineContaining(std::string& conf, const std::string
 
 // Stellt BIND9 auf den Win2k-kompatiblen Modus um: Port BIND_ALT_PORT
 // statt 53, damit Samba (SAMBA_INTERNAL) Port 53 fuer sich hat.
+static const FXString BACKUP_SUFFIX = ".vor-dcpromo";
+
+// Sichert eine Datei einmalig (nur falls noch keine Sicherung existiert),
+// damit eine spaetere Migration den urspruenglichen Zustand nicht
+// versehentlich als "Sicherung" ueberschreibt.
+static void backupFileOnce(const FXString& path) {
+	FXString backup = path + BACKUP_SUFFIX;
+	if (access(backup.text(), F_OK) == 0) return; // schon gesichert
+	if (access(path.text(), F_OK) != 0) return;    // nichts zu sichern
+	runAsRoot({ FXString("cp"), path, backup });
+}
+
+// Stellt eine zuvor gesicherte Datei wieder her (fuer "Active Directory
+// entfernen"). Existiert keine Sicherung, wird die Datei ersatzlos
+// entfernt -- sie wurde dann erst durch die AD-Installation angelegt.
+static void restoreBackupOrRemove(const FXString& path) {
+	FXString backup = path + BACKUP_SUFFIX;
+	if (access(backup.text(), F_OK) == 0) {
+		runAsRoot({ FXString("mv"), backup, path });
+	} else {
+		runAsRoot({ FXString("rm"), FXString("-f"), path });
+	}
+}
+
 static bool configureBindForWin2k(FXString& errorMsg) {
+	backupFileOnce(BIND_LOCAL);
+	backupFileOnce(BIND_OPTIONS);
 	std::string opts = readFileUnprivileged(BIND_OPTIONS);
 	if (opts.empty()) { errorMsg = "named.conf.options nicht gefunden."; return false; }
 
@@ -331,6 +357,8 @@ static FXString detectDlzModuleName() {
 }
 
 static bool configureBindForModernAd(const FXString& realm, FXString& errorMsg) {
+	backupFileOnce(BIND_LOCAL);
+	backupFileOnce(BIND_OPTIONS);
 	FXString bindDnsConf = "/var/lib/samba/bind-dns/named.conf";
 	std::string snippet = readFileUnprivileged(bindDnsConf);
 	if (snippet.empty()) { errorMsg = "Von Samba erzeugte BIND-Konfiguration nicht gefunden (" + bindDnsConf + ")."; return false; }
@@ -414,9 +442,8 @@ static std::string smbConfSetOrRemove(const std::string& conf, const char* key, 
 static bool provisionDomain(const FXString& dnsName, const FXString& netbios, const FXString& adminPass,
                              bool win2kCompatible, std::string& log, FXString& errorMsg) {
 	log += "Bestehende smb.conf sichern (falls vorhanden)...\n";
-	if (access(SMB_CONF, F_OK) == 0) {
-		runAsRoot({ FXString("mv"), FXString(SMB_CONF), FXString(SMB_CONF) + FXString(".vor-dcpromo") });
-	}
+	backupFileOnce(SMB_CONF);
+	runAsRoot({ FXString("rm"), FXString("-f"), FXString(SMB_CONF) }); // samba-tool provision verlangt eine nicht existierende smb.conf
 
 	std::vector<FXString> args = {
 		FXString("samba-tool"), FXString("domain"), FXString("provision"),
@@ -501,6 +528,47 @@ static bool migrateToModernAd(const FXString& dnsName, std::string& log, FXStrin
 }
 
 // ---------------------------------------------------------------------
+// "Active Directory entfernen" -- das Gegenstueck zu provisionDomain().
+// Genau wie im Original: einfach 'dcpromo' auf einem bestehenden DC
+// nochmal ausfuehren entfernt AD wieder und macht den Server zu einem
+// eigenstaendigen Server mit lokaler Benutzerverwaltung. Da wir nur den
+// Fall "einziger DC einer eigenen Domaene" unterstuetzen, ist das
+// gleichbedeutend mit "Domaene komplett aufloesen".
+// ---------------------------------------------------------------------
+static bool removeActiveDirectory(std::string& log, FXString& errorMsg) {
+	log += "Stoppe Samba (AD) und BIND9...\n";
+	runAsRoot({ FXString("systemctl"), FXString("stop"), FXString("samba-ad-dc") });
+	runAsRoot({ FXString("systemctl"), FXString("stop"), FXString("bind9") });
+
+	log += "Entferne Active-Directory-Datenbank (sysvol, private Daten)...\n";
+	int rc = runAsRoot({ FXString("bash"), FXString("-c"),
+		FXString("rm -rf /var/lib/samba/private/* /var/lib/samba/sysvol/* /var/lib/samba/bind-dns") });
+	if (rc != 0) { errorMsg = "Konnte die AD-Datenbank nicht vollständig entfernen."; return false; }
+
+	log += "Stelle ursprüngliche smb.conf wieder her (falls vorhanden)...\n";
+	restoreBackupOrRemove(SMB_CONF);
+
+	log += "Stelle ursprüngliche BIND9-Konfiguration wieder her (falls vorhanden)...\n";
+	restoreBackupOrRemove(BIND_LOCAL);
+	restoreBackupOrRemove(BIND_OPTIONS);
+
+	log += "Starte bind9 und smbd/nmbd neu, deaktiviere samba-ad-dc...\n";
+	bool r1 = runAsRoot({ FXString("systemctl"), FXString("disable"), FXString("--now"), FXString("samba-ad-dc") }) == 0;
+	bool r2 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") }) == 0;
+	bool r3 = runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("smbd") }) == 0;
+	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("nmbd") });
+	if (!r1 || !r2 || !r3) {
+		log += "Achtung: Dienste konnten nicht automatisch umgestellt werden -- bitte manuell prüfen.\n";
+	} else {
+		log += "Dienste umgestellt.\n";
+	}
+
+	log += "Active Directory wurde entfernt -- der Server ist wieder ein eigenständiger Server.\n"
+	       "Die lokale Benutzerverwaltung (Computerverwaltung) funktioniert wieder wie zuvor.\n";
+	return true;
+}
+
+// ---------------------------------------------------------------------
 // Fuehrt die eigentliche (potenziell mehrminuetige) Arbeit in einem
 // Hintergrund-Thread aus, damit die GUI waehrenddessen bedienbar
 // bleibt und nicht wie abgestuerzt wirkt.
@@ -508,6 +576,7 @@ static bool migrateToModernAd(const FXString& dnsName, std::string& log, FXStrin
 class ProvisionWorker : public FXThread {
 public:
 	bool isMigration = false;
+	bool isRemoval = false;
 	FXString dnsName, netbios, adminPw, realm;
 	bool win2kCompatible = false;
 	std::vector<FXString> missingPkgs;
@@ -520,7 +589,8 @@ public:
 			ok = installMissingPackages(missingPkgs, log, errorMsg);
 		}
 		if (ok) {
-			if (isMigration) ok = migrateToModernAd(realm, log, errorMsg);
+			if (isRemoval) ok = removeActiveDirectory(log, errorMsg);
+			else if (isMigration) ok = migrateToModernAd(realm, log, errorMsg);
 			else ok = provisionDomain(dnsName, netbios, adminPw, win2kCompatible, log, errorMsg);
 		}
 		g_workerLog = log;
@@ -555,6 +625,7 @@ private:
 	// Status-Seite
 	FXLabel* statusLabel;
 	FXButton* btnMigrate;
+	FXButton* btnRemoveAD;
 
 	// Domaenendaten
 	FXTextField *dnsNameField, *netbiosField, *adminPwField, *adminPwConfirmField;
@@ -565,12 +636,14 @@ private:
 
 	// Zusammenfassung
 	FXText* summaryText;
+	FXLabel* finishLabel;
 
 	// Ausfuehren
 	FXText* logText;
 
 	DomainState domainState;
 	bool migrating; // true, wenn PAGE_RUNNING fuer die Migration statt Neuprovisionierung laeuft
+	bool wasRemoval = false; // true, wenn PAGE_RUNNING fuer "Active Directory entfernen" laeuft
 	ProvisionWorker* worker = NULL;
 	time_t runStartTime = 0;
 
@@ -578,7 +651,7 @@ protected:
 	DcPromoWizard() {}
 public:
 	enum {
-		ID_BACK = FXMainWindow::ID_LAST, ID_NEXT, ID_CANCEL, ID_FINISH, ID_MIGRATE,
+		ID_BACK = FXMainWindow::ID_LAST, ID_NEXT, ID_CANCEL, ID_FINISH, ID_MIGRATE, ID_REMOVE_AD,
 		ID_DNSCHOICE_WIN2K, ID_DNSCHOICE_MODERN, ID_DNSNAME_CHANGED, ID_NETBIOS_CHANGED, ID_POLLTIMER
 	};
 
@@ -587,6 +660,7 @@ public:
 	long onCancelBtn(FXObject*, FXSelector, void*);
 	long onFinish(FXObject*, FXSelector, void*);
 	long onMigrate(FXObject*, FXSelector, void*);
+	long onRemoveAD(FXObject*, FXSelector, void*);
 	long onPollTimer(FXObject*, FXSelector, void*);
 	long onDnsChoice(FXObject*, FXSelector, void*);
 	long onDnsNameChanged(FXObject*, FXSelector, void*);
@@ -606,6 +680,7 @@ FXDEFMAP(DcPromoWizard) DcPromoWizardMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DcPromoWizard::ID_CANCEL, DcPromoWizard::onCancelBtn),
 	FXMAPFUNC(SEL_COMMAND, DcPromoWizard::ID_FINISH, DcPromoWizard::onFinish),
 	FXMAPFUNC(SEL_COMMAND, DcPromoWizard::ID_MIGRATE, DcPromoWizard::onMigrate),
+	FXMAPFUNC(SEL_COMMAND, DcPromoWizard::ID_REMOVE_AD, DcPromoWizard::onRemoveAD),
 	FXMAPFUNC(SEL_COMMAND, DcPromoWizard::ID_DNSCHOICE_WIN2K, DcPromoWizard::onDnsChoice),
 	FXMAPFUNC(SEL_COMMAND, DcPromoWizard::ID_DNSCHOICE_MODERN, DcPromoWizard::onDnsChoice),
 	FXMAPFUNC(SEL_CHANGED, DcPromoWizard::ID_DNSNAME_CHANGED, DcPromoWizard::onDnsNameChanged),
@@ -632,6 +707,8 @@ DcPromoWizard::DcPromoWizard(FXApp* a)
 		new FXFrame(p, LAYOUT_FILL_Y);
 		btnMigrate = new FXButton(p, "&Windows-2000-Kompatibilität aufheben...", NULL, this, ID_MIGRATE,
 		                          BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,6,6);
+		btnRemoveAD = new FXButton(p, "&Active Directory entfernen...", NULL, this, ID_REMOVE_AD,
+		                           BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,6,6);
 	}
 
 	// --- PAGE_WELCOME ---
@@ -707,7 +784,7 @@ DcPromoWizard::DcPromoWizard(FXApp* a)
 	{
 		FXVerticalFrame* p = new FXVerticalFrame(switcher, LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		new FXLabel(p, "Fertigstellen des Assistenten", NULL, LABEL_NORMAL | JUSTIFY_LEFT);
-		new FXLabel(p,
+		finishLabel = new FXLabel(p,
 			"Active Directory wurde konfiguriert.\n\n"
 			"Damit alle Dienste den neuen Zustand übernehmen, wird ein\n"
 			"Neustart der betroffenen Dienste (bzw. des Systems) empfohlen.\n\n"
@@ -740,6 +817,8 @@ void DcPromoWizard::gotoPage(int page) {
 		statusLabel->setText(txt);
 		btnMigrate->show();
 		if (!domainState.win2kCompatible) btnMigrate->disable(); else btnMigrate->enable();
+		btnRemoveAD->show();
+		btnRemoveAD->enable();
 		btnBack->hide(); btnNext->hide(); btnCancel->hide();
 		btnFinish->show();
 	} else if (page == PAGE_WELCOME) {
@@ -749,6 +828,20 @@ void DcPromoWizard::gotoPage(int page) {
 		btnCancel->hide();
 		btnNext->disable(); // wird von onPollTimer wieder aktiviert, sobald der Hintergrund-Thread fertig ist
 	} else if (page == PAGE_FINISH) {
+		if (wasRemoval) {
+			finishLabel->setText(
+				"Active Directory wurde entfernt.\n\n"
+				"Der Server ist wieder ein eigenständiger Server -- die lokale\n"
+				"Benutzerverwaltung (Computerverwaltung) funktioniert wieder wie zuvor.\n"
+				"Ein Neustart der betroffenen Dienste (bzw. des Systems) wird empfohlen.\n\n"
+				"Klicken Sie auf \"Schließen\", um den Assistenten zu beenden.");
+		} else {
+			finishLabel->setText(
+				"Active Directory wurde konfiguriert.\n\n"
+				"Damit alle Dienste den neuen Zustand übernehmen, wird ein\n"
+				"Neustart der betroffenen Dienste (bzw. des Systems) empfohlen.\n\n"
+				"Klicken Sie auf \"Schließen\", um den Assistenten zu beenden.");
+		}
 		btnBack->hide(); btnNext->hide(); btnCancel->hide();
 		btnFinish->show();
 	}
@@ -861,6 +954,7 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 			}
 		}
 		migrating = false;
+		wasRemoval = false;
 		gotoPage(PAGE_RUNNING);
 
 		worker = new ProvisionWorker();
@@ -919,12 +1013,43 @@ long DcPromoWizard::onMigrate(FXObject*, FXSelector, void*) {
 		}
 	}
 	migrating = true;
+	wasRemoval = false;
 	gotoPage(PAGE_RUNNING);
 
 	worker = new ProvisionWorker();
 	worker->realm = domainState.realm;
 	worker->missingPkgs = missing;
 	worker->isMigration = true;
+	g_workerDone = false;
+	runStartTime = time(NULL);
+	logSet("Wird ausgeführt -- das kann je nach System mehrere Minuten dauern.\n"
+	       "Das Fenster bleibt währenddessen bedienbar.\n\nVerstrichene Zeit: 0 s");
+	worker->start();
+	getApp()->addTimeout(this, ID_POLLTIMER, 300);
+	return 1;
+}
+
+long DcPromoWizard::onRemoveAD(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann Active Directory nicht entfernt werden.");
+		return 1;
+	}
+	if (FXMessageBox::question(this, MBOX_YES_NO, "Active Directory entfernen",
+	        "Die Domäne \"%s\" wird komplett entfernt. Da nur der Fall \"einziger\n"
+	        "Domänencontroller einer eigenen Domäne\" unterstützt wird, bedeutet das:\n"
+	        "ALLE Domänenkonten, -gruppen und -einstellungen gehen dabei verloren.\n\n"
+	        "Der Server wird danach wieder zu einem eigenständigen Server mit lokaler\n"
+	        "Benutzerverwaltung (wie vor der Installation von Active Directory).\n\n"
+	        "Dieser Schritt lässt sich nicht rückgängig machen. Fortfahren?",
+	        domainState.realm.text()) != MBOX_CLICKED_YES) {
+		return 1;
+	}
+	migrating = false; // steuert nur den Beschreibungstext auf der Zusammenfassungs-/Protokollseite
+	wasRemoval = true;
+	gotoPage(PAGE_RUNNING);
+
+	worker = new ProvisionWorker();
+	worker->isRemoval = true;
 	g_workerDone = false;
 	runStartTime = time(NULL);
 	logSet("Wird ausgeführt -- das kann je nach System mehrere Minuten dauern.\n"
@@ -968,7 +1093,7 @@ long DcPromoWizard::onPollTimer(FXObject*, FXSelector, void*) {
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", g_workerErrorMsg.text());
 	} else {
 		logAppend("\nErfolgreich abgeschlossen.\n");
-		if (migrating) domainState = detectDomainState();
+		domainState = detectDomainState(); // aktualisiert sich nach Migration UND nach Entfernen
 	}
 	btnNext->enable();
 	return 1;
