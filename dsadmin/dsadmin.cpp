@@ -3570,6 +3570,14 @@ long DsAdminWindow::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 	tree->selectItem(item);
 	FXString relDN = itemToRelDN[item];
 
+	// Wichtig: setCurrentItem() loest KEIN SEL_CHANGED aus, also liefe
+	// showContainer() nie -- und currentContainerRelDN zeigte weiter auf
+	// den zuletzt mit links angeklickten Knoten. "Neu -> ..." haette die
+	// Objekte dann im falschen Container angelegt: bei einer OU unter
+	// CN=Computers scheitert das sichtbar, bei Benutzer/Gruppe/Computer
+	// waere es still schiefgegangen.
+	if (relDN != currentContainerRelDN) showContainer(relDN);
+
 	FXMenuPane menu(this);
 	FXMenuPane neuMenu(this);
 	new FXMenuCommand(&neuMenu, "&Benutzer...", NULL, this, ID_NEW_USER);

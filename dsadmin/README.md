@@ -198,6 +198,12 @@ make
 ```
 
 ## Bekannte Grenzen
+- Objekte werden immer in dem Container angelegt, der im Baum markiert
+  ist -- auch beim Rechtsklick auf einen anderen Knoten wird dieser
+  zuerst zum aktuellen Container gemacht. (FOX löst bei
+  `setCurrentItem()` kein `SEL_CHANGED` aus; ohne das ausdrückliche
+  Nachziehen landeten Benutzer, Gruppen und Computer still im zuvor
+  angeklickten Container.)
 - Organisationseinheiten unterhalb eines ausgeblendeten Containers
   erscheinen nicht im Baum; die DN-Zerlegung trennt an Kommas und
   behandelt maskierte Kommas in einem RDN nicht.
