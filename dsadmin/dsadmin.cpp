@@ -1346,6 +1346,72 @@ static bool renameObject(FXWindow* owner, const DomainInfo& domain, ObjType type
 	}
 }
 
+// ---------------------------------------------------------------------
+// Sicherheitseinstellungen -- Kennwort- und Kontosperrungsrichtlinie.
+// In Active Directory (wie schon unter Windows 2000/2003, vor den
+// granularen Kennwortrichtlinien von 2008) gibt es davon nur EINE
+// domainweite Auspraegung, die ueber die "Default Domain Policy"
+// bearbeitet wird -- entsprechend bildet Samba das nicht als
+// Registry.pol/GptTmpl.inf-Datei ab, sondern direkt als Attribute des
+// Domaenenobjekts, verwaltet ueber "samba-tool domain passwordsettings".
+// ---------------------------------------------------------------------
+struct PasswordPolicy {
+	bool complexity = true;
+	int historyLength = 24;
+	int minPwdLength = 7;
+	int minPwdAgeDays = 1;
+	int maxPwdAgeDays = 42;
+	int lockoutDurationMins = 30;
+	int lockoutThreshold = 0;
+	int lockoutWindowMins = 30;
+};
+
+static FXString trimmed(const std::string& s) {
+	FXString f = s.c_str();
+	f.trim();
+	return f;
+}
+
+static PasswordPolicy getPasswordPolicy() {
+	PasswordPolicy p;
+	std::string out;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("domain"), FXString("passwordsettings"), FXString("show") }, out);
+	for (auto& line : splitLines(out)) {
+		size_t colon = line.find(':');
+		if (colon == std::string::npos) continue;
+		std::string key = line.substr(0, colon);
+		FXString val = trimmed(line.substr(colon + 1));
+		try {
+			if (key.find("Password complexity") != std::string::npos) p.complexity = (val == "on");
+			else if (key.find("history length") != std::string::npos) p.historyLength = std::stoi(val.text());
+			else if (key.find("Minimum password length") != std::string::npos) p.minPwdLength = std::stoi(val.text());
+			else if (key.find("Minimum password age") != std::string::npos) p.minPwdAgeDays = std::stoi(val.text());
+			else if (key.find("Maximum password age") != std::string::npos) p.maxPwdAgeDays = std::stoi(val.text());
+			else if (key.find("lockout duration") != std::string::npos) p.lockoutDurationMins = std::stoi(val.text());
+			else if (key.find("lockout threshold") != std::string::npos) p.lockoutThreshold = std::stoi(val.text());
+			else if (key.find("Reset account lockout") != std::string::npos) p.lockoutWindowMins = std::stoi(val.text());
+		} catch (...) {}
+	}
+	return p;
+}
+
+static bool setPasswordPolicy(const PasswordPolicy& p, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({
+		FXString("samba-tool"), FXString("domain"), FXString("passwordsettings"), FXString("set"),
+		FXString("--complexity=") + (p.complexity ? "on" : "off"),
+		FXString("--history-length=") + std::to_string(p.historyLength).c_str(),
+		FXString("--min-pwd-length=") + std::to_string(p.minPwdLength).c_str(),
+		FXString("--min-pwd-age=") + std::to_string(p.minPwdAgeDays).c_str(),
+		FXString("--max-pwd-age=") + std::to_string(p.maxPwdAgeDays).c_str(),
+		FXString("--account-lockout-duration=") + std::to_string(p.lockoutDurationMins).c_str(),
+		FXString("--account-lockout-threshold=") + std::to_string(p.lockoutThreshold).c_str(),
+		FXString("--reset-account-lockout-after=") + std::to_string(p.lockoutWindowMins).c_str(),
+	}, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
 // Liste aller Organisationseinheiten der Domaene (volle DN + Anzeige-
 // pfad), fuer die Zielauswahl beim Verschieben.
 static std::vector<std::pair<FXString, FXString>> listAllOUsWithPaths() {
@@ -2119,6 +2185,78 @@ FXDEFMAP(SoftwarePackageListDialog) SoftwarePackageListDialogMap[] = {
 };
 FXIMPLEMENT(SoftwarePackageListDialog, FXDialogBox, SoftwarePackageListDialogMap, ARRAYNUMBER(SoftwarePackageListDialogMap))
 
+// ---------------------------------------------------------------------
+// Dialog "Sicherheitseinstellungen" -- Kennwort- und
+// Kontosperrungsrichtlinie der Domäne (siehe Erläuterung oben bei
+// PasswordPolicy: es gibt in AD nur eine einzige, domainweite
+// Ausprägung davon, wie unter echtem Windows 2000/2003).
+// ---------------------------------------------------------------------
+class SecuritySettingsDialog : public FXDialogBox {
+	FXDECLARE(SecuritySettingsDialog)
+private:
+	FXCheckButton* complexityCheck;
+	FXTextField *historyField, *minLenField, *minAgeField, *maxAgeField;
+	FXTextField *lockoutThresholdField, *lockoutDurationField, *lockoutWindowField;
+protected:
+	SecuritySettingsDialog() {}
+public:
+	SecuritySettingsDialog(FXWindow* owner, const PasswordPolicy& p)
+		: FXDialogBox(owner, "Sicherheitseinstellungen", DECOR_TITLE | DECOR_BORDER, 0,0,420,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+
+		FXGroupBox* pwGroup = new FXGroupBox(main, "Kennwortrichtlinie", GROUPBOX_NORMAL | FRAME_GROOVE | LAYOUT_FILL_X);
+		FXVerticalFrame* pwFrame = new FXVerticalFrame(pwGroup, LAYOUT_FILL_X);
+		complexityCheck = new FXCheckButton(pwFrame, "Kennwort muss Komplexität entsprechen");
+		complexityCheck->setCheck(p.complexity);
+		FXMatrix* pwMatrix = new FXMatrix(pwFrame, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X);
+		new FXLabel(pwMatrix, "Kennwortchronik (Anzahl):");
+		historyField = new FXTextField(pwMatrix, 6, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+		historyField->setText(FXStringFormat("%d", p.historyLength));
+		new FXLabel(pwMatrix, "Minimale Kennwortlänge:");
+		minLenField = new FXTextField(pwMatrix, 6, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+		minLenField->setText(FXStringFormat("%d", p.minPwdLength));
+		new FXLabel(pwMatrix, "Minimales Kennwortalter (Tage):");
+		minAgeField = new FXTextField(pwMatrix, 6, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+		minAgeField->setText(FXStringFormat("%d", p.minPwdAgeDays));
+		new FXLabel(pwMatrix, "Maximales Kennwortalter (Tage):");
+		maxAgeField = new FXTextField(pwMatrix, 6, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+		maxAgeField->setText(FXStringFormat("%d", p.maxPwdAgeDays));
+
+		FXGroupBox* loGroup = new FXGroupBox(main, "Kontosperrungsrichtlinie", GROUPBOX_NORMAL | FRAME_GROOVE | LAYOUT_FILL_X);
+		FXMatrix* loMatrix = new FXMatrix(loGroup, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X);
+		new FXLabel(loMatrix, "Kontosperrungsschwelle (0 = nie sperren):");
+		lockoutThresholdField = new FXTextField(loMatrix, 6, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+		lockoutThresholdField->setText(FXStringFormat("%d", p.lockoutThreshold));
+		new FXLabel(loMatrix, "Kontosperrdauer (Minuten):");
+		lockoutDurationField = new FXTextField(loMatrix, 6, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+		lockoutDurationField->setText(FXStringFormat("%d", p.lockoutDurationMins));
+		new FXLabel(loMatrix, "Zurücksetzungsdauer des Zählers (Minuten):");
+		lockoutWindowField = new FXTextField(loMatrix, 6, NULL, 0, FRAME_SUNKEN | TEXTFIELD_INTEGER);
+		lockoutWindowField->setText(FXStringFormat("%d", p.lockoutWindowMins));
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	PasswordPolicy getPolicy() const {
+		PasswordPolicy p;
+		p.complexity = complexityCheck->getCheck();
+		try {
+			p.historyLength = std::stoi(historyField->getText().text());
+			p.minPwdLength = std::stoi(minLenField->getText().text());
+			p.minPwdAgeDays = std::stoi(minAgeField->getText().text());
+			p.maxPwdAgeDays = std::stoi(maxAgeField->getText().text());
+			p.lockoutThreshold = std::stoi(lockoutThresholdField->getText().text());
+			p.lockoutDurationMins = std::stoi(lockoutDurationField->getText().text());
+			p.lockoutWindowMins = std::stoi(lockoutWindowField->getText().text());
+		} catch (...) {}
+		return p;
+	}
+	virtual ~SecuritySettingsDialog() {}
+};
+FXIMPLEMENT(SecuritySettingsDialog, FXDialogBox, NULL, 0)
+
 class PropertiesDialog : public FXDialogBox {
 	FXDECLARE(PropertiesDialog)
 private:
@@ -2128,12 +2266,13 @@ private:
 	std::vector<FXString> linkedGuids;
 	std::map<FXString, FXString> guidToName;
 public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE };
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS };
 	long onNewGpo(FXObject*, FXSelector, void*);
 	long onAddGpo(FXObject*, FXSelector, void*);
 	long onRemoveGpo(FXObject*, FXSelector, void*);
 	long onEditGpo(FXObject*, FXSelector, void*);
 	long onInstallSoftware(FXObject*, FXSelector, void*);
+	long onSecuritySettings(FXObject*, FXSelector, void*);
 
 	void reloadList() {
 		gpoList->clearItems();
@@ -2150,7 +2289,7 @@ protected:
 	PropertiesDialog() {}
 public:
 	PropertiesDialog(FXWindow* owner, const FXString& title, const FXString& fullDN, const FXString& realm_)
-		: FXDialogBox(owner, FXString("Eigenschaften von ") + title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,420),
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,500,420),
 		  containerFullDN(fullDN), realm(realm_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
 		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
@@ -2165,6 +2304,7 @@ public:
 		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Software...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "S&icherheit...", NULL, this, ID_SECURITY_SETTINGS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -2180,6 +2320,7 @@ FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_REMOVE_GPO, PropertiesDialog::onRemoveGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_EDIT_GPO, PropertiesDialog::onEditGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_INSTALL_SOFTWARE, PropertiesDialog::onInstallSoftware),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SECURITY_SETTINGS, PropertiesDialog::onSecuritySettings),
 };
 FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
 
@@ -2274,6 +2415,27 @@ long PropertiesDialog::onInstallSoftware(FXObject*, FXSelector, void*) {
 	}
 	SoftwarePackageListDialog dlg(this, domain, guid);
 	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long PropertiesDialog::onSecuritySettings(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können die Sicherheitseinstellungen nicht geändert werden.");
+		return 1;
+	}
+	PasswordPolicy current = getPasswordPolicy();
+	SecuritySettingsDialog dlg(this, current);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	FXString errorMsg;
+	if (!setPasswordPolicy(dlg.getPolicy(), errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		return 1;
+	}
+	FXMessageBox::information(this, MBOX_OK, "Fertig",
+		"Die Kennwort- und Kontosperrungsrichtlinie wurde aktualisiert.\n\n"
+		"Hinweis: Diese Einstellungen gelten domänenweit (wie unter\n"
+		"Windows 2000/2003) und werden über die Default Domain Policy\n"
+		"durchgesetzt, unabhängig davon, welches GPO gerade geöffnet ist.");
 	return 1;
 }
 
