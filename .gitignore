@@ -1,5 +1,17 @@
 *.o
-dnsmgr/res/foxres.h
+
+# Von reswrap erzeugte Icon-Header (Makefile-Ziel res/foxres.h)
+*/res/foxres.h
+
+# Gebaute Programme -- je Dienst gleich benannt wie sein Ordner
 dnsmgr/dnsmgr
-dhcpmgr/res/foxres.h
 dhcpmgr/dhcpmgr
+compmgmt/compmgmt
+dcpromo/dcpromo
+dsadmin/dsadmin
+termsvc/termsvc
+
+# Testprogramme aus dsadmin/Makefile
+dsadmin/test_admparser
+dsadmin/test_regpol
+dsadmin/test_aas
