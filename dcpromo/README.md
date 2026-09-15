@@ -94,6 +94,29 @@ installiert sind. Fehlt etwas, fragt ein Dialog nach, ob es per
 `named.conf.local`, das `dnsmgr` ja schon verwaltet) nicht hängen
 bleibt, sondern die bestehende Datei automatisch behält.
 
+## Zeitdienst
+
+Ein Domänencontroller muss Zeitgeber sein. Windows-Clients holen ihre
+Uhr beim DC, und Kerberos lässt nur fünf Minuten Abweichung zu --
+darüber hinaus schlägt schon das Anfordern des Computer-Tokens fehl
+(`SEC_E_TIME_SKEW`, 0x80090324). Auf dem Client sieht man davon nichts
+Verwertbares: dort steht nur Userenv-Ereignis 1000, "Die Abfrage der
+Liste der Gruppenrichtlinienobjekte ist fehlgeschlagen". Alles aus
+Gruppenrichtlinien bleibt damit wirkungslos, und die Fehlersuche läuft
+in eine völlig falsche Richtung. Genau so ist es in der Praxis
+aufgetreten -- bei knapp zwei Stunden Versatz.
+
+Der Assistent installiert deshalb `ntpsec` mit und richtet die
+Signatur ein, die Windows verlangt (MS-SNTP): `ntpsigndsocket` auf
+`/var/lib/samba/ntp_signd`, das Flag `mssntp` in der
+`restrict default`-Zeile und Gruppenzugriff für den ntpsec-Benutzer auf
+das Socket-Verzeichnis. Ohne die Signatur verwirft Windows die Antwort
+und meldet "Der NTP-Server hat nicht reagiert".
+
+Vorhandene Zeilen bleiben dabei erhalten: an eine bestehende
+`restrict default`-Zeile wird nur das fehlende `mssntp` angehängt, und
+ein zweiter Durchlauf ändert nichts mehr.
+
 ## Legacy-Ausnahmen für Windows 2000
 
 Im Windows-2000-kompatiblen Modus setzt der Assistent in `[global]`:

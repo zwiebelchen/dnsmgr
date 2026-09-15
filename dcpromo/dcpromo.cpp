@@ -162,6 +162,13 @@ static const PkgCheck REQUIRED_PACKAGES[] = {
 	// Pruefen von Freigaben auf dem Server selbst kaum zu ersetzen.
 	{ "ldap-utils", "/usr/bin/ldapadd" },
 	{ "smbclient", "/usr/bin/smbclient" },
+	// Ein Domaenencontroller muss Zeitgeber sein: Windows-Clients holen
+	// ihre Uhr beim DC, und Kerberos laesst nur fuenf Minuten Abweichung
+	// zu. Ohne Zeitdienst scheitert die Computerrichtlinie mit
+	// SEC_E_TIME_SKEW (0x80090324) -- der Client meldet dann nur
+	// "Die Abfrage der Liste der Gruppenrichtlinienobjekte ist
+	// fehlgeschlagen", was in eine voellig falsche Richtung weist.
+	{ "ntpsec", "/usr/sbin/ntpd" },
 };
 
 static std::vector<FXString> findMissingPackages() {
@@ -486,6 +493,8 @@ static bool configureBindForModernAd(const FXString& realm, FXString& errorMsg) 
 // [global]-Abschnitt. Wird fuer "dns forwarder" und "server services"
 // gebraucht.
 // ---------------------------------------------------------------------
+static bool configureNtpForWindows(std::string& log, FXString& errorMsg); // weiter unten definiert
+
 static std::string smbConfSetOrRemove(const std::string& conf, const char* key, const std::string& value /* leer = entfernen */) {
 	std::istringstream iss(conf);
 	std::string line, out;
@@ -659,6 +668,8 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 		if (!configureBindForModernAd(dnsName, errorMsg)) return false;
 	}
 
+	if (!configureNtpForWindows(log, errorMsg)) return false;
+
 	log += "Starte kea-dhcp4-server unveraendert weiter; starte bind9 und samba neu...\n";
 	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") });
 	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") });
@@ -676,6 +687,85 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 	}
 
 	pointDnsAtSelf(log);
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// NTP mit Signatur fuer Windows-Clients.
+//
+// Windows uebernimmt die Zeit vom Domaenencontroller nur, wenn dieser
+// die Antworten signiert (MS-SNTP). ntpsec macht das ueber einen Socket,
+// den Samba bereitstellt: /var/lib/samba/ntp_signd. Noetig sind dafuer
+// drei Dinge -- "ntpsigndsocket", das Flag "mssntp" in der
+// restrict-Zeile und Lesezugriff des ntpsec-Benutzers auf das
+// Verzeichnis.
+// ---------------------------------------------------------------------
+static const char* NTP_CONF = "/etc/ntpsec/ntp.conf";
+static const char* NTP_SIGND_DIR = "/var/lib/samba/ntp_signd";
+
+std::string ntpConfWithSigning(const std::string& conf) {
+	std::string out;
+	bool haveSocket = conf.find("ntpsigndsocket") != std::string::npos;
+	bool patchedRestrict = false;
+
+	std::istringstream iss(conf);
+	std::string line;
+	while (std::getline(iss, line)) {
+		std::string trimmed = line;
+		size_t a = trimmed.find_first_not_of(" \t");
+		trimmed = (a == std::string::npos) ? "" : trimmed.substr(a);
+
+		// An eine vorhandene "restrict default"-Zeile nur das fehlende
+		// mssntp anhaengen, statt die Zeile des Nutzers zu ersetzen.
+		if (trimmed.compare(0, 16, "restrict default") == 0 && trimmed.find("mssntp") == std::string::npos) {
+			line += " mssntp";
+			patchedRestrict = true;
+		} else if (trimmed.compare(0, 16, "restrict default") == 0) {
+			patchedRestrict = true;
+		}
+		out += line + "\n";
+	}
+
+	if (!patchedRestrict)
+		out += "\n# Von ice2k ergaenzt: signierte Zeitantworten fuer Windows-Clients\n"
+		       "restrict default kod nomodify notrap nopeer mssntp\n";
+	if (!haveSocket)
+		out += "\n# Von ice2k ergaenzt: Signatur-Socket von Samba\n"
+		       "ntpsigndsocket " + std::string(NTP_SIGND_DIR) + "\n";
+	return out;
+}
+
+static bool configureNtpForWindows(std::string& log, FXString& errorMsg) {
+	log += "Richte Zeitdienst für Windows-Clients ein (signiertes NTP)...\n";
+
+	std::string conf = readFileUnprivileged(NTP_CONF);
+	if (conf.empty()) {
+		log += "Achtung: " + std::string(NTP_CONF) + " nicht gefunden -- Zeitdienst bitte von Hand einrichten.\n";
+		return true; // kein Abbruchgrund fuer die Heraufstufung
+	}
+
+	std::string patched = ntpConfWithSigning(conf);
+	if (patched != conf && !writeFileAsRoot(NTP_CONF, patched)) {
+		errorMsg = "Konnte " + FXString(NTP_CONF) + " nicht schreiben.";
+		return false;
+	}
+
+	// Ohne Gruppenzugriff kann ntpd den Socket nicht lesen und signiert
+	// stillschweigend nicht -- der Client meldet dann nur "Der NTP-Server
+	// hat nicht reagiert".
+	std::string out;
+	runAsRoot({ FXString("chgrp"), FXString("ntpsec"), FXString(NTP_SIGND_DIR) });
+	runAsRoot({ FXString("chmod"), FXString("750"), FXString(NTP_SIGND_DIR) });
+	runAsRootCaptured({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString("ntpsec") }, out);
+	log += out + "\n";
+	out.clear();
+	runAsRootCaptured({ FXString("systemctl"), FXString("restart"), FXString("ntpsec") }, out);
+
+	if (!isServiceActive("ntpsec"))
+		log += "Achtung: ntpsec läuft nicht. Ohne Zeitdienst scheitert die\n"
+		       "Computerrichtlinie auf Windows-Clients mit einem Zeitversatz-Fehler.\n";
+	else
+		log += "Zeitdienst läuft und signiert Antworten für Windows-Clients.\n";
 	return true;
 }
 
