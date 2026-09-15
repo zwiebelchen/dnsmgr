@@ -1307,6 +1307,45 @@ static bool moveObject(ObjType type, const FXString& accountNameOrFullDN, const 
 	return true;
 }
 
+// Umbenennen -- fuer Benutzer/Gruppen aendert dies nur den Anzeigenamen
+// (CN), nicht den Anmeldenamen (sAMAccountName bleibt unveraendert,
+// genau wie beim einfachen F2-Umbenennen in echten Active Directory-
+// Benutzer und -Computer). Fuer Organisationseinheiten aendert sich
+// die DN direkt. Fuer Computer gibt es kein eigenes samba-tool-
+// Unterkommando -- dafuer per LDAP-Modrdn direkt umbenannt.
+static bool renameObject(FXWindow* owner, const DomainInfo& domain, ObjType type, const FXString& accountName,
+                          const FXString& currentFullDN, const FXString& newName, FXString& errorMsg) {
+	switch (type) {
+		case OBJ_USER:
+		case OBJ_GROUP: {
+			FXString sub = (type == OBJ_USER) ? "user" : "group";
+			std::string out;
+			int rc = runAsRootCaptured({ FXString("samba-tool"), sub, FXString("rename"), accountName, FXString("--force-new-cn=") + newName }, out);
+			if (rc != 0) { errorMsg = out.c_str(); return false; }
+			return true;
+		}
+		case OBJ_OU: {
+			int comma = currentFullDN.find(',');
+			if (comma < 0) { errorMsg = "Konnte übergeordneten Container nicht bestimmen."; return false; }
+			FXString parentPart = currentFullDN.mid(comma + 1, currentFullDN.length() - comma - 1);
+			FXString newFullDN = "OU=" + newName + "," + parentPart;
+			std::string out;
+			int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("rename"), currentFullDN, newFullDN }, out);
+			if (rc != 0) { errorMsg = out.c_str(); return false; }
+			return true;
+		}
+		case OBJ_COMPUTER: {
+			std::string ldif = "dn: " + std::string(currentFullDN.text()) + "\n"
+			                    "changetype: modrdn\n"
+			                    "newrdn: CN=" + std::string(newName.text()) + "\n"
+			                    "deleteoldrdn: 1\n";
+			std::string log;
+			return runLdapChange(owner, domain.realm, ldif, false, log, errorMsg);
+		}
+		default: errorMsg = "Dieser Objekttyp kann hier nicht umbenannt werden."; return false;
+	}
+}
+
 // Liste aller Organisationseinheiten der Domaene (volle DN + Anzeige-
 // pfad), fuer die Zielauswahl beim Verschieben.
 static std::vector<std::pair<FXString, FXString>> listAllOUsWithPaths() {
@@ -2268,7 +2307,7 @@ public:
 	enum {
 		ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT,
 		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_NEW_COMPUTER, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS,
-		ID_USER_PROPS, ID_MOVE_OBJECT
+		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT
 	};
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -2284,6 +2323,7 @@ public:
 	long onGroupProperties(FXObject*, FXSelector, void*);
 	long onUserProperties(FXObject*, FXSelector, void*);
 	long onMoveObject(FXObject*, FXSelector, void*);
+	long onRenameObject(FXObject*, FXSelector, void*);
 
 	DsAdminWindow(FXApp* a);
 	void loadTree();
@@ -2307,6 +2347,7 @@ FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_GROUP_PROPS, DsAdminWindow::onGroupProperties),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_USER_PROPS, DsAdminWindow::onUserProperties),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_MOVE_OBJECT, DsAdminWindow::onMoveObject),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_RENAME_OBJECT, DsAdminWindow::onRenameObject),
 };
 FXIMPLEMENT(DsAdminWindow, FXMainWindow, DsAdminWindowMap, ARRAYNUMBER(DsAdminWindowMap))
 
@@ -2489,6 +2530,7 @@ long DsAdminWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 	}
 	if (obj.type == OBJ_USER || obj.type == OBJ_GROUP || obj.type == OBJ_COMPUTER || obj.type == OBJ_OU) {
 		new FXMenuCommand(&menu, "&Verschieben...", NULL, this, ID_MOVE_OBJECT);
+		new FXMenuCommand(&menu, "U&mbenennen...", NULL, this, ID_RENAME_OBJECT);
 		new FXMenuSeparator(&menu);
 	}
 	new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_OBJECT);
@@ -2631,6 +2673,26 @@ long DsAdminWindow::onMoveObject(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	FXString identifier = (obj.type == OBJ_OU) ? relDNToFullDN(obj.dn, domain) : obj.accountName;
 	if (!moveObject(obj.type, identifier, targetDN, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onRenameObject(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	DirObject obj = currentObjects[idx];
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts umbenannt werden."); return 1; }
+
+	FXString newName = obj.name;
+	if (!FXInputDialog::getString(newName, this, "Umbenennen", "Neuer Name für \"" + obj.name + "\":")) return 1;
+	newName = newName.trim();
+	if (newName.empty() || newName == obj.name) return 1;
+
+	FXString errorMsg;
+	FXString currentFullDN = relDNToFullDN(obj.dn, domain);
+	if (!renameObject(this, domain, obj.type, obj.accountName, currentFullDN, newName, errorMsg)) {
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	onRefresh(NULL, 0, NULL);
