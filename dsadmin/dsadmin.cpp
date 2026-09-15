@@ -930,6 +930,75 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 	return true;
 }
 
+struct SoftwarePackageInfo {
+	std::string guid;        // "{XXXXXXXX-...}" -- der CN des Objekts, fuer Loeschen gebraucht
+	std::string displayName;
+	std::string msiScriptPath;
+	bool assigned = true;    // aus packageFlags abgeleitet
+	bool published = false;
+};
+
+// Listet alle Pakete eines Zweigs (Computer/Benutzer) eines GPOs auf.
+// Leere Liste, wenn noch keine Pakete vorhanden sind (kein Fehler --
+// die Packages-Container existieren dann evtl. noch gar nicht).
+static std::vector<SoftwarePackageInfo> listSoftwarePackages(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid, bool isMachine) {
+	std::vector<SoftwarePackageInfo> out;
+	if (ensureAdminCreds(owner).empty()) return out;
+	std::string scope = isMachine ? "Machine" : "User";
+	std::string packagesDn = "CN=Packages,CN=Class Store,CN=" + scope + ",CN=" + std::string(gpoGuid.text()) +
+	                          ",CN=Policies,CN=System," + domain.baseDN.text();
+	std::string raw;
+	runAsRootCaptured({
+		FXString("bash"), FXString("-c"),
+		FXString("LDAPTLS_REQCERT=never ldapsearch -H ldap://127.0.0.1 -Z -x -o ldif-wrap=no -LLL -D '") + g_adminUser + "@" + domain.realm +
+			"' -w '" + g_adminPass + "' -b '" + packagesDn.c_str() + "' -s one '(objectClass=packageRegistration)' cn displayName packageFlags msiScriptPath 2>/dev/null"
+	}, raw);
+
+	SoftwarePackageInfo cur;
+	bool haveEntry = false;
+	auto flush = [&]() { if (haveEntry && !cur.guid.empty()) out.push_back(cur); cur = SoftwarePackageInfo(); haveEntry = false; };
+	for (auto& line : splitLines(raw)) {
+		if (line.empty()) { flush(); continue; }
+		if (line.rfind("dn:", 0) == 0) { haveEntry = true; continue; }
+		if (line.rfind("cn: ", 0) == 0) { cur.guid = line.substr(4); continue; }
+		if (line.rfind("displayName: ", 0) == 0) { cur.displayName = line.substr(13); continue; }
+		if (line.rfind("msiScriptPath: ", 0) == 0) { cur.msiScriptPath = line.substr(15); continue; }
+		if (line.rfind("packageFlags: ", 0) == 0) {
+			uint32_t flags = 0;
+			try { flags = (uint32_t)std::stoul(line.substr(14)); } catch (...) {}
+			cur.assigned = (flags & 0x800) != 0;
+			cur.published = (flags & 0x8) != 0;
+			continue;
+		}
+	}
+	flush();
+	return out;
+}
+
+// Entfernt ein Paket wieder: LDAP-Objekt loeschen + zugehoerige
+// .aas-Datei aus SYSVOL entfernen.
+static bool deleteSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid, bool isMachine, const SoftwarePackageInfo& pkg, FXString& errorMsg) {
+	if (ensureAdminCreds(owner).empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann nichts gelöscht werden."; return false; }
+	std::string scope = isMachine ? "Machine" : "User";
+	std::string packageDn = "CN=" + pkg.guid + ",CN=Packages,CN=Class Store,CN=" + scope + ",CN=" + std::string(gpoGuid.text()) +
+	                         ",CN=Policies,CN=System," + domain.baseDN.text();
+	std::string out;
+	int rc = runAsRootCaptured({
+		FXString("bash"), FXString("-c"),
+		FXString("LDAPTLS_REQCERT=never ldapdelete -H ldap://127.0.0.1 -Z -x -D '") + g_adminUser + "@" + domain.realm +
+			"' -w '" + g_adminPass + "' '" + packageDn.c_str() + "'"
+	}, out);
+	if (rc != 0) { errorMsg = "Löschen in AD fehlgeschlagen (siehe Protokoll)."; return false; }
+
+	FXString realmLower = domain.realm; realmLower.lower();
+	std::string aasPath = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" +
+	                       std::string(gpoGuid.text()) + "/" + (isMachine ? "MACHINE" : "USER") +
+	                       "/Applications/" + pkg.guid + ".aas";
+	runAsRoot({ FXString("rm"), FXString("-f"), FXString(aasPath.c_str()) });
+	return true;
+}
+
+
 
 // (system.adm, inetres.adm, ...) tragen oft zu denselben Ober-
 // kategorien bei (z.B. "Windows-Komponenten"). Wir fuehren
@@ -1626,6 +1695,113 @@ public:
 };
 FXIMPLEMENT(SoftwareInstallDialog, FXDialogBox, NULL, 0)
 
+// ---------------------------------------------------------------------
+// Dialog zur Verwaltung der Softwarepakete eines GPOs -- getrennte
+// Listen fuer Computer-/Benutzerkonfiguration, mit Hinzufuegen/
+// Entfernen.
+// ---------------------------------------------------------------------
+class SoftwarePackageListDialog : public FXDialogBox {
+	FXDECLARE(SoftwarePackageListDialog)
+private:
+	DomainInfo domain;
+	FXString gpoGuid;
+	FXWindow* credOwner; // bereits erstelltes Elternfenster -- fuer Admin-Anmeldedaten-Dialoge, die schon waehrend des eigenen Konstruktors noetig werden koennten
+	FXList *machineList, *userList;
+	std::vector<SoftwarePackageInfo> machinePkgs, userPkgs;
+protected:
+	SoftwarePackageListDialog() {}
+public:
+	enum { ID_ADD_MACHINE = FXDialogBox::ID_LAST, ID_REMOVE_MACHINE, ID_ADD_USER, ID_REMOVE_USER };
+
+	void reload() {
+		machineList->clearItems();
+		machinePkgs = listSoftwarePackages(credOwner, domain, gpoGuid, true);
+		for (auto& p : machinePkgs) machineList->appendItem((p.displayName + " (Zugewiesen)").c_str());
+
+		userList->clearItems();
+		userPkgs = listSoftwarePackages(credOwner, domain, gpoGuid, false);
+		for (auto& p : userPkgs) userList->appendItem((p.displayName + (p.published ? " (Veröffentlicht)" : " (Zugewiesen)")).c_str());
+	}
+
+	long onAdd(FXWindow* owner, bool forcedMachine) {
+		SoftwareInstallDialog dlg(this);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		SoftwarePackageParams params = dlg.getParams();
+		if (params.localMsiPath.empty() || params.msiUncPath.empty()) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
+			return 1;
+		}
+		std::string log;
+		FXString errorMsg;
+		if (!addSoftwarePackage(credOwner, domain, gpoGuid, params, log, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
+			return 1;
+		}
+		reload();
+		return 1;
+	}
+	long onAddMachine(FXObject* o, FXSelector s, void* p) { (void)o; (void)s; (void)p; return onAdd(this, true); }
+	long onAddUser(FXObject* o, FXSelector s, void* p) { (void)o; (void)s; (void)p; return onAdd(this, false); }
+
+	long onRemoveMachine(FXObject*, FXSelector, void*) {
+		int idx = machineList->getCurrentItem();
+		if (idx < 0 || idx >= (int)machinePkgs.size()) return 1;
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen", "\"%s\" wirklich entfernen?", machinePkgs[idx].displayName.c_str()) != MBOX_CLICKED_YES) return 1;
+		FXString errorMsg;
+		if (!deleteSoftwarePackage(credOwner, domain, gpoGuid, true, machinePkgs[idx], errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		}
+		reload();
+		return 1;
+	}
+	long onRemoveUser(FXObject*, FXSelector, void*) {
+		int idx = userList->getCurrentItem();
+		if (idx < 0 || idx >= (int)userPkgs.size()) return 1;
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen", "\"%s\" wirklich entfernen?", userPkgs[idx].displayName.c_str()) != MBOX_CLICKED_YES) return 1;
+		FXString errorMsg;
+		if (!deleteSoftwarePackage(credOwner, domain, gpoGuid, false, userPkgs[idx], errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		}
+		reload();
+		return 1;
+	}
+
+	SoftwarePackageListDialog(FXWindow* owner, const DomainInfo& domain_, const FXString& gpoGuid_)
+		: FXDialogBox(owner, "Softwareinstallation", DECOR_ALL, 0,0,520,420),
+		  domain(domain_), gpoGuid(gpoGuid_), credOwner(owner) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		new FXTabItem(tabs, "Computerkonfiguration");
+		FXVerticalFrame* machinePage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		machineList = new FXList(machinePage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		FXHorizontalFrame* machineBtns = new FXHorizontalFrame(machinePage, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		new FXButton(machineBtns, "&Hinzufügen...", NULL, this, ID_ADD_MACHINE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(machineBtns, "&Entfernen", NULL, this, ID_REMOVE_MACHINE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+
+		new FXTabItem(tabs, "Benutzerkonfiguration");
+		FXVerticalFrame* userPage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		userList = new FXList(userPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		FXHorizontalFrame* userBtns = new FXHorizontalFrame(userPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		new FXButton(userBtns, "H&inzufügen...", NULL, this, ID_ADD_USER, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(userBtns, "E&ntfernen", NULL, this, ID_REMOVE_USER, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+
+		reload();
+	}
+	virtual ~SoftwarePackageListDialog() {}
+};
+FXDEFMAP(SoftwarePackageListDialog) SoftwarePackageListDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, SoftwarePackageListDialog::ID_ADD_MACHINE, SoftwarePackageListDialog::onAddMachine),
+	FXMAPFUNC(SEL_COMMAND, SoftwarePackageListDialog::ID_REMOVE_MACHINE, SoftwarePackageListDialog::onRemoveMachine),
+	FXMAPFUNC(SEL_COMMAND, SoftwarePackageListDialog::ID_ADD_USER, SoftwarePackageListDialog::onAddUser),
+	FXMAPFUNC(SEL_COMMAND, SoftwarePackageListDialog::ID_REMOVE_USER, SoftwarePackageListDialog::onRemoveUser),
+};
+FXIMPLEMENT(SoftwarePackageListDialog, FXDialogBox, SoftwarePackageListDialogMap, ARRAYNUMBER(SoftwarePackageListDialogMap))
+
 class PropertiesDialog : public FXDialogBox {
 	FXDECLARE(PropertiesDialog)
 private:
@@ -1671,7 +1847,7 @@ public:
 		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "Software &installieren...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "&Software...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -1774,25 +1950,13 @@ long PropertiesDialog::onInstallSoftware(FXObject*, FXSelector, void*) {
 		return 1;
 	}
 	FXString guid = linkedGuids[idx];
-	SoftwareInstallDialog dlg(this);
-	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-	SoftwarePackageParams params = dlg.getParams();
-	if (params.localMsiPath.empty() || params.msiUncPath.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
-		return 1;
-	}
 	DomainInfo domain = detectDomain();
 	if (domain.realm.empty()) {
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "Domäne konnte nicht ermittelt werden.");
 		return 1;
 	}
-	std::string log;
-	FXString errorMsg;
-	if (!addSoftwarePackage(this, domain, guid, params, log, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
-		return 1;
-	}
-	FXMessageBox::information(this, MBOX_OK, "Fertig", "Das Paket wurde erfolgreich bereitgestellt.");
+	SoftwarePackageListDialog dlg(this, domain, guid);
+	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
 
