@@ -607,12 +607,14 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 	// LDAP (die kein SMB brauchen) ganz normal funktionieren. Da dieses
 	// Projekt explizit echte Windows-2000-Clients unterstuetzen soll,
 	// aktivieren wir SMB1/NTLMv1 hier bewusst.
-	log += "Aktiviere SMB1/NTLMv1 für echte Windows-2000-Clients (moderne Samba-\n"
-	       "Versionen lehnen das seit 4.11 standardmäßig ab)...\n";
+	log += win2kCompatible
+	     ? "Aktiviere SMB1/NTLMv1 und die Netlogon-Ausnahmen für echte\nWindows-2000-Clients...\n"
+	     : "Entferne die Legacy-Ausnahmen für Windows 2000 (moderne AD-Integration)...\n";
 	{
 		std::string conf = readFileUnprivileged(SMB_CONF);
-		conf = smbConfSetOrRemove(conf, "server min protocol", "NT1");
-		conf = smbConfSetOrRemove(conf, "ntlm auth", "ntlmv1-permitted");
+		const std::string legacy = win2kCompatible ? "no" : "";  // leer = Zeile entfernen
+		conf = smbConfSetOrRemove(conf, "server min protocol", win2kCompatible ? "NT1" : "");
+		conf = smbConfSetOrRemove(conf, "ntlm auth", win2kCompatible ? "ntlmv1-permitted" : "");
 		// CVE-2022-38023: Samba lehnt MD5-basierte Netlogon-Schannel-
 		// Verschluesselung seit diesem Sicherheitsfix standardmaessig ab --
 		// Windows 2000 kann aber nur MD5, nicht das modernere AES. Ohne
@@ -623,7 +625,19 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 		// Parameter -- der existiert nur als Pro-Konto-Ausnahme
 		// ("...:KONTONAME$ = no", siehe Samba-eigene CVE-Seite). Der
 		// tatsaechliche globale Schalter heisst "reject md5 clients".
-		conf = smbConfSetOrRemove(conf, "reject md5 clients", "no");
+		conf = smbConfSetOrRemove(conf, "reject md5 clients", legacy);
+
+		// Zweite Haelfte derselben Absicherung: "server schannel require
+		// seal" verlangt einen verschluesselten Netlogon-Kanal, den
+		// Windows 2000 nicht liefert. Fehlt diese Ausnahme, tritt der
+		// Client der Domaene zwar bei, kann danach aber die Liste der
+		// Gruppenrichtlinienobjekte nicht abfragen -- der Client meldet
+		// dann nur Userenv-Ereignis 1000 ("Die Abfrage der Liste der
+		// Gruppenrichtlinienobjekte ist fehlgeschlagen"), waehrend im
+		// Samba-Log dcesrv_netr_ServerAuthenticate3_check_downgrade
+		// auftaucht. In der Praxis genau so aufgetreten.
+		conf = smbConfSetOrRemove(conf, "server schannel require seal", legacy);
+
 		writeFileAsRoot(SMB_CONF, conf);
 	}
 
@@ -683,9 +697,18 @@ static bool migrateToModernAd(const FXString& dnsName, std::string& log, FXStrin
 	log += out + "\n";
 	if (rc != 0) { errorMsg = "samba_upgradedns ist fehlgeschlagen (siehe Protokoll)."; return false; }
 
-	log += "Passe smb.conf an (Sambas eigenen DNS-Dienst abschalten)...\n";
+	log += "Passe smb.conf an (Sambas eigenen DNS-Dienst abschalten, Legacy-\n"
+	       "Ausnahmen für Windows 2000 entfernen)...\n";
 	std::string conf = readFileUnprivileged(SMB_CONF);
 	conf = smbConfSetOrRemove(conf, "dns forwarder", "");
+
+	// Mit dem Heraufstufen entfaellt die Windows-2000-Unterstuetzung --
+	// dann gehoeren auch die Aufweichungen wieder raus, sonst bleibt der
+	// Server ohne Grund angreifbarer als noetig (CVE-2022-38023).
+	conf = smbConfSetOrRemove(conf, "server min protocol", "");
+	conf = smbConfSetOrRemove(conf, "ntlm auth", "");
+	conf = smbConfSetOrRemove(conf, "reject md5 clients", "");
+	conf = smbConfSetOrRemove(conf, "server schannel require seal", "");
 	conf = smbConfSetOrRemove(conf, "server services",
 		"s3fs, rpc, nbt, wrepl, ldap, cldap, kdc, drepl, winbindd, ntp_signd, kcc, dnsupdate");
 	if (!writeFileAsRoot(SMB_CONF, conf)) { errorMsg = "Konnte smb.conf nicht schreiben."; return false; }

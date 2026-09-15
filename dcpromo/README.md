@@ -94,6 +94,36 @@ installiert sind. Fehlt etwas, fragt ein Dialog nach, ob es per
 `named.conf.local`, das `dnsmgr` ja schon verwaltet) nicht hängen
 bleibt, sondern die bestehende Datei automatisch behält.
 
+## Legacy-Ausnahmen für Windows 2000
+
+Im Windows-2000-kompatiblen Modus setzt der Assistent in `[global]`:
+
+| Parameter | Wert | Grund |
+|---|---|---|
+| `server min protocol` | `NT1` | Windows 2000 kann nur SMB1 |
+| `ntlm auth` | `ntlmv1-permitted` | kein NTLMv2 |
+| `reject md5 clients` | `no` | Netlogon-Kanal nur mit MD5, kein AES |
+| `server schannel require seal` | `no` | Windows 2000 verschlüsselt den Netlogon-Kanal nicht |
+
+Die letzten beiden gehören zusammen -- beide stammen aus der Absicherung
+gegen CVE-2022-38023. Fehlt nur `server schannel require seal = no`,
+tritt der Client der Domäne zwar bei, kann danach aber **die Liste der
+Gruppenrichtlinienobjekte nicht abfragen**. Auf dem Client sieht man
+dann lediglich Userenv-Ereignis 1000, im Samba-Log
+`dcesrv_netr_ServerAuthenticate3_check_downgrade`. Softwareinstallation,
+Skripte und alles andere aus Gruppenrichtlinien bleiben wirkungslos,
+ohne dass irgendwo ein passender Fehler auftaucht.
+
+Achtung bei der Schreibweise: `server reject md5 schannel = no` ohne
+Kontonamen ist **kein** gültiger globaler Parameter -- Samba meldet ihn
+als "Unknown parameter" und ignoriert ihn stillschweigend. Global heißt
+der Schalter `reject md5 clients`; die Form mit `:KONTONAME$` existiert
+nur als Ausnahme für ein einzelnes Computerkonto.
+
+Beim Heraufstufen auf die moderne AD-Integration werden alle vier
+Parameter wieder entfernt: dort gibt es keine Windows-2000-Clients mehr,
+und die Aufweichungen sollen nicht unbemerkt bestehen bleiben.
+
 ## DNS-Weiterleitung
 
 Im Windows-2000-kompatiblen Modus weicht BIND9 auf Port 5353 aus und
