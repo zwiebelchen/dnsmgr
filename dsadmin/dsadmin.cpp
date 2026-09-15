@@ -761,10 +761,56 @@ static const char* GPSI_CSE_GUID = "{C6DC5466-785A-11D2-84D0-00C04FB169F7}";
 static const char* GPSI_TOOL_GUID_USER = "{BACF5C8A-A3C7-11D1-A760-00C04FB9603F}";
 static const char* GPSI_TOOL_GUID_MACHINE = "{942A8E4F-A261-11D1-A760-00C04FB9603F}";
 
+// ---------------------------------------------------------------------
+// ldapadd/ldapmodify/ldapsearch stecken im Paket "ldap-utils", das auf
+// einem frischen Debian nicht vorinstalliert ist. Ohne diese Pruefung
+// scheitert die erste GPO-Aenderung mit einer nichtssagenden
+// env-Fehlermeldung ("ldapadd: Datei oder Verzeichnis nicht gefunden")
+// -- genau so ist es einem Nutzer passiert.
+// ---------------------------------------------------------------------
+static bool g_ldapToolsOk = false;
+
+static bool ensureLdapTools(FXWindow* owner) {
+	if (g_ldapToolsOk) return true;
+
+	const char* tools[] = { "/usr/bin/ldapadd", "/usr/bin/ldapmodify", "/usr/bin/ldapsearch" };
+	bool complete = true;
+	for (auto* t : tools) if (access(t, X_OK) != 0) complete = false;
+	if (complete) { g_ldapToolsOk = true; return true; }
+
+	if (FXMessageBox::question(owner, MBOX_YES_NO, "Fehlendes Paket",
+		"Für diese Änderung werden die LDAP-Werkzeuge (ldapadd, ldapmodify,\n"
+		"ldapsearch) benötigt. Sie stecken im Paket \"ldap-utils\", das auf\n"
+		"diesem System noch nicht installiert ist.\n\n"
+		"Jetzt installieren?") != MBOX_CLICKED_YES) return false;
+
+	std::string out;
+	runAsRootCaptured({ FXString("apt-get"), FXString("update") }, out);
+	out.clear();
+	int rc = runAsRootCaptured({
+		FXString("env"), FXString("DEBIAN_FRONTEND=noninteractive"),
+		FXString("apt-get"), FXString("install"), FXString("-y"),
+		FXString("-o"), FXString("Dpkg::Options::=--force-confold"),
+		FXString("ldap-utils")
+	}, out);
+
+	complete = true;
+	for (auto* t : tools) if (access(t, X_OK) != 0) complete = false;
+	if (rc != 0 || !complete) {
+		FXMessageBox::error(owner, MBOX_OK, "Installation fehlgeschlagen",
+			"Das Paket \"ldap-utils\" konnte nicht installiert werden.\n\n%s",
+			out.empty() ? "apt-get meldete einen Fehler." : out.c_str());
+		return false;
+	}
+	g_ldapToolsOk = true;
+	return true;
+}
+
 // Fuehrt ldapadd/ldapmodify mit einer LDIF-Datei gegen den lokalen
 // Samba-AD-DC aus. Admin-Anmeldedaten wie bei GPOs/geschuetzten
 // Gruppen -- root reicht fuer diese LDAP-Schreibzugriffe nicht.
 static bool runLdapChange(FXWindow* owner, const FXString& realm, const std::string& ldif, bool isAdd, std::string& log, FXString& errorMsg) {
+	if (!ensureLdapTools(owner)) { errorMsg = "Ohne die LDAP-Werkzeuge (Paket \"ldap-utils\") ist diese Änderung nicht möglich."; return false; }
 	if (ensureAdminCreds(owner).empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann nichts in AD angelegt werden."; return false; }
 
 	FXString ldifPath = "/tmp/ice2k-ldapchange.ldif";
@@ -796,6 +842,7 @@ static bool runLdapChange(FXWindow* owner, const FXString& realm, const std::str
 // Liest den Wert eines einzelnen Attributs eines AD-Objekts (leerer
 // String, wenn nicht vorhanden oder bei Fehler).
 static std::string readLdapAttribute(FXWindow* owner, const FXString& realm, const std::string& dn, const std::string& attr) {
+	if (!ensureLdapTools(owner)) return "";
 	if (ensureAdminCreds(owner).empty()) return "";
 	std::string out;
 	// "-o ldif-wrap=no -LLL" ist entscheidend -- ohne das bricht ldapsearch

@@ -98,6 +98,12 @@ LDAP-Schreibzugriffe laufen über `ldapadd`/`ldapmodify` gegen den
 lokalen Samba-DC und brauchen -- wie GPOs selbst -- echte
 Administrator-Anmeldedaten; root allein genügt dafür nicht.
 
+Diese Werkzeuge stecken im Paket `ldap-utils`, das auf einem frischen
+Debian fehlt. `dsadmin` prüft vor dem ersten LDAP-Zugriff, ob sie
+vorhanden sind, und bietet die Installation an -- sonst scheitert die
+erste GPO-Änderung mit einer nichtssagenden `env`-Meldung. `dcpromo`
+installiert das Paket inzwischen gleich bei der Heraufstufung mit.
+
 ## Verknüpfungsreihenfolge
 
 Die Schaltflächen "Nach oben"/"Nach unten" im Gruppenrichtlinie-Reiter

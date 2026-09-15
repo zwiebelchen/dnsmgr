@@ -157,6 +157,11 @@ static const PkgCheck REQUIRED_PACKAGES[] = {
 	{ "samba-vfs-modules", "/usr/lib/x86_64-linux-gnu/samba/vfs/acl_xattr.so" },
 	{ "winbind", "/usr/sbin/winbindd" },
 	{ "bind9", "/usr/sbin/named" },
+	// ldapadd/ldapmodify/ldapsearch braucht dsadmin fuer GPO-Erweiterungen
+	// (Softwareinstallation, Skripte, Ordnerumleitung); smbclient ist zum
+	// Pruefen von Freigaben auf dem Server selbst kaum zu ersetzen.
+	{ "ldap-utils", "/usr/bin/ldapadd" },
+	{ "smbclient", "/usr/bin/smbclient" },
 };
 
 static std::vector<FXString> findMissingPackages() {
