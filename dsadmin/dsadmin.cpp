@@ -156,6 +156,48 @@ static int runAsRootCaptured(const std::vector<FXString>& args, std::string& out
 	return -1;
 }
 
+// Fuehrt ein Kommando als root aus, schickt "input" auf dessen
+// Standardeingabe (z.B. ein Kennwort zweimal fuer "samba-tool user
+// setpassword", das interaktiv abgefragt wird, statt es unsicher als
+// Kommandozeilenargument zu uebergeben) UND liefert die Ausgabe
+// zurueck, um Erfolg/Fehler zu erkennen.
+static int runAsRootCapturedWithStdin(const std::vector<FXString>& args, const std::string& input, std::string& output) {
+	std::vector<char*> argv;
+	argv.push_back((char*)"i2ksudo");
+	for (auto& a : args) argv.push_back((char*)a.text());
+	argv.push_back(NULL);
+
+	int inPipe[2], outPipe[2];
+	if (pipe(inPipe) != 0) return -1;
+	if (pipe(outPipe) != 0) return -1;
+
+	pid_t pid = fork();
+	if (pid == 0) {
+		dup2(inPipe[0], STDIN_FILENO);
+		dup2(outPipe[1], STDOUT_FILENO);
+		dup2(outPipe[1], STDERR_FILENO);
+		close(inPipe[0]); close(inPipe[1]);
+		close(outPipe[0]); close(outPipe[1]);
+		execvp("i2ksudo", argv.data());
+		_exit(127);
+	} else if (pid > 0) {
+		close(inPipe[0]);
+		close(outPipe[1]);
+		ssize_t written = write(inPipe[1], input.data(), input.size());
+		(void)written;
+		close(inPipe[1]);
+		char buf[4096];
+		ssize_t n;
+		while ((n = read(outPipe[0], buf, sizeof(buf))) > 0) output.append(buf, n);
+		close(outPipe[0]);
+		int status = 0;
+		waitpid(pid, &status, 0);
+		if (WIFEXITED(status)) return WEXITSTATUS(status);
+		return -1;
+	}
+	return -1;
+}
+
 static std::vector<std::string> splitLines(const std::string& s) {
 	std::vector<std::string> out;
 	std::istringstream iss(s);
@@ -1197,6 +1239,242 @@ FXDEFMAP(GroupMembersDialog) GroupMembersDialogMap[] = {
 };
 FXIMPLEMENT(GroupMembersDialog, FXDialogBox, GroupMembersDialogMap, ARRAYNUMBER(GroupMembersDialogMap))
 
+static bool setUserAttributes(FXWindow* owner, const FXString& realm, const FXString& userFullDN,
+                               const FXString& displayName, const FXString& description, FXString& errorMsg) {
+	std::string ldif = "dn: " + std::string(userFullDN.text()) + "\n"
+	                    "changetype: modify\n"
+	                    "replace: displayName\n"
+	                    "displayName: " + std::string(displayName.text()) + "\n-\n"
+	                    "replace: description\n"
+	                    "description: " + std::string(description.text()) + "\n";
+	std::string log;
+	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
+}
+
+static bool setUserEnabled(const FXString& username, bool enabled, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString(enabled ? "enable" : "disable"), username }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool setUserPassword(const FXString& username, const FXString& password, FXString& errorMsg) {
+	std::string input = std::string(password.text()) + "\n" + password.text() + "\n";
+	std::string out;
+	int rc = runAsRootCapturedWithStdin({ FXString("samba-tool"), FXString("user"), FXString("setpassword"), username }, input, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// Computerobjekte -- eigenstaendig anlegen/loeschen, unabhaengig vom
+// eigentlichen Domaenenbeitritt (z.B. um einen Rechnernamen vorab zu
+// reservieren).
+// ---------------------------------------------------------------------
+static bool createComputer(const FXString& name, const FXString& ouRelDN, FXString& errorMsg) {
+	std::vector<FXString> args = { FXString("samba-tool"), FXString("computer"), FXString("create"), name };
+	if (!ouRelDN.empty()) args.push_back(FXString("--computerou=") + ouRelDN);
+	std::string out;
+	int rc = runAsRootCaptured(args, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+static bool deleteComputer(const FXString& name, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("computer"), FXString("delete"), name }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// Objekte zwischen Containern/Organisationseinheiten verschieben --
+// gilt fuer Benutzer/Gruppen/Computer (per Anmeldename) und
+// Organisationseinheiten selbst (per volle DN).
+// ---------------------------------------------------------------------
+static bool moveObject(ObjType type, const FXString& accountNameOrFullDN, const FXString& targetOuFullDN, FXString& errorMsg) {
+	FXString sub;
+	switch (type) {
+		case OBJ_USER: sub = "user"; break;
+		case OBJ_GROUP: sub = "group"; break;
+		case OBJ_COMPUTER: sub = "computer"; break;
+		case OBJ_OU: sub = "ou"; break;
+		default: errorMsg = "Dieser Objekttyp kann hier nicht verschoben werden."; return false;
+	}
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), sub, FXString("move"), accountNameOrFullDN, targetOuFullDN }, out);
+	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	return true;
+}
+
+// Liste aller Organisationseinheiten der Domaene (volle DN + Anzeige-
+// pfad), fuer die Zielauswahl beim Verschieben.
+static std::vector<std::pair<FXString, FXString>> listAllOUsWithPaths() {
+	std::vector<std::pair<FXString, FXString>> out;
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("list") }, raw);
+	for (auto& l : splitLines(raw)) {
+		FXString dn = l.c_str();
+		dn.trim();
+		if (dn.empty()) continue;
+		out.push_back({ dn, dn });
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------
+// Kleiner Dialog fuer die Kennworteingabe (zweimal, zur Bestaetigung).
+// ---------------------------------------------------------------------
+class SetPasswordDialog : public FXDialogBox {
+	FXDECLARE(SetPasswordDialog)
+private:
+	FXTextField *pwField, *confirmField;
+protected:
+	SetPasswordDialog() {}
+public:
+	SetPasswordDialog(FXWindow* owner, const FXString& username)
+		: FXDialogBox(owner, "Kennwort für " + username, DECOR_TITLE | DECOR_BORDER, 0,0,340,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Neues Kennwort:");
+		pwField = new FXTextField(main, 24, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X | TEXTFIELD_PASSWD);
+		new FXLabel(main, "Kennwort bestätigen:");
+		confirmField = new FXTextField(main, 24, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X | TEXTFIELD_PASSWD);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getPassword() const { return pwField->getText(); }
+	FXString getConfirm() const { return confirmField->getText(); }
+	virtual ~SetPasswordDialog() {}
+};
+FXIMPLEMENT(SetPasswordDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" eines Benutzers -- Anzeigename/Beschreibung,
+// Konto ist deaktiviert, sowie ein "Kennwort zurücksetzen..."-Knopf.
+// ---------------------------------------------------------------------
+class UserPropertiesDialog : public FXDialogBox {
+	FXDECLARE(UserPropertiesDialog)
+private:
+	FXTextField *displayNameField, *descriptionField;
+	FXCheckButton* disabledCheck;
+	FXString username;
+protected:
+	UserPropertiesDialog() {}
+public:
+	enum { ID_RESET_PW = FXDialogBox::ID_LAST };
+	long onResetPassword(FXObject*, FXSelector, void*) {
+		SetPasswordDialog dlg(this, username);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		FXString pw = dlg.getPassword(), confirm = dlg.getConfirm();
+		if (pw.empty()) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte ein Kennwort eingeben."); return 1; }
+		if (pw != confirm) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Die Kennwörter stimmen nicht überein."); return 1; }
+		FXString errorMsg;
+		if (setUserPassword(username, pw, errorMsg)) {
+			FXMessageBox::information(this, MBOX_OK, "Fertig", "Das Kennwort wurde geändert.");
+		} else {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		}
+		return 1;
+	}
+
+	UserPropertiesDialog(FXWindow* owner, const FXString& username_, const FXString& displayName, const FXString& description, bool disabled)
+		: FXDialogBox(owner, "Eigenschaften von " + username_, DECOR_TITLE | DECOR_BORDER, 0,0,420,0),
+		  username(username_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Anmeldename: " + username_);
+		new FXLabel(main, "Anzeigename:");
+		displayNameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		displayNameField->setText(displayName);
+		new FXLabel(main, "Beschreibung:");
+		descriptionField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		descriptionField->setText(description);
+		disabledCheck = new FXCheckButton(main, "Konto ist deaktiviert");
+		disabledCheck->setCheck(disabled);
+
+		FXHorizontalFrame* pwf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXButton(pwf, "&Kennwort zurücksetzen...", NULL, this, ID_RESET_PW, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getDisplayName() const { return displayNameField->getText(); }
+	FXString getDescription() const { return descriptionField->getText(); }
+	bool getDisabled() const { return disabledCheck->getCheck(); }
+	virtual ~UserPropertiesDialog() {}
+};
+FXDEFMAP(UserPropertiesDialog) UserPropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_RESET_PW, UserPropertiesDialog::onResetPassword),
+};
+FXIMPLEMENT(UserPropertiesDialog, FXDialogBox, UserPropertiesDialogMap, ARRAYNUMBER(UserPropertiesDialogMap))
+
+// ---------------------------------------------------------------------
+// Dialog "Neuer Computer" -- analog zu Benutzer/Gruppe/OU.
+// ---------------------------------------------------------------------
+class NewComputerDialog : public FXDialogBox {
+	FXDECLARE(NewComputerDialog)
+private:
+	FXTextField* nameField;
+protected:
+	NewComputerDialog() {}
+public:
+	NewComputerDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Neuer Computer", DECOR_TITLE | DECOR_BORDER, 0,0,360,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Computername:");
+		nameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getName() const { return nameField->getText(); }
+	virtual ~NewComputerDialog() {}
+};
+FXIMPLEMENT(NewComputerDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Verschieben nach" -- einfache Liste aller Organisations-
+// einheiten der Domaene zur Auswahl des Ziels.
+// ---------------------------------------------------------------------
+class MoveObjectDialog : public FXDialogBox {
+	FXDECLARE(MoveObjectDialog)
+private:
+	FXList* ouList;
+	std::vector<std::pair<FXString, FXString>> ous;
+protected:
+	MoveObjectDialog() {}
+public:
+	MoveObjectDialog(FXWindow* owner, const FXString& objectName, const FXString& domainRootLabel)
+		: FXDialogBox(owner, "Verschieben von " + objectName, DECOR_TITLE | DECOR_BORDER, 0,0,420,380) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Ziel-Organisationseinheit auswählen:");
+		ouList = new FXList(main, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		ouList->appendItem(domainRootLabel); // Domaenenwurzel selbst als Ziel moeglich
+		ous.push_back({ "", "" }); // Platzhalter fuer die Wurzel -- volle DN wird vom Aufrufer aufgeloest
+		for (auto& ou : listAllOUsWithPaths()) {
+			ouList->appendItem(ou.second);
+			ous.push_back(ou);
+		}
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Verschieben", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	// Leerer String = Domaenenwurzel (der Aufrufer muss das erkennen und
+	// domain.baseDN selbst einsetzen).
+	FXString getTargetFullDN() const {
+		int idx = ouList->getCurrentItem();
+		if (idx < 0 || idx >= (int)ous.size()) return "";
+		return ous[idx].first;
+	}
+	virtual ~MoveObjectDialog() {}
+};
+FXIMPLEMENT(MoveObjectDialog, FXDialogBox, NULL, 0)
+
 // ---------------------------------------------------------------------
 // Dialog "Eigenschaften" einer einzelnen Richtlinie -- Nicht
 // konfiguriert/Aktiviert/Deaktiviert plus (falls vorhanden) das
@@ -1989,7 +2267,8 @@ protected:
 public:
 	enum {
 		ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT,
-		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS
+		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_NEW_COMPUTER, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS,
+		ID_USER_PROPS, ID_MOVE_OBJECT
 	};
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -1999,9 +2278,12 @@ public:
 	long onNewUser(FXObject*, FXSelector, void*);
 	long onNewGroup(FXObject*, FXSelector, void*);
 	long onNewOU(FXObject*, FXSelector, void*);
+	long onNewComputer(FXObject*, FXSelector, void*);
 	long onDeleteObject(FXObject*, FXSelector, void*);
 	long onProperties(FXObject*, FXSelector, void*);
 	long onGroupProperties(FXObject*, FXSelector, void*);
+	long onUserProperties(FXObject*, FXSelector, void*);
+	long onMoveObject(FXObject*, FXSelector, void*);
 
 	DsAdminWindow(FXApp* a);
 	void loadTree();
@@ -2019,9 +2301,12 @@ FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_USER, DsAdminWindow::onNewUser),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_GROUP, DsAdminWindow::onNewGroup),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_OU, DsAdminWindow::onNewOU),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_COMPUTER, DsAdminWindow::onNewComputer),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_DELETE_OBJECT, DsAdminWindow::onDeleteObject),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_PROPERTIES, DsAdminWindow::onProperties),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_GROUP_PROPS, DsAdminWindow::onGroupProperties),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_USER_PROPS, DsAdminWindow::onUserProperties),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_MOVE_OBJECT, DsAdminWindow::onMoveObject),
 };
 FXIMPLEMENT(DsAdminWindow, FXMainWindow, DsAdminWindowMap, ARRAYNUMBER(DsAdminWindowMap))
 
@@ -2146,6 +2431,14 @@ static FXString relDNToFullDN(const FXString& relDN, const DomainInfo& domain) {
 	return relDN + "," + domain.baseDN;
 }
 
+// ---------------------------------------------------------------------
+// Benutzer-Eigenschaften bearbeiten: Anzeigename/Beschreibung ueber
+// LDAP-Modify (samba-tool bietet dafuer bei bestehenden Benutzern kein
+// eigenes Kommandozeilen-Flag -- nur "user edit" oeffnet einen
+// interaktiven Texteditor), Aktivieren/Deaktivieren und Kennwort
+// zuruecksetzen ueber die entsprechenden samba-tool-Unterbefehle.
+// ---------------------------------------------------------------------
+
 long DsAdminWindow::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 	FXEvent* ev = (FXEvent*)ptr;
 	FXTreeItem* item = tree->getItemAt(ev->win_x, ev->win_y);
@@ -2159,6 +2452,7 @@ long DsAdminWindow::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 	new FXMenuCommand(&neuMenu, "&Benutzer...", NULL, this, ID_NEW_USER);
 	new FXMenuCommand(&neuMenu, "&Gruppe...", NULL, this, ID_NEW_GROUP);
 	new FXMenuCommand(&neuMenu, "&Organisationseinheit...", NULL, this, ID_NEW_OU);
+	new FXMenuCommand(&neuMenu, "&Computer...", NULL, this, ID_NEW_COMPUTER);
 	new FXMenuCascade(&menu, "&Neu", NULL, &neuMenu);
 	new FXMenuSeparator(&menu);
 	if (relDN.empty() || isOU(relDN)) {
@@ -2188,6 +2482,13 @@ long DsAdminWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 		new FXMenuSeparator(&menu);
 	} else if (obj.type == OBJ_GROUP) {
 		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_GROUP_PROPS);
+		new FXMenuSeparator(&menu);
+	} else if (obj.type == OBJ_USER) {
+		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_USER_PROPS);
+		new FXMenuSeparator(&menu);
+	}
+	if (obj.type == OBJ_USER || obj.type == OBJ_GROUP || obj.type == OBJ_COMPUTER || obj.type == OBJ_OU) {
+		new FXMenuCommand(&menu, "&Verschieben...", NULL, this, ID_MOVE_OBJECT);
 		new FXMenuSeparator(&menu);
 	}
 	new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_OBJECT);
@@ -2257,9 +2558,81 @@ long DsAdminWindow::onDeleteObject(FXObject*, FXSelector, void*) {
 		case OBJ_USER: ok = deleteUser(obj.accountName, errorMsg); break;
 		case OBJ_GROUP: ok = deleteGroup(obj.accountName, errorMsg); break;
 		case OBJ_OU: ok = deleteOU(relDNToFullDN(obj.dn, domain), errorMsg); break;
+		case OBJ_COMPUTER: ok = deleteComputer(obj.accountName, errorMsg); break;
 		default: errorMsg = "Dieser Objekttyp kann hier noch nicht gelöscht werden."; break;
 	}
 	if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onNewComputer(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Computer angelegt werden."); return 1; }
+	NewComputerDialog dlg(this);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	FXString name = dlg.getName().trim();
+	if (name.empty()) return 1;
+	FXString errorMsg;
+	if (!createComputer(name, currentContainerRelDN, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onUserProperties(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	DirObject obj = currentObjects[idx];
+	if (obj.type != OBJ_USER) return 1;
+
+	// Aktuelle Werte lesen (displayName/description/Kontostatus) --
+	// samba-tool user list liefert das nicht, daher per "user show".
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("show"), obj.accountName }, raw);
+	FXString curDisplayName, curDescription;
+	bool curDisabled = false;
+	for (auto& l : splitLines(raw)) {
+		FXString fl = l.c_str();
+		if (fl.left(12) == "displayName:") curDisplayName = fl.mid(12, fl.length() - 12).trim();
+		else if (fl.left(12) == "description:") curDescription = fl.mid(12, fl.length() - 12).trim();
+		else if (fl.left(19) == "userAccountControl:") {
+			long uac = 0;
+			try { uac = std::stol(fl.mid(19, fl.length() - 19).trim().text()); } catch (...) {}
+			curDisabled = (uac & 0x2) != 0; // UF_ACCOUNTDISABLE
+		}
+	}
+
+	UserPropertiesDialog dlg(this, obj.accountName, curDisplayName, curDescription, curDisabled);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+	FXString errorMsg;
+	FXString userFullDN = relDNToFullDN(obj.dn, domain);
+	bool ok = setUserAttributes(this, domain.realm, userFullDN, dlg.getDisplayName(), dlg.getDescription(), errorMsg);
+	if (ok && dlg.getDisabled() != curDisabled) {
+		ok = setUserEnabled(obj.accountName, !dlg.getDisabled(), errorMsg);
+	}
+	if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onMoveObject(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	DirObject obj = currentObjects[idx];
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts verschoben werden."); return 1; }
+
+	MoveObjectDialog dlg(this, obj.name, domain.realm);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	FXString targetDN = dlg.getTargetFullDN();
+	if (targetDN.empty()) targetDN = domain.baseDN; // Domaenenwurzel gewaehlt
+
+	FXString errorMsg;
+	FXString identifier = (obj.type == OBJ_OU) ? relDNToFullDN(obj.dn, domain) : obj.accountName;
+	if (!moveObject(obj.type, identifier, targetDN, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
 	onRefresh(NULL, 0, NULL);
 	return 1;
 }
