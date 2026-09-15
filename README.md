@@ -19,8 +19,16 @@ jeweiligen Unterordner.
 | [`dcpromo/`](dcpromo/README.md) | Assistent zum Installieren von Active Directory | Samba als AD-Domain-Controller | Neue Domäne (Windows-2000-kompatibel oder moderne BIND9-DLZ-Integration), Migration zwischen beiden |
 | [`dsadmin/`](dsadmin/README.md) | Active Directory-Benutzer und -Computer | samba-tool (user/group/ou/gpo), LDAP, SYSVOL | Domänenkonten anlegen/löschen, Gruppenmitgliedschaften, GPOs anlegen/verknüpfen; vollständiger Gruppenrichtlinienobjekt-Editor (ADM-Vorlagen → `Registry.pol`) plus Softwareinstallation, Skripte und Ordnerumleitung |
 | [`termsvc/`](termsvc/README.md) | Terminaldienstekonfiguration | xrdp + PAM/winbind | Terminaldienste aktivieren (Paketinstallation, Authentifizierung lokal/AD, Win2k-Anmeldebildschirm, Dienste starten) |
+| [`services/`](services/README.md) | Dienste (services.msc) | systemd | Dienste auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten -- Ansicht aus `common/svc`, auch in `compmgmt` eingehängt |
 
 ## Gemeinsame Bausteine
+
+Unter [`common/`](common/) liegt Code, den mehrere Programme
+gemeinsam benutzen, statt ihn doppelt zu pflegen:
+
+| Ordner | Inhalt | benutzt von |
+|---|---|---|
+| [`common/svc/`](common/svc/) | Dienstverwaltung: GUI-freier systemd-Kern (`svccore`) plus fertige Ansicht als FOX-Widget (`svcpanel`) | `services`, `compmgmt` |
 
 Alle Programme teilen sich denselben Grundaufbau:
 - **FOX-Toolkit** für die GUI (Fenster/Menü/Toolbar/Baum-/Listenansicht
@@ -40,6 +48,7 @@ cd compmgmt && make && ./compmgmt
 cd dcpromo && make && ./dcpromo
 cd dsadmin && make && ./dsadmin
 cd termsvc && make && ./termsvc
+cd services && make && ./services
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,

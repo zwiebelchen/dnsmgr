@@ -15,6 +15,7 @@
 #include <FXPNGIcon.h>
 #include <FXGIFIcon.h>
 #include "res/foxres.h"
+#include "../common/svc/svcpanel.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -755,7 +756,7 @@ FXIMPLEMENT(GroupPropertiesDialog, FXDialogBox, GroupPropertiesDialogMap, ARRAYN
 // Hauptfenster
 // ---------------------------------------------------------------------
 
-enum NodeKind { NK_NONE, NK_USERS, NK_GROUPS, NK_SHARES, NK_SESSIONS, NK_OPENFILES };
+enum NodeKind { NK_NONE, NK_USERS, NK_GROUPS, NK_SHARES, NK_SESSIONS, NK_OPENFILES, NK_SERVICES };
 
 class CompMgmt : public FXMainWindow {
 	FXDECLARE(CompMgmt)
@@ -777,6 +778,9 @@ private:
 
 	FXTreeItem *rootItem, *sysToolsItem, *lugItem, *usersItem, *groupsItem;
 	FXTreeItem *sharedFoldersItem, *sharesItem, *sessionsItem, *openFilesItem;
+	FXTreeItem *svcAppsItem, *servicesItem;
+	FXSwitcher* rightPane;   // 0 = normale Liste, 1 = Dienste-Ansicht
+	SvcPanel* svcPanel;
 	std::vector<UserInfo> users;
 	std::vector<GroupInfo> groups;
 	std::vector<ShareInfo> shares;
@@ -931,7 +935,11 @@ CompMgmt::CompMgmt(FXApp* a)
 	                       TREELIST_SHOWS_BOXES|TREELIST_SHOWS_LINES|TREELIST_BROWSESELECT|TREELIST_ROOT_BOXES);
 
 	FXPacker* listframe = new FXPacker(splitter, FRAME_NORMAL|LAYOUT_FILL_Y|LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-	list = new FXIconList(listframe, this, ID_LIST,
+	// Die rechte Haelfte zeigt entweder die gewohnte Liste oder -- im
+	// Zweig "Dienste und Anwendungen" -- dasselbe SvcPanel, das auch das
+	// eigenstaendige "Dienste"-Programm verwendet.
+	rightPane = new FXSwitcher(listframe, LAYOUT_FILL_X|LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+	list = new FXIconList(rightPane, this, ID_LIST,
 	                       ICONLIST_DETAILED|ICONLIST_BROWSESELECT|LAYOUT_FILL_X|LAYOUT_FILL_Y|FRAME_NORMAL);
 
 	icoRoot = new FXPNGIcon(getApp(), resico_network, IMAGE_NEAREST); icoRoot->create();
@@ -949,10 +957,14 @@ CompMgmt::CompMgmt(FXApp* a)
 	sharesItem = tree->appendItem(sharedFoldersItem, "Freigaben", icoFolder, icoFolder);
 	sessionsItem = tree->appendItem(sharedFoldersItem, "Sitzungen", icoFolder, icoFolder);
 	openFilesItem = tree->appendItem(sharedFoldersItem, "Geöffnete Dateien", icoFolder, icoFolder);
+	svcAppsItem = tree->appendItem(rootItem, "Dienste und Anwendungen", icoFolder, icoFolder);
+	servicesItem = tree->appendItem(svcAppsItem, "Dienste", icoKey, icoKey);
+	svcPanel = new SvcPanel(rightPane, icoKey);
 	tree->expandTree(rootItem);
 	tree->expandTree(sysToolsItem);
 	tree->expandTree(lugItem);
 	tree->expandTree(sharedFoldersItem);
+	tree->expandTree(svcAppsItem);
 
 	loadAll();
 }
@@ -964,8 +976,15 @@ void CompMgmt::loadAll() {
 }
 
 void CompMgmt::showListFor(NodeKind kind) {
-	list->clearItems();
 	currentNodeKind = kind;
+	if (kind == NK_SERVICES) {
+		// Eigene Ansicht -- die gemeinsame Liste bleibt unberuehrt.
+		rightPane->setCurrent(1);
+		svcPanel->reload();
+		return;
+	}
+	rightPane->setCurrent(0);
+	list->clearItems();
 	if (kind == NK_USERS) {
 		setListColumns(list, { {"Name", 140}, {"Vollständiger Name", 180}, {"Beschreibung", 220} });
 		for (auto& u : users) {
@@ -1013,6 +1032,8 @@ long CompMgmt::onTreeChanged(FXObject*, FXSelector, void*) {
 	if (cur == sharesItem) { showListFor(NK_SHARES); return 1; }
 	if (cur == sessionsItem) { showListFor(NK_SESSIONS); return 1; }
 	if (cur == openFilesItem) { showListFor(NK_OPENFILES); return 1; }
+	if (cur == servicesItem) { showListFor(NK_SERVICES); return 1; }
+	rightPane->setCurrent(0);
 	list->clearItems();
 	setListColumns(list, {});
 	currentNodeKind = NK_NONE;

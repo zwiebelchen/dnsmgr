@@ -74,6 +74,16 @@ direkt die Freigabe-Abschnitte der `/etc/samba/smb.conf` sowie
   umgesetzt wird -- robuster als eigenes JSON-Parsing in C++ für eine
   reine Anzeigefunktion.
 
+## Dienste und Anwendungen
+
+Der Zweig "Dienste und Anwendungen -> Dienste" zeigt dieselbe Ansicht
+wie das eigenständige Programm [`services`](../services/README.md) --
+es ist buchstäblich dasselbe Widget aus
+[`../common/svc`](../common/svc/), das hier nur in die rechte Hälfte
+eingehängt wird (ein `FXSwitcher` schaltet zwischen der gewohnten Liste
+und der Dienste-Ansicht um). Funktionsumfang, Abbildung auf systemd und
+die bewussten Abweichungen vom Original stehen dort beschrieben.
+
 ## Bauen
 ```sh
 cd compmgmt
@@ -81,7 +91,8 @@ make
 ./compmgmt
 ```
 Voraussetzung: `samba`/`samba-common-bin` installiert (für
-`smbpasswd`/`pdbedit`).
+`smbpasswd`/`pdbedit`). Der Dienste-Zweig kompiliert `../common/svc`
+mit -- die Quellen stehen im Makefile.
 
 ## Verhalten auf einem Domänencontroller
 
@@ -108,8 +119,8 @@ Löschen) werden übersprungen -- die reine Linux-Kontoverwaltung
   Schließen einzelner geöffneter Dateien -- Sitzungen und geöffnete
   Dateien sind reine Anzeige.
 - Weitere Zweige der Computerverwaltung (Ereignisanzeige,
-  Systemleistungsprotokolle, Geräte-Manager, Datenträgerverwaltung,
-  Dienste und Anwendungen) fehlen noch.
+  Systemleistungsprotokolle, Geräte-Manager, Datenträgerverwaltung)
+  fehlen noch.
 - Kein "Benutzer muss Kennwort bei der nächsten Anmeldung ändern" /
   "Kennwort läuft nie ab" (chage-basierte Flags) -- nur "Konto ist
   deaktiviert" wird abgebildet.

@@ -10,8 +10,10 @@ compmgmt/compmgmt
 dcpromo/dcpromo
 dsadmin/dsadmin
 termsvc/termsvc
+services/services
 
 # Testprogramme aus dsadmin/Makefile
 dsadmin/test_admparser
 dsadmin/test_regpol
 dsadmin/test_aas
+services/test_svccore

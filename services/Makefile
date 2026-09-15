@@ -9,9 +9,9 @@ LDFLAGS = `fox-config --libs`
 PREFIX = /usr/local
 
 ICONS = res/*/*.gif res/*/*.png res/*.gif
-SOURCES = compmgmt.cpp ../common/svc/svccore.cpp ../common/svc/svcpanel.cpp
+SOURCES = services.cpp ../common/svc/svccore.cpp ../common/svc/svcpanel.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
-EXECUTABLE = compmgmt
+EXECUTABLE = services
 
 CPPFLAGS += `fox-config --cflags`
 
@@ -25,8 +25,11 @@ res/foxres.h: $(ICONS)
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
 
+test_svccore: ../common/svc/test_svccore.cpp ../common/svc/svccore.cpp
+	$(CC) -Wall -std=c++17 -o test_svccore ../common/svc/test_svccore.cpp ../common/svc/svccore.cpp
+
 clean:
-	rm -f res/foxres.h $(OBJECTS) $(EXECUTABLE)
+	rm -f res/foxres.h $(OBJECTS) $(EXECUTABLE) test_svccore
 
 install:
 	cp $(EXECUTABLE) $(PREFIX)/bin/$(EXECUTABLE)
