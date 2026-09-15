@@ -17,3 +17,4 @@ dsadmin/test_admparser
 dsadmin/test_regpol
 dsadmin/test_aas
 services/test_svccore
+common/svc/test_svccore
