@@ -282,6 +282,20 @@ std::string dropInPath(const std::string& unit) {
 	return "/etc/systemd/system/" + unit + ".d/ice2k.conf";
 }
 
+bool isValidAccountName(const std::string& account) {
+	if (account.empty() || account.size() > 32) return false;
+	// POSIX-Benutzernamen: Buchstabe oder _ am Anfang, danach
+	// Buchstaben/Ziffern/_/-/. und optional ein $ am Ende.
+	if (!(isalpha((unsigned char)account[0]) || account[0] == '_')) return false;
+	for (size_t i = 1; i < account.size(); i++) {
+		char c = account[i];
+		if (isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.') continue;
+		if (c == '$' && i + 1 == account.size()) continue;
+		return false;
+	}
+	return true;
+}
+
 std::string buildDropIn(const std::string& account, const RecoverySettings& rec) {
 	std::string out =
 		"# Von ice2k erzeugt (Dienste-Verwaltung).\n"
@@ -295,7 +309,9 @@ std::string buildDropIn(const std::string& account, const RecoverySettings& rec)
 	}
 
 	out += "\n[Service]\n";
-	if (!account.empty()) out += "User=" + account + "\n";
+	// Ungueltige Namen kommen hier nie an (applySettings weist sie ab),
+	// aber der Erzeuger haelt sich auch allein daran.
+	if (!account.empty() && isValidAccountName(account)) out += "User=" + account + "\n";
 	if (rec.action == REC_RESTART) {
 		char buf[128];
 		snprintf(buf, sizeof(buf), "Restart=on-failure\nRestartSec=%d\n", rec.restartSecs);
@@ -405,6 +421,10 @@ bool setStartType(const std::string& unit, StartType type, std::string& errorMsg
 
 bool applySettings(const std::string& unit, const std::string& account,
                    const RecoverySettings& rec, std::string& errorMsg) {
+	if (!account.empty() && !isValidAccountName(account)) {
+		errorMsg = "\"" + account + "\" ist kein gültiger Kontoname.";
+		return false;
+	}
 	std::string path = dropInPath(unit);
 	std::string dir = path.substr(0, path.find_last_of('/'));
 

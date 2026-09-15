@@ -82,6 +82,13 @@ std::string buildDropIn(const std::string& account, const RecoverySettings& rec)
 
 std::string dropInPath(const std::string& unit);
 
+// Prueft einen Kontonamen, bevor er als User= in die Drop-in-Datei
+// wandert. Ohne das koennte ein Zeilenumbruch im Eingabefeld beliebige
+// weitere systemd-Direktiven einschleusen -- keine Rechteausweitung
+// (wer hier bedient, hat ueber i2ksudo ohnehin root), aber es wuerde
+// die Unit unbemerkt verbiegen.
+bool isValidAccountName(const std::string& account);
+
 // ---------------------------------------------------------------------
 // Zugriffe auf das laufende System.
 // Lesen laeuft unprivilegiert, Schreiben ueber i2ksudo.

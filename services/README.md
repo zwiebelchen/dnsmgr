@@ -37,7 +37,17 @@ Umsetzung derselben Logik.
 | Abhängigkeiten (oben/unten) | `Requires=`/`Wants=` bzw. `RequiredBy=`/`WantedBy=` |
 
 Alle Aufrufe lesen unprivilegiert; nur Schreibvorgänge laufen über
-`i2ksudo`. Änderungen an Konto und Wiederherstellung landen als
+`i2ksudo` (`start`/`stop`/`restart`, `enable`/`disable`/`mask`/`unmask`,
+das Anlegen des Drop-in-Verzeichnisses, das Schreiben selbst und
+`daemon-reload`). Das Programm selbst läuft nie als root. Anders als die
+übrigen Werkzeuge fragt es die Rechte **nicht beim Start** ab, sondern
+erst bei der ersten schreibenden Aktion -- zum bloßen Ansehen der
+Dienstliste braucht es keine.
+
+Der Kontoname aus dem Reiter "Anmelden" wird vor dem Schreiben geprüft
+(`isValidAccountName`). Sonst könnte ein Zeilenumbruch im Eingabefeld
+beliebige weitere Direktiven in die Drop-in-Datei schreiben -- keine
+Rechteausweitung, aber es würde die Unit unbemerkt verbiegen. Änderungen an Konto und Wiederherstellung landen als
 Erweiterungsdatei in `/etc/systemd/system/<unit>.d/ice2k.conf` und
 danach folgt ein `daemon-reload` -- mitgelieferte Unit-Dateien werden
 nie angefasst. Die Datei wird bei jeder Änderung komplett neu

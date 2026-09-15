@@ -126,7 +126,26 @@ static void testDropIn() {
 	assert(dropInPath("ssh.service") == "/etc/systemd/system/ssh.service.d/ice2k.conf");
 }
 
+static void testAccountValidation() {
+	assert(isValidAccountName("apache"));
+	assert(isValidAccountName("_systemd"));
+	assert(isValidAccountName("foo-bar.baz"));
+	assert(isValidAccountName("machine$"));   // Maschinenkonten
+	assert(!isValidAccountName(""));
+	assert(!isValidAccountName("1abc"));      // darf nicht mit Ziffer beginnen
+	assert(!isValidAccountName("mit leer"));
+	assert(!isValidAccountName("a$b"));       // $ nur am Ende
+	// Der eigentliche Grund fuer die Pruefung: eingeschleuste Direktiven.
+	assert(!isValidAccountName("root\nExecStart=/bin/sh"));
+
+	RecoverySettings r;
+	std::string s = buildDropIn("root\nExecStart=/bin/sh", r);
+	assert(s.find("ExecStart") == std::string::npos);
+	assert(s.find("User=") == std::string::npos);
+}
+
 int main() {
+	testAccountValidation();
 	testShowRecords();
 	testStartTypeMapping();
 	testTimeSpans();
