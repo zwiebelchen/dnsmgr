@@ -833,7 +833,18 @@ static bool runLdapChange(FXWindow* owner, const FXString& realm, const std::str
 	// "Already exists" ist fuer unsere idempotenten Create-Aufrufe kein
 	// Fehler -- der Aufrufer entscheidet selbst, ob das in Ordnung ist.
 	if (rc != 0 && cmdOut.find("Already exists") == std::string::npos) {
-		errorMsg = "LDAP-Änderung fehlgeschlagen (siehe Protokoll).";
+		// Die betroffene DN mit ausgeben -- bei einer Folge von Aufrufen
+		// (Class Store, Packages, packageRegistration ...) ist sonst nicht
+		// erkennbar, welcher davon gescheitert ist, und im Protokoll steht
+		// womoeglich nur die harmlose Meldung des vorherigen.
+		std::string dnLine = "unbekannt";
+		size_t p = ldif.find("dn: ");
+		if (p != std::string::npos) {
+			size_t e = ldif.find('\n', p);
+			dnLine = ldif.substr(p + 4, (e == std::string::npos ? ldif.size() : e) - p - 4);
+		}
+		errorMsg = FXString("LDAP-Änderung fehlgeschlagen bei:\n") + dnLine.c_str() +
+		           "\n\n" + (cmdOut.empty() ? "(keine Ausgabe)" : cmdOut.c_str());
 		return false;
 	}
 	return true;
@@ -1307,7 +1318,7 @@ static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, 
 	                     "changetype: add\n"
 	                     "objectClass: classStore\n"
 	                     "description: Application Store\n";
-	if (!runLdapChange(owner, realm, ldif1, true, log, errorMsg)) return false;
+	if (!runLdapChange(owner, realm, ldif1, true, log, errorMsg)) return false;   // CN=Class Store
 
 	// WICHTIG: "CN=Packages" ist ein gewoehnlicher container, KEIN
 	// classStore -- nur "CN=Class Store" darueber ist einer. Mit der
@@ -1323,7 +1334,24 @@ static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, 
 	                     "changetype: add\n"
 	                     "objectClass: container\n"
 	                     "description: Application Packages\n";
-	if (!runLdapChange(owner, realm, ldif2, true, log, errorMsg)) return false;
+	if (!runLdapChange(owner, realm, ldif2, true, log, errorMsg)) return false;   // CN=Packages
+
+	// Gegenprobe: ein frueher mit falscher Klasse angelegtes CN=Packages
+	// (objectClass classStore statt container) bleibt beim erneuten
+	// Anlegen unbemerkt, weil "Already exists" toleriert wird -- der
+	// Client scheitert dann weiterhin mit 80040167. Deshalb hier
+	// ausdruecklich pruefen und deutlich sagen, was zu tun ist.
+	std::string cls = readLdapAttribute(owner, realm, packagesDn, "objectClass");
+	if (!cls.empty() && cls.find("container") == std::string::npos) {
+		errorMsg = FXString("Der Container\n") + packagesDn.c_str() +
+		           "\nexistiert bereits mit der falschen Objektklasse.\n\n"
+		           "Die Klasse eines vorhandenen Objekts lässt sich in AD nicht ändern.\n"
+		           "Bitte den Container samt Inhalt löschen und erneut hinzufügen:\n\n"
+		           "ldapdelete -H ldap://127.0.0.1 -Z -x -r \\\n"
+		           "  -D \"administrator@" + realm + "\" -W \\\n"
+		           "  \"" + packagesDn.c_str() + "\"";
+		return false;
+	}
 	return true;
 }
 
