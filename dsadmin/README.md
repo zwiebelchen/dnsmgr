@@ -16,7 +16,9 @@ Domänendatenbank. `dsadmin` übernimmt genau das: die Verwaltung von
 
 ## Funktionsumfang
 - Baumstruktur: Domäne -> Builtin/Computers/Users/Domain Controllers
-  + eigene Organisationseinheiten
+  + eigene Organisationseinheiten, beliebig tief verschachtelt (ein
+  einziger `samba-tool ou list`-Aufruf für den ganzen Baum, die OUs
+  werden nach Tiefe sortiert eingehängt)
 - Container-Anzeige mit Typ-Klassifizierung (Benutzer/Sicherheits-
   gruppe/Computer/Organisationseinheit/Container) und passenden Icons
 - **Neu**: Benutzer/Gruppe/Organisationseinheit anlegen
@@ -61,8 +63,12 @@ Registry.pol-Eintrag). `GPT.INI` kodiert Computer-/Benutzer-Version
 getrennt und wird beim Speichern gezielt nur für den tatsächlich
 geänderten Zweig erhöht.
 
-Bekannte Grenzen dieser Version: keine Mehrfachauswahl/Verschieben von
-Richtlinien.
+Mehrere Richtlinien lassen sich gemeinsam markieren (Strg/Umschalt) und
+über die Schaltflächen unter der Liste auf einen Schlag auf
+"Aktiviert"/"Deaktiviert"/"Nicht konfiguriert" setzen. Ausgenommen ist
+"Aktiviert" bei Richtlinien mit Eingabefeldern -- deren Werte kann eine
+Sammelaktion nicht erraten, sie werden übersprungen und gemeldet, damit
+man sie einzeln per Doppelklick setzt.
 
 ## Weitere Gruppenrichtlinien-Erweiterungen
 
@@ -91,6 +97,26 @@ aufrufen, selbst wenn die Einstellungen vorhanden sind.
 LDAP-Schreibzugriffe laufen über `ldapadd`/`ldapmodify` gegen den
 lokalen Samba-DC und brauchen -- wie GPOs selbst -- echte
 Administrator-Anmeldedaten; root allein genügt dafür nicht.
+
+## Verknüpfungsreihenfolge
+
+Die Schaltflächen "Nach oben"/"Nach unten" im Gruppenrichtlinie-Reiter
+verschieben eine Verknüpfung innerhalb der Liste. `samba-tool` kennt
+dafür keinen Befehl (`gpo setlink` hängt nur an, `gpo dellink`
+entfernt), deshalb wird das `gPLink`-Attribut des Containers direkt per
+LDAP gelesen, umsortiert und komplett zurückgeschrieben. Die
+Optionsflags jeder einzelnen Verknüpfung (`;0`, `;1` ...) bleiben dabei
+erhalten.
+
+Offener Punkt: Die Liste zeigt die Verknüpfungen in genau der
+Reihenfolge, in der sie im `gPLink`-Attribut stehen (das ist auch die
+Ausgabereihenfolge von `samba-tool gpo getlink`). Welches Ende davon
+die höhere Priorität hat, ist hier noch nicht gegen einen echten
+Client verifiziert -- im echten Active Directory hängt `setlink` neue
+Verknüpfungen hinten an, während sie in der Oberfläche oben mit der
+höchsten Priorität erscheinen. Sollte sich das bestätigen, müsste die
+Anzeige umgedreht werden, damit "Nach oben" wie im Original
+"höhere Priorität" bedeutet.
 
 ## Gruppenmitgliedschaft
 
@@ -127,8 +153,12 @@ make
 ```
 
 ## Bekannte Grenzen
-- Nur eine Ebene von Organisationseinheiten unter der Domänenwurzel
-  wird im Baum abgebildet (keine rekursive Verschachtelung).
+- Organisationseinheiten unterhalb eines ausgeblendeten Containers
+  erscheinen nicht im Baum; die DN-Zerlegung trennt an Kommas und
+  behandelt maskierte Kommas in einem RDN nicht.
+- Umsortieren der Verknüpfungen und die Sammeländerung im Editor sind
+  bisher nur kompiliert und mit Einzeltests der Zerlegungs-/
+  Sortierlogik geprüft, noch nicht gegen eine laufende Domäne.
 - Bekannte, ungelöste Einschränkung aus dem Testen: Das Eingabefeld
   für einen neuen GPO-Namen (aus dem bereits modalen Eigenschaften-
   Dialog heraus geöffnet) nahm in der Xvfb-Testumgebung ohne

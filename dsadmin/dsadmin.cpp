@@ -319,6 +319,54 @@ static std::vector<FXString> listTopContainers() {
 	return out;
 }
 
+// ---------------------------------------------------------------------
+// Kleine DN-Helfer fuer den Baum. Sie arbeiten auf relativen DNs
+// ("OU=Kind,OU=Eltern") und zerlegen nur an Kommas -- ein in einem RDN
+// maskiertes Komma ("OU=Meier\, Hans") kommt bei
+// Organisationseinheiten praktisch nicht vor.
+// ---------------------------------------------------------------------
+static int dnComponentCount(const FXString& dn) {
+	int n = 1;
+	for (FXint i = 0; i < dn.length(); i++) if (dn[i] == ',') n++;
+	return n;
+}
+
+static FXString dnParent(const FXString& dn) {
+	FXint p = dn.find(',');
+	if (p < 0) return "";
+	return dn.mid(p + 1, dn.length() - p - 1);
+}
+
+static FXString dnLeafLabel(const FXString& dn) {
+	FXint p = dn.find(',');
+	FXString first = (p < 0) ? dn : dn.left(p);
+	if (first.left(3) == "CN=" || first.left(3) == "OU=") first = first.mid(3, first.length() - 3);
+	return first;
+}
+
+// Alle Organisationseinheiten der Domaene als relative DNs -- ein
+// einziger samba-tool-Aufruf fuer den ganzen Baum, statt pro Ebene
+// erneut "ou listobjects" aufzurufen. Je nach samba-Version enthaelt
+// die Ausgabe die Domaenenwurzel oder nicht, deshalb schneiden wir eine
+// eventuell vorhandene Basis-DN selbst ab.
+static std::vector<FXString> listAllOURelDNs(const DomainInfo& domain) {
+	std::vector<FXString> out;
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("list") }, raw);
+	FXString suffix = FXString(",") + domain.baseDN;
+	FXString suffixLower = suffix; suffixLower.lower();
+	for (auto& l : splitLines(raw)) {
+		FXString dn = trimStr(l).c_str();
+		if (dn.empty()) continue;
+		FXString dnLower = dn; dnLower.lower();
+		if (dn.length() > suffix.length() && dnLower.right(suffixLower.length()) == suffixLower)
+			dn = dn.left(dn.length() - suffix.length());
+		if (dn.left(3) != "OU=") continue;
+		out.push_back(dn);
+	}
+	return out;
+}
+
 // Objekte innerhalb eines Containers (relative DN, z.B. "CN=Users"),
 // mit Typklassifizierung per Abgleich gegen die jeweiligen
 // samba-tool-*-list-Ausgaben.
@@ -761,6 +809,55 @@ static std::string readLdapAttribute(FXWindow* owner, const FXString& realm, con
 	}, out);
 	while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
 	return out;
+}
+
+// ---------------------------------------------------------------------
+// Verknuepfungsreihenfolge (gPLink). samba-tool kennt dafuer keinen
+// Befehl -- "gpo setlink" haengt nur an, "gpo dellink" entfernt. Also
+// lesen wir das Attribut direkt per LDAP, ordnen die Bloecke um und
+// schreiben es komplett zurueck. Jeder Block behaelt dabei seine
+// eigenen Optionsflags (";0", ";1" ...) unveraendert.
+// ---------------------------------------------------------------------
+static std::vector<std::string> parseGpLinkBlocks(const std::string& raw) {
+	std::vector<std::string> out;
+	size_t i = 0;
+	while (i < raw.size()) {
+		size_t a = raw.find('[', i);
+		if (a == std::string::npos) break;
+		size_t b = raw.find(']', a);
+		if (b == std::string::npos) break;
+		out.push_back(raw.substr(a, b - a + 1));
+		i = b + 1;
+	}
+	return out;
+}
+
+// delta: -1 = eine Position nach oben, +1 = eine nach unten. Steht die
+// Verknuepfung bereits am Rand, passiert nichts (kein Fehler).
+static bool moveGpoLink(FXWindow* owner, const FXString& realm, const FXString& containerFullDN,
+                        const FXString& guid, int delta, FXString& errorMsg) {
+	std::string raw = readLdapAttribute(owner, realm, containerFullDN.text(), "gPLink");
+	std::vector<std::string> blocks = parseGpLinkBlocks(raw);
+	if (blocks.size() < 2) return true;
+
+	std::string needle = lowerCopy(guid.text());
+	int idx = -1;
+	for (size_t i = 0; i < blocks.size(); i++)
+		if (lowerCopy(blocks[i]).find(needle) != std::string::npos) { idx = (int)i; break; }
+	if (idx < 0) { errorMsg = "Die Verknüpfung wurde im gPLink-Attribut nicht gefunden."; return false; }
+
+	int target = idx + delta;
+	if (target < 0 || target >= (int)blocks.size()) return true;
+	std::swap(blocks[idx], blocks[target]);
+
+	std::string joined;
+	for (auto& b : blocks) joined += b;
+	std::string ldif = "dn: " + std::string(containerFullDN.text()) + "\n"
+	                    "changetype: modify\n"
+	                    "replace: gPLink\n"
+	                    "gPLink: " + joined + "\n";
+	std::string log;
+	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
 }
 
 static std::string base64Encode(const std::vector<uint8_t>& data) {
@@ -2007,7 +2104,7 @@ private:
 protected:
 	AdmEditorDialog() {}
 public:
-	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_SAVE };
+	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_SAVE, ID_SET_ENABLED, ID_SET_DISABLED, ID_SET_NOTCONF };
 
 	void collectCategoryChildren(FXTreeItem* parentItem, std::vector<AdmCategory>& cats, std::vector<const AdmCategory*> chain, PolHive* hive) {
 		for (auto& cat : cats) {
@@ -2090,6 +2187,60 @@ public:
 
 		FXString txt = FXString(pol->label.c_str()) + "\t" + stateLabel(ed.state);
 		list->setItemText(idx, txt);
+		return 1;
+	}
+
+	// Setzt alle markierten Richtlinien der aktuellen Kategorie auf
+	// denselben Status -- derselbe Weg wie beim Einzeldialog, nur eben
+	// fuer mehrere Eintraege auf einmal. Gespeichert wird erst beim
+	// Klick auf "Speichern".
+	long onSetSelectionState(FXObject*, FXSelector sel, void*) {
+		if (!currentHive) return 1;
+		FXuint id = FXSELID(sel);
+		PolicyState target = (id == ID_SET_ENABLED) ? POLSTATE_ENABLED
+		                   : (id == ID_SET_DISABLED) ? POLSTATE_DISABLED
+		                   : POLSTATE_NOT_CONFIGURED;
+
+		int applied = 0, skipped = 0;
+		int n = list->getNumItems();
+		if (n > (int)currentPolicies.size()) n = (int)currentPolicies.size();
+		for (int i = 0; i < n; i++) {
+			if (!list->isItemSelected(i)) continue;
+			AdmPolicy* pol = currentPolicies[i];
+			// "Aktiviert" braucht bei Richtlinien mit Eingabefeldern
+			// konkrete Werte -- die kann eine Sammelaktion nicht raten,
+			// also bleiben die dem Einzeldialog vorbehalten.
+			if (target == POLSTATE_ENABLED && !pol->parts.empty()) { skipped++; continue; }
+
+			PendingEdit ed;
+			ed.state = target;
+			ed.effectiveKey = currentEffectiveKeys[i];
+			if (edits.count(pol)) {
+				ed.partValues = edits[pol].partValues;
+			} else {
+				for (auto& part : pol->parts) {
+					std::string vn = !part.valuename.empty() ? part.valuename : pol->valuename;
+					ed.partValues.push_back(readStoredPartValue(currentHive, ed.effectiveKey, vn));
+				}
+			}
+			edits[pol] = ed;
+			editHive[pol] = currentHive;
+			list->setItemText(i, FXString(pol->label.c_str()) + "\t" + stateLabel(target));
+			applied++;
+		}
+
+		if (applied == 0 && skipped == 0) {
+			FXMessageBox::information(this, MBOX_OK, "Keine Auswahl",
+				"Bitte zuerst eine oder mehrere Richtlinien in der Liste markieren.");
+		} else if (skipped > 0) {
+			char buf[320];
+			snprintf(buf, sizeof(buf),
+				"%d Richtlinie(n) auf \"Aktiviert\" gesetzt.\n\n"
+				"%d Richtlinie(n) mit Eingabefeldern wurden übersprungen --\n"
+				"diese bitte einzeln per Doppelklick aktivieren, damit die\n"
+				"Werte gesetzt werden können.", applied, skipped);
+			FXMessageBox::information(this, MBOX_OK, "Sammeländerung", "%s", buf);
+		}
 		return 1;
 	}
 
@@ -2232,7 +2383,7 @@ public:
 		                       TREELIST_SHOWS_BOXES | TREELIST_SHOWS_LINES | TREELIST_BROWSESELECT | TREELIST_ROOT_BOXES);
 		FXPacker* listframe = new FXPacker(splitter, FRAME_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
 		list = new FXIconList(listframe, this, ID_LIST,
-		                       ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y | FRAME_NORMAL);
+		                       ICONLIST_DETAILED | ICONLIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y | FRAME_NORMAL);
 		list->appendHeader("Richtlinie", NULL, 400);
 		list->appendHeader("Status", NULL, 160);
 
@@ -2247,6 +2398,10 @@ public:
 		collectCategoryChildren(userRoot, userHive.categories, {}, &userHive);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 10,10,6,6);
+		new FXLabel(btnf, "Auswahl setzen auf:");
+		new FXButton(btnf, "&Aktiviert", NULL, this, ID_SET_ENABLED, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btnf, "&Deaktiviert", NULL, this, ID_SET_DISABLED, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btnf, "&Nicht konfiguriert", NULL, this, ID_SET_NOTCONF, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
 		new FXFrame(btnf, LAYOUT_FILL_X);
 		new FXButton(btnf, "&Speichern", NULL, this, ID_SAVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
 		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
@@ -2257,6 +2412,9 @@ FXDEFMAP(AdmEditorDialog) AdmEditorDialogMap[] = {
 	FXMAPFUNC(SEL_CHANGED, AdmEditorDialog::ID_TREE, AdmEditorDialog::onTreeChanged),
 	FXMAPFUNC(SEL_DOUBLECLICKED, AdmEditorDialog::ID_LIST, AdmEditorDialog::onListDoubleClick),
 	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SAVE, AdmEditorDialog::onSave),
+	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SET_ENABLED, AdmEditorDialog::onSetSelectionState),
+	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SET_DISABLED, AdmEditorDialog::onSetSelectionState),
+	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SET_NOTCONF, AdmEditorDialog::onSetSelectionState),
 };
 FXIMPLEMENT(AdmEditorDialog, FXDialogBox, AdmEditorDialogMap, ARRAYNUMBER(AdmEditorDialogMap))
 
@@ -2727,7 +2885,7 @@ private:
 	std::vector<FXString> linkedGuids;
 	std::map<FXString, FXString> guidToName;
 public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS, ID_FOLDER_REDIR };
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS, ID_FOLDER_REDIR, ID_LINK_UP, ID_LINK_DOWN };
 	long onNewGpo(FXObject*, FXSelector, void*);
 	long onAddGpo(FXObject*, FXSelector, void*);
 	long onRemoveGpo(FXObject*, FXSelector, void*);
@@ -2736,6 +2894,9 @@ public:
 	long onSecuritySettings(FXObject*, FXSelector, void*);
 	long onScripts(FXObject*, FXSelector, void*);
 	long onFolderRedirection(FXObject*, FXSelector, void*);
+	long onLinkUp(FXObject*, FXSelector, void*);
+	long onLinkDown(FXObject*, FXSelector, void*);
+	long moveSelectedLink(int delta);
 
 	void reloadList() {
 		gpoList->clearItems();
@@ -2766,6 +2927,8 @@ public:
 		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "Nach &oben", NULL, this, ID_LINK_UP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "Nach &unten", NULL, this, ID_LINK_DOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		FXHorizontalFrame* gpoBtns2 = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,4);
 		new FXButton(gpoBtns2, "&Software...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns2, "S&icherheit...", NULL, this, ID_SECURITY_SETTINGS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
@@ -2789,6 +2952,8 @@ FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SECURITY_SETTINGS, PropertiesDialog::onSecuritySettings),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SCRIPTS, PropertiesDialog::onScripts),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_FOLDER_REDIR, PropertiesDialog::onFolderRedirection),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_LINK_UP, PropertiesDialog::onLinkUp),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_LINK_DOWN, PropertiesDialog::onLinkDown),
 };
 FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
 
@@ -2841,6 +3006,31 @@ long PropertiesDialog::onRemoveGpo(FXObject*, FXSelector, void*) {
 	reloadList();
 	return 1;
 }
+
+// Verschiebt die markierte Verknuepfung um eine Position und laesst sie
+// danach markiert, damit sich mehrere Schritte hintereinander klicken
+// lassen.
+long PropertiesDialog::moveSelectedLink(int delta) {
+	int idx = gpoList->getCurrentItem();
+	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
+	int target = idx + delta;
+	if (target < 0 || target >= (int)linkedGuids.size()) return 1;
+
+	FXString errorMsg;
+	if (!moveGpoLink(this, realm, containerFullDN, linkedGuids[idx], delta, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Reihenfolge ändern fehlgeschlagen", "%s", errorMsg.text());
+		return 1;
+	}
+	reloadList();
+	if (target < gpoList->getNumItems()) {
+		gpoList->setCurrentItem(target);
+		gpoList->selectItem(target);
+	}
+	return 1;
+}
+
+long PropertiesDialog::onLinkUp(FXObject*, FXSelector, void*) { return moveSelectedLink(-1); }
+long PropertiesDialog::onLinkDown(FXObject*, FXSelector, void*) { return moveSelectedLink(+1); }
 
 long PropertiesDialog::onEditGpo(FXObject*, FXSelector, void*) {
 	int idx = gpoList->getCurrentItem();
@@ -3086,13 +3276,35 @@ void DsAdminWindow::loadTree() {
 	domainRootItem = tree->appendItem(rootIt, domain.realm, icoServer, icoServer);
 	itemToRelDN[domainRootItem] = "";
 
+	std::map<std::string, FXTreeItem*> itemByRelDN;
 	for (auto& cont : listTopContainers()) {
-		FXString label = cont;
-		if (label.left(3) == "CN=") label = label.mid(3, label.length() - 3);
-		else if (label.left(3) == "OU=") label = label.mid(3, label.length() - 3);
-		FXTreeItem* it = tree->appendItem(domainRootItem, label, icoFolder, icoFolder);
+		FXTreeItem* it = tree->appendItem(domainRootItem, dnLeafLabel(cont), icoFolder, icoFolder);
 		itemToRelDN[it] = cont;
+		itemByRelDN[cont.text()] = it;
 	}
+
+	// Verschachtelte Organisationseinheiten: nach Tiefe sortiert
+	// einhaengen, dann existiert die Elternebene garantiert schon, wenn
+	// ein Kind an die Reihe kommt. Die oberste Ebene steckt bereits in
+	// listTopContainers() und wird hier uebersprungen.
+	std::vector<FXString> ous = listAllOURelDNs(domain);
+	std::sort(ous.begin(), ous.end(), [](const FXString& a, const FXString& b) {
+		int ca = dnComponentCount(a), cb = dnComponentCount(b);
+		if (ca != cb) return ca < cb;
+		return strcmp(a.text(), b.text()) < 0;
+	});
+	for (auto& ou : ous) {
+		if (itemByRelDN.count(ou.text())) continue;
+		auto parent = itemByRelDN.find(dnParent(ou).text());
+		// Eine OU, deren Elternebene nicht im Baum steht (z.B. unterhalb
+		// eines ausgeblendeten Containers), lassen wir lieber weg, statt
+		// sie faelschlich an die Domaenenwurzel zu haengen.
+		if (parent == itemByRelDN.end()) continue;
+		FXTreeItem* it = tree->appendItem(parent->second, dnLeafLabel(ou), icoFolder, icoFolder);
+		itemToRelDN[it] = ou;
+		itemByRelDN[ou.text()] = it;
+	}
+
 	tree->expandTree(rootIt);
 	tree->expandTree(domainRootItem);
 }
