@@ -94,6 +94,31 @@ installiert sind. Fehlt etwas, fragt ein Dialog nach, ob es per
 `named.conf.local`, das `dnsmgr` ja schon verwaltet) nicht hängen
 bleibt, sondern die bestehende Datei automatisch behält.
 
+## DNS-Weiterleitung
+
+Im Windows-2000-kompatiblen Modus weicht BIND9 auf Port 5353 aus und
+Samba leitet mit `dns forwarder = 127.0.0.1:5353` alles dorthin weiter,
+was nicht zur AD-Zone gehört. Damit BIND9 seinerseits nach außen kommt,
+trägt der Assistent dort eine Weiterleitung ein: er liest den
+DNS-Server, den das System vor der Heraufstufung benutzt hat (aus
+`/etc/resolv.conf` bzw. dem vorher angelegten Backup, da
+`/etc/resolv.conf` anschließend auf 127.0.0.1 zeigt) und schreibt ihn
+als `forwarders { ... }; forward only;` in `named.conf.options`.
+
+Ohne diesen Schritt löst BIND9 selbst ab den Root-Servern auf. Wo das
+Netz das nicht zulässt, antwortet BIND9 auf alles Externe mit SERVFAIL
+-- und weil Samba genau dorthin weiterleitet, steht der
+Domänencontroller ohne funktionierendes Internet-DNS da, während die
+AD-Zone selbst einwandfrei arbeitet. Genau so ist es in der Praxis
+aufgetreten.
+
+Steht in `named.conf.options` bereits eine `forwarders`-Anweisung,
+bleibt sie unverändert -- sie gehört dem Nutzer, und eine zweite wäre
+ein Syntaxfehler. Findet sich kein vorheriger DNS-Server, wird nichts
+eingetragen und das Protokoll weist darauf hin. In der DLZ-Variante
+passiert dasselbe, dort ist BIND9 der einzige DNS-Server und braucht
+die Weiterleitung genauso.
+
 ## Bauen
 ```sh
 cd dcpromo

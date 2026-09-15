@@ -51,6 +51,7 @@ static const char* SMB_CONF = "/etc/samba/smb.conf";
 static const char* BIND_LOCAL = "/etc/bind/named.conf.local";
 static const char* BIND_OPTIONS = "/etc/bind/named.conf.options";
 static const int BIND_ALT_PORT = 5353; // Port, auf den BIND9 im Win2k-kompatiblen Modus ausweicht
+static const char* RESOLV_CONF_EARLY = "/etc/resolv.conf";
 
 // ---------------------------------------------------------------------
 // Root-Rechte ueber i2ksudo -- identisches Muster wie in dnsmgr/dhcpmgr/
@@ -339,6 +340,62 @@ static void restoreBackupOrLeaveAlone(const FXString& path) {
 	// kein "else rm -f" hier -- absichtlich!
 }
 
+// Ermittelt den DNS-Server, den das System VOR der Heraufstufung
+// benutzt hat -- der wird BIND9s Weiterleitungsziel. Ohne das loest
+// BIND9 selbst ab den Root-Servern auf, was in vielen Netzen nicht
+// funktioniert: dann beantwortet BIND9 alles Externe mit SERVFAIL, und
+// weil Samba im Win2k-Modus genau dorthin weiterleitet, steht der
+// Domaenencontroller ohne Internet-DNS da. Genau das ist bei einem
+// Nutzer passiert.
+//
+// pointDnsAtSelf() ueberschreibt /etc/resolv.conf mit 127.0.0.1 und
+// legt vorher ein Backup an -- deshalb schauen wir in beide Dateien,
+// damit die Reihenfolge der Schritte keine Rolle spielt.
+static FXString detectUpstreamResolver() {
+	// Das Backup zuerst: liegt eins vor, ist dort der urspruengliche
+	// Resolver, waehrend die aktive Datei schon auf 127.0.0.1 zeigt.
+	FXString sources[] = { FXString(RESOLV_CONF_EARLY) + BACKUP_SUFFIX, FXString(RESOLV_CONF_EARLY) };
+	for (int i = 0; i < 2; i++) {
+		std::istringstream iss(readFileUnprivileged(sources[i]));
+		std::string line;
+		while (std::getline(iss, line)) {
+			FXString l = line.c_str();
+			l.trim();
+			if (l.left(11) != "nameserver ") continue;
+			FXString ip = l.mid(11, l.length() - 11);
+			ip.trim();
+			// Uns selbst als Weiterleitungsziel einzutragen ergaebe eine
+			// Schleife -- solche Eintraege ueberspringen.
+			if (ip.left(4) == "127." || ip == "::1" || ip.empty()) continue;
+			return ip;
+		}
+	}
+	return "";
+}
+
+// Traegt die Weiterleitung in named.conf.options ein. Nur, wenn dort
+// noch gar keine steht -- eine zweite forwarders-Anweisung waere ein
+// Syntaxfehler, und eine vorhandene gehoert dem Nutzer.
+static void bindOptionsSetForwarder(std::string& opts, const FXString& resolver, std::string& log) {
+	if (resolver.empty()) {
+		log += "Kein vorheriger DNS-Server gefunden -- BIND9 bekommt keine Weiterleitung.\n"
+		       "Externe Namen lassen sich dann evtl. nicht auflösen; die Weiterleitung\n"
+		       "kann später in /etc/bind/named.conf.options nachgetragen werden.\n";
+		return;
+	}
+	if (opts.find("forwarders") != std::string::npos) {
+		log += "In named.conf.options steht bereits eine Weiterleitung -- bleibt unverändert.\n";
+		return;
+	}
+	std::string line = "forwarders { " + std::string(resolver.text()) + "; };";
+	bindOptionsAddLine(opts, "dnssec-validation auto;", line);
+	// Ohne "forward only" versucht BIND9 bei Problemen zusaetzlich die
+	// Root-Server -- in einem Netz, das das nicht zulaesst, endet das in
+	// langen Wartezeiten und SERVFAIL statt in einer klaren Antwort.
+	bindOptionsAddLine(opts, "dnssec-validation auto;", "forward only;");
+	log += "BIND9 leitet externe Anfragen an " + std::string(resolver.text()) + " weiter.\n";
+}
+
 static bool configureBindForWin2k(FXString& errorMsg) {
 	backupFileOnce(BIND_LOCAL);
 	backupFileOnce(BIND_OPTIONS);
@@ -360,6 +417,7 @@ static bool configureBindForWin2k(FXString& errorMsg) {
 	// nur IPv4!) -- das kollidiert mit Sambas eigenem DNS-Server, der
 	// im Windows-2000-kompatiblen Modus Port 53 fuer sich braucht.
 	bindOptionsAddLine(opts, "dnssec-validation auto;", "listen-on-v6 { none; };");
+	bindOptionsSetForwarder(opts, detectUpstreamResolver(), g_workerLog);
 	return writeFileAsRoot(BIND_OPTIONS, opts);
 }
 
@@ -412,6 +470,9 @@ static bool configureBindForModernAd(const FXString& realm, FXString& errorMsg) 
 	bindOptionsRemoveLineContaining(opts, "listen-on port");
 	bindOptionsAddLine(opts, "dnssec-validation auto;", "tkey-gssapi-keytab \"/var/lib/samba/bind-dns/dns.keytab\";");
 	bindOptionsAddLine(opts, "dnssec-validation auto;", "minimal-responses yes;");
+	// Auch hier noetig: in der DLZ-Variante ist BIND9 der einzige
+	// DNS-Server und muss alles Externe selbst weiterreichen.
+	bindOptionsSetForwarder(opts, detectUpstreamResolver(), g_workerLog);
 	return writeFileAsRoot(BIND_OPTIONS, opts);
 }
 
