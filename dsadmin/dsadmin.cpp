@@ -812,17 +812,19 @@ static std::string generateNewGuidUpper() {
 	return "{" + out + "}";
 }
 
-// Haengt das CSE+Werkzeug-GUID-Paar der Softwareinstallation an
-// gPCMachineExtensionNames/gPCUserExtensionNames an, falls es dort
-// noch nicht steht -- sonst wuerde ein echter Client die Erweiterung
-// nie aufrufen, selbst wenn Pakete vorhanden sind.
-static bool ensureSoftwareInstallExtensionRegistered(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine, std::string& log, FXString& errorMsg) {
+// Haengt ein CSE+Werkzeug-GUID-Paar an gPCMachineExtensionNames/
+// gPCUserExtensionNames an, falls es dort noch nicht steht -- sonst
+// wuerde ein echter Client die jeweilige Erweiterung nie aufrufen,
+// selbst wenn Einstellungen vorhanden sind. Generisch gehalten, damit
+// sowohl Softwareinstallation als auch Skripte (und kuenftige
+// Erweiterungen) dieselbe Funktion nutzen koennen.
+static bool ensureExtensionRegistered(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine,
+                                       const std::string& cseGuid, const std::string& toolGuid, std::string& log, FXString& errorMsg) {
 	std::string attrName = isMachine ? "gPCMachineExtensionNames" : "gPCUserExtensionNames";
-	std::string toolGuid = isMachine ? GPSI_TOOL_GUID_MACHINE : GPSI_TOOL_GUID_USER;
-	std::string ourPair = std::string("[") + GPSI_CSE_GUID + toolGuid + "]";
+	std::string ourPair = std::string("[") + cseGuid + toolGuid + "]";
 
 	std::string curVal = readLdapAttribute(owner, realm, gpoObjectDn, attrName);
-	if (curVal.find(GPSI_CSE_GUID) != std::string::npos) return true; // schon registriert
+	if (curVal.find(cseGuid) != std::string::npos) return true; // schon registriert
 
 	std::string newVal = curVal + ourPair;
 	std::string ldif = "dn: " + gpoObjectDn + "\n"
@@ -830,6 +832,137 @@ static bool ensureSoftwareInstallExtensionRegistered(FXWindow* owner, const FXSt
 	                    "replace: " + attrName + "\n" +
 	                    attrName + ": " + newVal + "\n";
 	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
+}
+
+static bool ensureSoftwareInstallExtensionRegistered(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine, std::string& log, FXString& errorMsg) {
+	std::string toolGuid = isMachine ? GPSI_TOOL_GUID_MACHINE : GPSI_TOOL_GUID_USER;
+	return ensureExtensionRegistered(owner, realm, gpoObjectDn, isMachine, GPSI_CSE_GUID, toolGuid, log, errorMsg);
+}
+
+// ---------------------------------------------------------------------
+// Skripte (An-/Abmeldung, Start/Herunterfahren) -- deutlich einfacher
+// als Softwareinstallation: eine einzige scripts.ini pro Zweig
+// (Computer: Start/Herunterfahren: <GPO>\MACHINE\Scripts\scripts.ini,
+// Benutzer: Anmelden/Abmelden: <GPO>\USER\Scripts\scripts.ini), nach
+// [MS-GPSCR]. Format: Abschnitte [Startup]/[Shutdown] bzw.
+// [Logon]/[Logoff], darin durchnummerierte "<N>CmdLine="/
+// "<N>Parameters="-Paare ab 0. Die Datei ist UTF-16LE mit BOM (0xFFFE)
+// kodiert -- wie Registry.pol.
+// ---------------------------------------------------------------------
+static const char* GPSCR_CSE_GUID = "{42B5FAAE-6536-11D2-AE5A-0000F87571E3}";
+static const char* GPSCR_TOOL_GUID_MACHINE = "{40B6664F-4972-11D1-A7CA-0000F87571E3}";
+static const char* GPSCR_TOOL_GUID_USER = "{40B66650-4972-11D1-A7CA-0000F87571E3}";
+
+struct ScriptEntry { FXString cmdLine, parameters; };
+
+static std::string utf16leToUtf8(const std::string& raw) {
+	std::string out;
+	size_t start = 0;
+	if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE) start = 2;
+	for (size_t i = start; i + 1 < raw.size(); i += 2) {
+		uint16_t u = (uint8_t)raw[i] | ((uint8_t)raw[i + 1] << 8);
+		uint32_t cp = u;
+		if (u >= 0xD800 && u <= 0xDBFF && i + 3 < raw.size()) {
+			uint16_t lo = (uint8_t)raw[i + 2] | ((uint8_t)raw[i + 3] << 8);
+			if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00); i += 2; }
+		}
+		if (cp <= 0x7F) out += (char)cp;
+		else if (cp <= 0x7FF) { out += (char)(0xC0 | (cp >> 6)); out += (char)(0x80 | (cp & 0x3F)); }
+		else if (cp <= 0xFFFF) { out += (char)(0xE0 | (cp >> 12)); out += (char)(0x80 | ((cp >> 6) & 0x3F)); out += (char)(0x80 | (cp & 0x3F)); }
+		else { out += (char)(0xF0 | (cp >> 18)); out += (char)(0x80 | ((cp >> 12) & 0x3F)); out += (char)(0x80 | ((cp >> 6) & 0x3F)); out += (char)(0x80 | (cp & 0x3F)); }
+	}
+	return out;
+}
+
+static std::string utf8ToUtf16leWithBom(const std::string& utf8) {
+	std::string out;
+	out += (char)0xFF; out += (char)0xFE;
+	size_t i = 0, n = utf8.size();
+	while (i < n) {
+		unsigned char c = utf8[i];
+		uint32_t cp = 0; int len = 1;
+		if ((c & 0x80) == 0) { cp = c; len = 1; }
+		else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+		else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+		else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+		else { i++; continue; }
+		if (i + len > n) break;
+		bool ok = true;
+		for (int k = 1; k < len; k++) { unsigned char cc = utf8[i + k]; if ((cc & 0xC0) != 0x80) { ok = false; break; } cp = (cp << 6) | (cc & 0x3F); }
+		if (!ok) { i++; continue; }
+		i += len;
+		auto put16 = [&](uint16_t u) { out += (char)(u & 0xFF); out += (char)((u >> 8) & 0xFF); };
+		if (cp <= 0xFFFF) put16((uint16_t)cp);
+		else { cp -= 0x10000; put16((uint16_t)(0xD800 + (cp >> 10))); put16((uint16_t)(0xDC00 + (cp & 0x3FF))); }
+	}
+	return out;
+}
+
+// Liest eine scripts.ini und liefert je Abschnitt ("Startup",
+// "Shutdown", "Logon", "Logoff") die Liste ihrer Skripte, jeweils
+// nach Index sortiert. Fehlende Datei ist okay (leeres Ergebnis --
+// noch keine Skripte konfiguriert).
+static std::map<std::string, std::vector<ScriptEntry>> parseScriptsIni(const std::string& path) {
+	std::map<std::string, std::vector<ScriptEntry>> out;
+	std::string raw = readFileUnprivileged(path.c_str());
+	if (raw.empty()) return out;
+	std::string utf8 = utf16leToUtf8(raw);
+	std::string curSection;
+	std::map<int, ScriptEntry> curEntries;
+	auto flush = [&]() {
+		if (!curSection.empty()) {
+			std::vector<ScriptEntry> v;
+			for (auto& kv : curEntries) v.push_back(kv.second);
+			out[curSection] = v;
+		}
+		curEntries.clear();
+	};
+	for (auto& lineStr : splitLines(utf8)) {
+		FXString line = lineStr.c_str();
+		line.trim();
+		if (line.empty()) continue;
+		if (line[0] == '[' && line[line.length() - 1] == ']') {
+			flush();
+			curSection = line.mid(1, line.length() - 2).text();
+			continue;
+		}
+		int eq = line.find('=');
+		if (eq < 0) continue;
+		FXString key = line.left(eq);
+		FXString val = line.mid(eq + 1, line.length() - eq - 1);
+		// Schluessel-Form "<N>CmdLine" / "<N>Parameters"
+		int i = 0;
+		while (i < (int)key.length() && isdigit((unsigned char)key[i])) i++;
+		if (i == 0) continue;
+		int idx = atoi(key.left(i).text());
+		FXString rest = key.mid(i, key.length() - i);
+		if (rest == "CmdLine") curEntries[idx].cmdLine = val;
+		else if (rest == "Parameters") curEntries[idx].parameters = val;
+	}
+	flush();
+	return out;
+}
+
+static bool writeScriptsIni(const std::string& path, const std::map<std::string, std::vector<ScriptEntry>>& sections, FXString& errorMsg) {
+	std::string utf8;
+	for (auto& kv : sections) {
+		if (kv.second.empty()) continue;
+		utf8 += "[" + kv.first + "]\r\n";
+		for (size_t i = 0; i < kv.second.size(); i++) {
+			utf8 += std::to_string(i) + "CmdLine=" + kv.second[i].cmdLine.text() + "\r\n";
+			utf8 += std::to_string(i) + "Parameters=" + kv.second[i].parameters.text() + "\r\n";
+		}
+	}
+	std::string encoded = utf8ToUtf16leWithBom(utf8);
+	FXString tmpPath = "/tmp/ice2k-scripts-tmp.ini";
+	std::ofstream out(tmpPath.text(), std::ios::binary);
+	out.write(encoded.data(), (std::streamsize)encoded.size());
+	out.close();
+	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(path.substr(0, path.find_last_of('/')).c_str()) });
+	int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(path.c_str()) });
+	runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
+	if (rc != 0) { errorMsg = "Konnte scripts.ini nicht schreiben."; return false; }
+	return true;
 }
 
 // Legt "CN=Class Store" und "CN=Packages,CN=Class Store" unter dem
@@ -2257,6 +2390,188 @@ public:
 };
 FXIMPLEMENT(SecuritySettingsDialog, FXDialogBox, NULL, 0)
 
+// ---------------------------------------------------------------------
+// Kleiner Dialog zum Hinzufuegen eines Skripts (Pfad + Parameter).
+// ---------------------------------------------------------------------
+class AddScriptDialog : public FXDialogBox {
+	FXDECLARE(AddScriptDialog)
+private:
+	FXTextField *cmdField, *paramField;
+protected:
+	AddScriptDialog() {}
+public:
+	AddScriptDialog(FXWindow* owner, const FXString& title)
+		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER, 0,0,420,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "Skriptname (z.B. \\\\server\\netlogon\\skript.bat):");
+		cmdField = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		new FXLabel(main, "Skriptparameter:");
+		paramField = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	FXString getCmdLine() const { return cmdField->getText(); }
+	FXString getParameters() const { return paramField->getText(); }
+	virtual ~AddScriptDialog() {}
+};
+FXIMPLEMENT(AddScriptDialog, FXDialogBox, NULL, 0)
+
+// ---------------------------------------------------------------------
+// Dialog "Skripte" -- vier einfache Listen (Start/Herunterfahren fuer
+// Computer, Anmelden/Abmelden fuer Benutzer), je Zweig in einer
+// eigenen scripts.ini.
+// ---------------------------------------------------------------------
+class ScriptsDialog : public FXDialogBox {
+	FXDECLARE(ScriptsDialog)
+private:
+	DomainInfo domain;
+	FXString gpoGuid;
+	std::string machinePath, userPath;
+	FXList *startupList, *shutdownList, *logonList, *logoffList;
+protected:
+	ScriptsDialog() {}
+public:
+	enum { ID_ADD_STARTUP = FXDialogBox::ID_LAST, ID_REMOVE_STARTUP, ID_ADD_SHUTDOWN, ID_REMOVE_SHUTDOWN,
+	       ID_ADD_LOGON, ID_REMOVE_LOGON, ID_ADD_LOGOFF, ID_REMOVE_LOGOFF, ID_SAVE };
+	long onSave(FXObject*, FXSelector, void*) {
+		if (saveAll()) {
+			FXMessageBox::information(this, MBOX_OK, "Gespeichert", "Die Skripte wurden gespeichert.");
+		}
+		return 1;
+	}
+
+	void reload() {
+		auto machineSections = parseScriptsIni(machinePath);
+		startupList->clearItems();
+		for (auto& e : machineSections["Startup"]) startupList->appendItem(e.cmdLine + " " + e.parameters);
+		shutdownList->clearItems();
+		for (auto& e : machineSections["Shutdown"]) shutdownList->appendItem(e.cmdLine + " " + e.parameters);
+
+		auto userSections = parseScriptsIni(userPath);
+		logonList->clearItems();
+		for (auto& e : userSections["Logon"]) logonList->appendItem(e.cmdLine + " " + e.parameters);
+		logoffList->clearItems();
+		for (auto& e : userSections["Logoff"]) logoffList->appendItem(e.cmdLine + " " + e.parameters);
+	}
+
+	bool saveBranch(bool isMachine, const std::string& sectionName1, const std::vector<ScriptEntry>& entries1,
+	                 const std::string& sectionName2, const std::vector<ScriptEntry>& entries2) {
+		std::string path = isMachine ? machinePath : userPath;
+		auto sections = parseScriptsIni(path);
+		sections[sectionName1] = entries1;
+		sections[sectionName2] = entries2;
+		FXString errorMsg;
+		if (!writeScriptsIni(path, sections, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return false; }
+		std::string log;
+		std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+		std::string toolGuid = isMachine ? GPSCR_TOOL_GUID_MACHINE : GPSCR_TOOL_GUID_USER;
+		ensureExtensionRegistered(this, domain.realm, gpoObjectDn, isMachine, GPSCR_CSE_GUID, toolGuid, log, errorMsg);
+		return true;
+	}
+
+	std::vector<ScriptEntry> listToEntries(FXList* list) {
+		(void)list;
+		return {};
+	}
+
+	long onAdd(FXList* list, const FXString& title) {
+		AddScriptDialog dlg(this, title);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		if (dlg.getCmdLine().trim().empty()) return 1;
+		list->appendItem(dlg.getCmdLine() + " " + dlg.getParameters());
+		return 1;
+	}
+	long onAddStartup(FXObject*, FXSelector, void*) { return onAdd(startupList, "Startskript hinzufügen"); }
+	long onAddShutdown(FXObject*, FXSelector, void*) { return onAdd(shutdownList, "Herunterfahrskript hinzufügen"); }
+	long onAddLogon(FXObject*, FXSelector, void*) { return onAdd(logonList, "Anmeldeskript hinzufügen"); }
+	long onAddLogoff(FXObject*, FXSelector, void*) { return onAdd(logoffList, "Abmeldeskript hinzufügen"); }
+	long onRemoveStartup(FXObject*, FXSelector, void*) { int i = startupList->getCurrentItem(); if (i >= 0) startupList->removeItem(i); return 1; }
+	long onRemoveShutdown(FXObject*, FXSelector, void*) { int i = shutdownList->getCurrentItem(); if (i >= 0) shutdownList->removeItem(i); return 1; }
+	long onRemoveLogon(FXObject*, FXSelector, void*) { int i = logonList->getCurrentItem(); if (i >= 0) logonList->removeItem(i); return 1; }
+	long onRemoveLogoff(FXObject*, FXSelector, void*) { int i = logoffList->getCurrentItem(); if (i >= 0) logoffList->removeItem(i); return 1; }
+
+	ScriptsDialog(FXWindow* owner, const DomainInfo& domain_, const FXString& gpoGuid_)
+		: FXDialogBox(owner, "Skripte", DECOR_ALL, 0,0,480,460),
+		  domain(domain_), gpoGuid(gpoGuid_) {
+		FXString realmLower = domain.realm; realmLower.lower();
+		std::string sysvolBase = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(gpoGuid.text());
+		machinePath = sysvolBase + "/MACHINE/Scripts/scripts.ini";
+		userPath = sysvolBase + "/USER/Scripts/scripts.ini";
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		new FXTabItem(tabs, "Computerkonfiguration");
+		FXVerticalFrame* machinePage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXLabel(machinePage, "Startskripte:");
+		startupList = new FXList(machinePage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
+		FXHorizontalFrame* sbtn = new FXHorizontalFrame(machinePage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
+		new FXButton(sbtn, "&Hinzufügen...", NULL, this, ID_ADD_STARTUP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(sbtn, "&Entfernen", NULL, this, ID_REMOVE_STARTUP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXLabel(machinePage, "Herunterfahrskripte:");
+		shutdownList = new FXList(machinePage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
+		FXHorizontalFrame* dbtn = new FXHorizontalFrame(machinePage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
+		new FXButton(dbtn, "H&inzufügen...", NULL, this, ID_ADD_SHUTDOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(dbtn, "E&ntfernen", NULL, this, ID_REMOVE_SHUTDOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+
+		new FXTabItem(tabs, "Benutzerkonfiguration");
+		FXVerticalFrame* userPage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXLabel(userPage, "Anmeldeskripte:");
+		logonList = new FXList(userPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
+		FXHorizontalFrame* lonbtn = new FXHorizontalFrame(userPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
+		new FXButton(lonbtn, "Hin&zufügen...", NULL, this, ID_ADD_LOGON, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(lonbtn, "Ent&fernen", NULL, this, ID_REMOVE_LOGON, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXLabel(userPage, "Abmeldeskripte:");
+		logoffList = new FXList(userPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
+		FXHorizontalFrame* lofbtn = new FXHorizontalFrame(userPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
+		new FXButton(lofbtn, "Hinz&ufügen...", NULL, this, ID_ADD_LOGOFF, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(lofbtn, "Entf&ernen", NULL, this, ID_REMOVE_LOGOFF, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "&Speichern", NULL, this, ID_SAVE, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+
+		reload();
+	}
+	// Parst eine Listeneintrag-Zeile ("cmd param param2") wieder in
+	// CmdLine/Parameters -- erstes Leerzeichen trennt.
+	static ScriptEntry parseListLine(const FXString& line) {
+		ScriptEntry e;
+		int sp = line.find(' ');
+		if (sp < 0) { e.cmdLine = line; return e; }
+		e.cmdLine = line.left(sp);
+		e.parameters = line.mid(sp + 1, line.length() - sp - 1);
+		return e;
+	}
+	std::vector<ScriptEntry> listEntries(FXList* list) {
+		std::vector<ScriptEntry> out;
+		for (int i = 0; i < list->getNumItems(); i++) out.push_back(parseListLine(list->getItemText(i)));
+		return out;
+	}
+	bool saveAll() {
+		bool ok = true;
+		ok &= saveBranch(true, "Startup", listEntries(startupList), "Shutdown", listEntries(shutdownList));
+		ok &= saveBranch(false, "Logon", listEntries(logonList), "Logoff", listEntries(logoffList));
+		return ok;
+	}
+	virtual ~ScriptsDialog() {}
+};
+FXDEFMAP(ScriptsDialog) ScriptsDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_STARTUP, ScriptsDialog::onAddStartup),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_STARTUP, ScriptsDialog::onRemoveStartup),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_SHUTDOWN, ScriptsDialog::onAddShutdown),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_SHUTDOWN, ScriptsDialog::onRemoveShutdown),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_LOGON, ScriptsDialog::onAddLogon),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_LOGON, ScriptsDialog::onRemoveLogon),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_LOGOFF, ScriptsDialog::onAddLogoff),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_LOGOFF, ScriptsDialog::onRemoveLogoff),
+	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_SAVE, ScriptsDialog::onSave),
+};
+FXIMPLEMENT(ScriptsDialog, FXDialogBox, ScriptsDialogMap, ARRAYNUMBER(ScriptsDialogMap))
+
 class PropertiesDialog : public FXDialogBox {
 	FXDECLARE(PropertiesDialog)
 private:
@@ -2266,13 +2581,14 @@ private:
 	std::vector<FXString> linkedGuids;
 	std::map<FXString, FXString> guidToName;
 public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS };
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS };
 	long onNewGpo(FXObject*, FXSelector, void*);
 	long onAddGpo(FXObject*, FXSelector, void*);
 	long onRemoveGpo(FXObject*, FXSelector, void*);
 	long onEditGpo(FXObject*, FXSelector, void*);
 	long onInstallSoftware(FXObject*, FXSelector, void*);
 	long onSecuritySettings(FXObject*, FXSelector, void*);
+	long onScripts(FXObject*, FXSelector, void*);
 
 	void reloadList() {
 		gpoList->clearItems();
@@ -2289,7 +2605,7 @@ protected:
 	PropertiesDialog() {}
 public:
 	PropertiesDialog(FXWindow* owner, const FXString& title, const FXString& fullDN, const FXString& realm_)
-		: FXDialogBox(owner, FXString("Eigenschaften von ") + title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,500,420),
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,580,420),
 		  containerFullDN(fullDN), realm(realm_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
 		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
@@ -2305,6 +2621,7 @@ public:
 		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Software...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "S&icherheit...", NULL, this, ID_SECURITY_SETTINGS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "S&kripte...", NULL, this, ID_SCRIPTS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -2321,6 +2638,7 @@ FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_EDIT_GPO, PropertiesDialog::onEditGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_INSTALL_SOFTWARE, PropertiesDialog::onInstallSoftware),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SECURITY_SETTINGS, PropertiesDialog::onSecuritySettings),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SCRIPTS, PropertiesDialog::onScripts),
 };
 FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
 
@@ -2436,6 +2754,23 @@ long PropertiesDialog::onSecuritySettings(FXObject*, FXSelector, void*) {
 		"Hinweis: Diese Einstellungen gelten domänenweit (wie unter\n"
 		"Windows 2000/2003) und werden über die Default Domain Policy\n"
 		"durchgesetzt, unabhängig davon, welches GPO gerade geöffnet ist.");
+	return 1;
+}
+
+long PropertiesDialog::onScripts(FXObject*, FXSelector, void*) {
+	int idx = gpoList->getCurrentItem();
+	if (idx < 0 || idx >= (int)linkedGuids.size()) {
+		FXMessageBox::information(this, MBOX_OK, "Kein GPO ausgewählt", "Bitte zuerst ein Gruppenrichtlinienobjekt aus der Liste auswählen.");
+		return 1;
+	}
+	FXString guid = linkedGuids[idx];
+	DomainInfo domain = detectDomain();
+	if (domain.realm.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "Domäne konnte nicht ermittelt werden.");
+		return 1;
+	}
+	ScriptsDialog dlg(this, domain, guid);
+	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
 
