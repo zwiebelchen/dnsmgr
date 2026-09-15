@@ -78,7 +78,11 @@ selbst in `gPCMachineExtensionNames`/`gPCUserExtensionNames` des GPOs
 ein -- ohne diesen Eintrag würde ein echter Client die Erweiterung nie
 aufrufen, selbst wenn die Einstellungen vorhanden sind.
 
-- **Softwareinstallation** (nach [MS-GPSI]): legt ein
+- **Softwareinstallation** (nach [MS-GPSI]): "Durchsuchen..." startet im
+  zuletzt benutzten Verzeichnis (sonst `/srv/freigaben`) und schlägt
+  nach der Auswahl den UNC-Pfad vor -- dazu wird in der `smb.conf` die
+  Freigabe gesucht, unter der die Datei liegt (bei verschachtelten
+  Freigaben gewinnt die längste Übereinstimmung). legt ein
   `packageRegistration`-Objekt per LDAP in AD an und schreibt die
   zugehörige `.aas`-Datei ins SYSVOL. Die nötigen Objektklassen sind
   Teil des Standard-AD-Schemas und bei Samba bereits vorhanden.

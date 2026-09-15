@@ -2476,6 +2476,51 @@ FXIMPLEMENT(AdmEditorDialog, FXDialogBox, AdmEditorDialogMap, ARRAYNUMBER(AdmEdi
 // minimale erste Version: lokaler Pfad (zum Lesen der .msi-Metadaten)
 // + UNC-Pfad (wie ein Client zugreift) + Zuweisen/Veroeffentlichen.
 // ---------------------------------------------------------------------
+// Sucht in der smb.conf eine Freigabe, unter deren "path" die gewaehlte
+// Datei liegt, und baut daraus den UNC-Pfad. Liefert "" wenn keine
+// passende Freigabe existiert -- dann muss der Benutzer selbst wissen,
+// wie die Clients an die Datei kommen.
+static FXString suggestUncPath(const FXString& localFile) {
+	std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
+	if (conf.empty()) return "";
+
+	char host[256] = { 0 };
+	if (gethostname(host, sizeof(host) - 1) != 0) return "";
+	FXString shortHost = FXString(host).section('.', 0);
+
+	FXString bestShare, bestPath;
+	FXString currentShare;
+	std::istringstream iss(conf);
+	std::string line;
+	while (std::getline(iss, line)) {
+		FXString l = line.c_str();
+		l.trim();
+		if (l.left(1) == "[" && l.right(1) == "]") {
+			currentShare = l.mid(1, l.length() - 2);
+			continue;
+		}
+		if (currentShare.empty()) continue;
+		FXint eq = l.find('=');
+		if (eq < 0) continue;
+		FXString key = l.left(eq); key.trim(); key.lower();
+		if (key != "path") continue;
+		FXString val = l.mid(eq + 1, l.length() - eq - 1); val.trim();
+		if (val.empty()) continue;
+
+		// Passt der Anfang, und zwar an einer Verzeichnisgrenze?
+		if (localFile.left(val.length()) != val) continue;
+		if (localFile.length() > val.length() && localFile[val.length()] != '/' && val.right(1) != "/") continue;
+		// Die laengste passende Freigabe gewinnt (verschachtelte Pfade).
+		if (val.length() > bestPath.length()) { bestPath = val; bestShare = currentShare; }
+	}
+	if (bestShare.empty()) return "";
+
+	FXString rest = localFile.mid(bestPath.length(), localFile.length() - bestPath.length());
+	while (rest.left(1) == "/") rest = rest.mid(1, rest.length() - 1);
+	rest.substitute('/', '\\', true);
+	return FXString("\\\\") + shortHost + "\\" + bestShare + (rest.empty() ? FXString("") : FXString("\\") + rest);
+}
+
 class SoftwareInstallDialog : public FXDialogBox {
 	FXDECLARE(SoftwareInstallDialog)
 private:
@@ -2487,8 +2532,29 @@ protected:
 public:
 	enum { ID_BROWSE = FXDialogBox::ID_LAST };
 	long onBrowse(FXObject*, FXSelector, void*) {
-		FXString picked = FXFileDialog::getOpenFilename(this, ".msi-Datei auswählen", FXSystem::getHomeDirectory(), "MSI-Dateien (*.msi)");
-		if (!picked.empty()) localPathField->setText(picked);
+		// Dort weitersuchen, wo der Benutzer zuletzt war: eingetippter
+		// Pfad vor Freigabenverzeichnis vor Home.
+		FXString start = localPathField->getText();
+		if (!start.empty()) {
+			start = FXPath::directory(start);
+			if (!FXStat::isDirectory(start)) start = "";
+		}
+		if (start.empty() && FXStat::isDirectory("/srv/freigaben")) start = "/srv/freigaben";
+		if (start.empty()) start = FXSystem::getHomeDirectory();
+
+		FXString picked = FXFileDialog::getOpenFilename(this, ".msi-Datei auswählen", start,
+		                                                 "MSI-Dateien (*.msi)\nAlle Dateien (*)");
+		if (picked.empty()) return 1;
+		localPathField->setText(picked);
+
+		// Wenn die Datei unter einer bekannten Freigabe liegt, den
+		// UNC-Pfad gleich vorschlagen -- das ist die Angabe, die der
+		// Client spaeter wirklich benutzt, und sie von Hand zu tippen ist
+		// die fehleranfaelligste Stelle des Dialogs.
+		if (uncPathField->getText().empty()) {
+			FXString unc = suggestUncPath(picked);
+			if (!unc.empty()) uncPathField->setText(unc);
+		}
 		return 1;
 	}
 	SoftwareInstallDialog(FXWindow* owner)
@@ -2523,7 +2589,13 @@ public:
 	}
 	virtual ~SoftwareInstallDialog() { delete modeTarget; }
 };
-FXIMPLEMENT(SoftwareInstallDialog, FXDialogBox, NULL, 0)
+// Ohne diese Tabelle laeuft der Klick auf "Durchsuchen..." ins Leere:
+// FXIMPLEMENT stand hier mit einer leeren Map, onBrowse war damit toter
+// Code.
+FXDEFMAP(SoftwareInstallDialog) SoftwareInstallDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, SoftwareInstallDialog::ID_BROWSE, SoftwareInstallDialog::onBrowse),
+};
+FXIMPLEMENT(SoftwareInstallDialog, FXDialogBox, SoftwareInstallDialogMap, ARRAYNUMBER(SoftwareInstallDialogMap))
 
 // ---------------------------------------------------------------------
 // Dialog zur Verwaltung der Softwarepakete eines GPOs -- getrennte
