@@ -98,6 +98,26 @@ aufrufen, selbst wenn die Einstellungen vorhanden sind.
   bewusst nur mit dem sichersten Standard-Flag (0), da die genaue
   Bit-Bedeutung öffentlich nicht vollständig dokumentiert ist.
 
+## Versionszähler
+
+Jede Änderung an einem GPO erhöht dessen Versionszähler, und zwar an
+beiden Stellen: im AD-Attribut `versionNumber` und in der `GPT.INI` im
+SYSVOL, die denselben Wert bekommt. Das obere Halbwort zählt die
+Benutzer-, das untere die Computerkonfiguration.
+
+Das ist nicht optional: ein Client merkt sich pro GPO die zuletzt
+verarbeitete Version und überspringt es beim nächsten Start
+vollständig, wenn sie unverändert ist. Wurde ein GPO also einmal leer
+verarbeitet und danach ein Paket hinzugefügt, ohne die Nummer zu
+erhöhen, passiert nie wieder etwas -- egal wie oft neu gestartet wird.
+Genau das ist in der Praxis aufgetreten: der Zähler wurde nur beim
+Speichern im Editor der administrativen Vorlagen erhöht, nicht bei
+Softwareinstallation, Skripten oder Ordnerumleitung, und das
+AD-Attribut gar nicht.
+
+Schlägt das Schreiben in AD fehl, bleibt die `GPT.INI` absichtlich
+unverändert, damit beide Stellen zusammenpassen.
+
 LDAP-Schreibzugriffe laufen über `ldapadd`/`ldapmodify` gegen den
 lokalen Samba-DC und brauchen -- wie GPOs selbst -- echte
 Administrator-Anmeldedaten; root allein genügt dafür nicht.

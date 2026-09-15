@@ -962,8 +962,79 @@ static std::string generateNewGuidUpper() {
 // selbst wenn Einstellungen vorhanden sind. Generisch gehalten, damit
 // sowohl Softwareinstallation als auch Skripte (und kuenftige
 // Erweiterungen) dieselbe Funktion nutzen koennen.
-static bool ensureExtensionRegistered(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine,
-                                       const std::string& cseGuid, const std::string& toolGuid, std::string& log, FXString& errorMsg) {
+static void writeGptIniVersion(const std::string& gptIniPath, uint32_t newVersion); // weiter unten definiert
+
+// Basis-DN aus dem Realm ableiten: LINUX.ZWIEBELCHEN.ORG ->
+// DC=linux,DC=zwiebelchen,DC=org
+static std::string baseDnFromRealm(const FXString& realm) {
+	FXString lower = realm; lower.lower();
+	std::string out;
+	for (FXint i = 0; i <= lower.contains('.'); i++) {
+		FXString part = lower.section('.', i);
+		if (part.empty()) continue;
+		if (!out.empty()) out += ",";
+		out += "DC=" + std::string(part.text());
+	}
+	return out;
+}
+
+static std::string guidFromGpoDn(const std::string& dn) {
+	if (dn.compare(0, 3, "CN=") != 0) return "";
+	size_t end = dn.find(',');
+	if (end == std::string::npos) return "";
+	return dn.substr(3, end - 3);
+}
+
+// ---------------------------------------------------------------------
+// Versionszaehler eines GPOs erhoehen -- AN BEIDEN STELLEN.
+//
+// Ein Client merkt sich pro GPO die zuletzt verarbeitete Version und
+// ueberspringt es beim naechsten Start vollstaendig, wenn sie sich nicht
+// geaendert hat. Wird die Nummer nach einer Aenderung nicht erhoeht,
+// passiert also nie wieder etwas, egal wie oft neu gestartet wird --
+// genau dieser Fall ist einem Nutzer begegnet, nachdem ein Paket zu
+// einem GPO hinzugefuegt wurde, das der Client vorher schon leer
+// verarbeitet hatte.
+//
+// Massgeblich ist das AD-Attribut versionNumber; die GPT.INI im SYSVOL
+// bekommt denselben Wert. Schlaegt das Schreiben in AD fehl, bleibt die
+// GPT.INI absichtlich unangetastet, damit beide konsistent bleiben.
+// ---------------------------------------------------------------------
+static void bumpGpoVersion(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn,
+                           bool machine, bool user, std::string& log) {
+	if (!machine && !user) return;
+
+	std::string cur = trimStr(readLdapAttribute(owner, realm, gpoObjectDn, "versionNumber"));
+	uint32_t version = 0;
+	try { version = (uint32_t)std::stoul(cur); } catch (...) {}
+
+	uint32_t machineVer = version & 0xFFFF;
+	uint32_t userVer = (version >> 16) & 0xFFFF;
+	if (machine) machineVer++;
+	if (user) userVer++;
+	uint32_t newVersion = (userVer << 16) | machineVer;
+
+	std::string ldif = "dn: " + gpoObjectDn + "\n"
+	                    "changetype: modify\n"
+	                    "replace: versionNumber\n"
+	                    "versionNumber: " + std::to_string(newVersion) + "\n";
+	FXString errorMsg;
+	if (!runLdapChange(owner, realm, ldif, false, log, errorMsg)) {
+		log += "Konnte versionNumber in AD nicht setzen: " + std::string(errorMsg.text()) + "\n"
+		       "Die GPT.INI bleibt deshalb unveraendert, damit beide Stellen zusammenpassen.\n";
+		return;
+	}
+
+	std::string guid = guidFromGpoDn(gpoObjectDn);
+	if (guid.empty()) return;
+	FXString realmLower = realm; realmLower.lower();
+	writeGptIniVersion("/var/lib/samba/sysvol/" + std::string(realmLower.text()) +
+	                    "/Policies/" + guid + "/GPT.INI", newVersion);
+	log += "GPO-Version auf " + std::to_string(newVersion) + " erhoeht (AD und GPT.INI).\n";
+}
+
+static bool registerExtensionOnly(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine,
+                                   const std::string& cseGuid, const std::string& toolGuid, std::string& log, FXString& errorMsg) {
 	std::string attrName = isMachine ? "gPCMachineExtensionNames" : "gPCUserExtensionNames";
 	std::string ourPair = std::string("[") + cseGuid + toolGuid + "]";
 
@@ -976,6 +1047,16 @@ static bool ensureExtensionRegistered(FXWindow* owner, const FXString& realm, co
 	                    "replace: " + attrName + "\n" +
 	                    attrName + ": " + newVal + "\n";
 	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
+}
+
+// Jede Aenderung an einer Erweiterung laeuft hier durch: erst die CSE
+// registrieren (falls noch nicht geschehen), dann in jedem Fall den
+// Versionszaehler erhoehen.
+static bool ensureExtensionRegistered(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine,
+                                       const std::string& cseGuid, const std::string& toolGuid, std::string& log, FXString& errorMsg) {
+	if (!registerExtensionOnly(owner, realm, gpoObjectDn, isMachine, cseGuid, toolGuid, log, errorMsg)) return false;
+	bumpGpoVersion(owner, realm, gpoObjectDn, isMachine, !isMachine, log);
+	return true;
 }
 
 static bool ensureSoftwareInstallExtensionRegistered(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine, std::string& log, FXString& errorMsg) {
@@ -2085,27 +2166,14 @@ FXDEFMAP(PolicyEditDialog) PolicyEditDialogMap[] = {
 FXIMPLEMENT(PolicyEditDialog, FXDialogBox, PolicyEditDialogMap, ARRAYNUMBER(PolicyEditDialogMap))
 
 // ---------------------------------------------------------------------
-// GPT.INI-Versionszaehler erhoehen -- damit ein echter Client erkennt,
-// dass sich die Gruppenrichtlinie geaendert hat und neu angewendet
-// werden muss. Format: 32-Bit-Zahl, oberes Halbwort = Benutzer-Version,
-// unteres Halbwort = Computer-Version (wir erhoehen hier nur die
-// Computer-Version, da dieser Editor sich vorerst auf
-// Computerkonfiguration beschraenkt).
+// Schreibt die GPT.INI mit einem VORGEGEBENEN Versionswert. Der Wert
+// wird nicht mehr hier ermittelt, sondern aus dem AD-Attribut
+// versionNumber abgeleitet -- beide Stellen muessen uebereinstimmen,
+// sonst haelt ein echter Client das GPO fuer widerspruechlich.
+// Format der Zahl: oberes Halbwort = Benutzer-Version, unteres Halbwort
+// = Computer-Version.
 // ---------------------------------------------------------------------
-static void bumpGptIniVersion(const std::string& gptIniPath, bool bumpMachine, bool bumpUser) {
-	std::string content = readFileUnprivileged(gptIniPath.c_str());
-	uint32_t version = 0;
-	size_t pos = content.find("Version=");
-	if (pos != std::string::npos) {
-		size_t start = pos + 8, end = start;
-		while (end < content.size() && isdigit((unsigned char)content[end])) end++;
-		try { version = (uint32_t)std::stoul(content.substr(start, end - start)); } catch (...) {}
-	}
-	uint32_t machineVer = version & 0xFFFF;
-	uint32_t userVer = (version >> 16) & 0xFFFF;
-	if (bumpMachine) machineVer++;
-	if (bumpUser) userVer++;
-	uint32_t newVersion = (userVer << 16) | machineVer;
+static void writeGptIniVersion(const std::string& gptIniPath, uint32_t newVersion) {
 	std::string newContent = "[General]\r\nVersion=" + std::to_string(newVersion) + "\r\n";
 
 	FXString tmpPath = "/tmp/ice2k-gptini-tmp";
@@ -2141,6 +2209,8 @@ private:
 	FXIconList* list;
 	PolHive machineHive, userHive;
 	std::string gptIniPath;
+	std::string gpoObjectDn;   // fuer das Hochzaehlen von versionNumber in AD
+	FXString realm;
 	std::map<FXTreeItem*, std::tuple<AdmCategory*, std::vector<const AdmCategory*>, PolHive*>> itemInfo;
 	std::vector<AdmPolicy*> currentPolicies;
 	std::vector<std::string> currentEffectiveKeys;
@@ -2394,7 +2464,8 @@ public:
 			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.c_str());
 			return 1;
 		}
-		bumpGptIniVersion(gptIniPath, touchedMachine, touchedUser);
+		std::string versionLog;
+		bumpGpoVersion(this, realm, gpoObjectDn, touchedMachine, touchedUser, versionLog);
 
 		edits.clear();
 		editHive.clear();
@@ -2409,9 +2480,10 @@ public:
 	}
 
 	AdmEditorDialog(FXWindow* owner, std::vector<AdmCategory>&& machineCats, std::vector<AdmCategory>&& userCats,
-	                const std::string& machinePolPath, const std::string& userPolPath, const std::string& gptIniPath_)
+	                const std::string& machinePolPath, const std::string& userPolPath, const std::string& gptIniPath_,
+	                const std::string& gpoObjectDn_, const FXString& realm_)
 		: FXDialogBox(owner, "Gruppenrichtlinienobjekt-Editor", DECOR_ALL, 0,0,760,480),
-		  gptIniPath(gptIniPath_) {
+		  gptIniPath(gptIniPath_), gpoObjectDn(gpoObjectDn_), realm(realm_) {
 		machineHive.categories = std::move(machineCats);
 		machineHive.polPath = machinePolPath;
 		machineHive.file = parseRegPolFile(machinePolPath); // leer/fehlend ist okay -- noch keine Einstellungen
@@ -3173,7 +3245,9 @@ long PropertiesDialog::onEditGpo(FXObject*, FXSelector, void*) {
 		FXMessageBox::error(this, MBOX_OK, "Fehler", "Keine Kategorien aus den ADM-Dateien geladen (Parserfehler oder leeres ADM-Verzeichnis?).");
 		return 1;
 	}
-	AdmEditorDialog dlg(this, std::move(machineCats), std::move(userCats), machinePolPath, userPolPath, gptIniPath);
+	std::string gpoObjectDn = "CN=" + std::string(guid.text()) + ",CN=Policies,CN=System," + baseDnFromRealm(realm);
+	AdmEditorDialog dlg(this, std::move(machineCats), std::move(userCats), machinePolPath, userPolPath, gptIniPath,
+	                     gpoObjectDn, realm);
 	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
