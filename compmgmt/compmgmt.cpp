@@ -1,8 +1,9 @@
 // compmgmt.cpp
 //
 // Computerverwaltung fuer ice2k -- Nachbau des Windows 2000
-// "Computerverwaltung"-MMC-Snapins, Zweig "Lokale Benutzer und Gruppen".
-// ("Freigegebene Ordner" folgt in einem spaeteren Schritt.)
+// "Computerverwaltung"-MMC-Snapins, Zweige "Lokale Benutzer und
+// Gruppen" und "Freigegebene Ordner" (Freigaben aus der smb.conf,
+// Sitzungen/Geoeffnete Dateien live aus smbstatus).
 //
 // Backend: echte Linux-Benutzer/-Gruppen (useradd/usermod/userdel/
 // groupadd/groupdel/gpasswd) UND parallel dazu Samba (smbpasswd/

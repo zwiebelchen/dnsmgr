@@ -22,9 +22,8 @@ Domänendatenbank. `dsadmin` übernimmt genau das: die Verwaltung von
 - **Neu**: Benutzer/Gruppe/Organisationseinheit anlegen
 - **Löschen** für Benutzer/Gruppe/Organisationseinheit
 - **Eigenschaften** mit dem **"Gruppenrichtlinie"**-Reiter (GPOs
-  anlegen/verknüpfen/lösen über `samba-tool gpo`) -- der eigentliche
-  Editor der Administrativen Vorlagen ist ein eigener, späterer
-  Baustein (siehe unten)
+  anlegen/verknüpfen/lösen über `samba-tool gpo`) und dem
+  vollständigen Gruppenrichtlinienobjekt-Editor dahinter (siehe unten)
 
 ## Gruppenrichtlinienobjekt-Editor
 
@@ -51,6 +50,34 @@ geänderten Zweig erhöht.
 
 Bekannte Grenzen dieser Version: keine Mehrfachauswahl/Verschieben von
 Richtlinien.
+
+## Weitere Gruppenrichtlinien-Erweiterungen
+
+Neben den Administrativen Vorlagen sind drei weitere
+Client Side Extensions umgesetzt. Alle drei tragen sich bei Bedarf
+selbst in `gPCMachineExtensionNames`/`gPCUserExtensionNames` des GPOs
+ein -- ohne diesen Eintrag würde ein echter Client die Erweiterung nie
+aufrufen, selbst wenn die Einstellungen vorhanden sind.
+
+- **Softwareinstallation** (nach [MS-GPSI]): legt ein
+  `packageRegistration`-Objekt per LDAP in AD an und schreibt die
+  zugehörige `.aas`-Datei ins SYSVOL. Die nötigen Objektklassen sind
+  Teil des Standard-AD-Schemas und bei Samba bereits vorhanden.
+- **Skripte** (nach [MS-GPSCR]): An-/Abmeldung für die Benutzer-,
+  Start/Herunterfahren für die Computerkonfiguration, je eine
+  `scripts.ini` pro Zweig (UTF-16LE mit BOM, durchnummerierte
+  `CmdLine`/`Parameters`-Paare).
+- **Ordnerumleitung** (nach [MS-GPFR], "Version Zero" -- die einzige
+  Version, die Windows 2000 beherrscht): Eigene Dateien, Eigene
+  Bilder, Startmenü, Anwendungsdaten und Desktop. Der Zielpfad selbst
+  läuft ganz normal über die `User Shell Folders`-Werte in der
+  `Registry.pol`; zusätzlich wird eine `fdeploy.ini` geschrieben,
+  bewusst nur mit dem sichersten Standard-Flag (0), da die genaue
+  Bit-Bedeutung öffentlich nicht vollständig dokumentiert ist.
+
+LDAP-Schreibzugriffe laufen über `ldapadd`/`ldapmodify` gegen den
+lokalen Samba-DC und brauchen -- wie GPOs selbst -- echte
+Administrator-Anmeldedaten; root allein genügt dafür nicht.
 
 ## Gruppenmitgliedschaft
 
@@ -87,9 +114,6 @@ make
 ```
 
 ## Bekannte Grenzen
-- Der eigentliche Editor der Administrativen Vorlagen (ADM-Format,
-  `registry.pol`-Schreiber) ist noch nicht umgesetzt -- kommt als
-  eigener, späterer Baustein.
 - Nur eine Ebene von Organisationseinheiten unter der Domänenwurzel
   wird im Baum abgebildet (keine rekursive Verschachtelung).
 - Kein Umbenennen, kein Verschieben zwischen Containern/OUs.

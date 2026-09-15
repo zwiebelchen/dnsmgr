@@ -1,8 +1,8 @@
 # compmgmt -- Computerverwaltung für ice2k
 
 Ein Nachbau des Windows-2000-"Computerverwaltung"-Snapins (MMC) für
-[ice2k](https://github.com/comdlg32/ice2k), Zweig **"Lokale Benutzer
-und Gruppen"** ("Freigegebene Ordner" folgt als nächster Schritt).
+[ice2k](https://github.com/comdlg32/ice2k), Zweige **"Lokale Benutzer
+und Gruppen"** und **"Freigegebene Ordner"**.
 Gebaut mit demselben FOX-Toolkit-Muster wie `dnsmgr`/`dhcpmgr`.
 Backend: **echte Linux-Benutzer/-Gruppen**, parallel dazu **Samba**
 (`smbpasswd`/`pdbedit`) synchron gehalten.
@@ -27,7 +27,8 @@ Anmeldung, gültig für Konsole **und** Netzwerkfreigaben), legt
   `dnsmgr`/`dhcpmgr`
 - Baumansicht wie im Original: Computerverwaltung (Lokal) ->
   Systemprogramme -> Lokale Benutzer und Gruppen -> **Benutzer** /
-  **Gruppen**
+  **Gruppen** sowie Systemprogramme -> Freigegebene Ordner ->
+  **Freigaben** / **Sitzungen** / **Geöffnete Dateien**
 - Root-Rechte beim Start über `i2ksudo` (identisches Muster wie
   `dnsmgr`/`dhcpmgr`)
 - Benutzerliste zeigt **alle** Linux-Konten (auch Systemkonten wie
@@ -47,6 +48,31 @@ Anmeldung, gültig für Konsole **und** Netzwerkfreigaben), legt
 - **Löschen** (`userdel -r` + `smbpasswd -x`)
 - Gruppen: **Neue Gruppe...**, **Eigenschaften** mit Mitgliederliste
   (Hinzufügen/Entfernen, per `gpasswd -M` gespeichert), **Löschen**
+
+## Freigegebene Ordner
+
+Der zweite Zweig bildet "Freigegebene Ordner" nach. Backend sind
+direkt die Freigabe-Abschnitte der `/etc/samba/smb.conf` sowie
+`smbstatus` für die Laufzeitdaten.
+
+- **Freigaben**: Liste mit Freigabename/Ordnerpfad/Beschreibung.
+  "Neue Freigabe..." (Ordner auswählen, Name, Beschreibung,
+  Schreibschutz) hängt einen neuen Abschnitt an die `smb.conf` an --
+  der Dialog bleibt nach dem Anlegen offen, damit sich mehrere
+  Freigaben hintereinander erstellen lassen. "Eigenschaften" bearbeitet
+  Pfad/Beschreibung/Schreibschutz durch gezieltes Ersetzen der
+  betroffenen Zeilen; "Freigabe aufheben" entfernt den Abschnitt
+  wieder. Der Freigabename selbst bleibt fest -- wie im Original muss
+  man dafür aufheben und neu anlegen.
+- Die technischen Abschnitte `[global]`, `[homes]`, `[printers]`,
+  `[print$]`, `[sysvol]` und `[netlogon]` werden ausgeblendet, analog
+  dazu, dass das Original administrative Freigaben wie `C$`
+  standardmäßig nicht anzeigt.
+- **Sitzungen** (Benutzer/Computer/Freigaben/Protokoll) und
+  **Geöffnete Dateien** (Datei/Benutzer/Freigabe) kommen live aus
+  `smbstatus --json`, das über ein kurzes Python-Skript nach TSV
+  umgesetzt wird -- robuster als eigenes JSON-Parsing in C++ für eine
+  reine Anzeigefunktion.
 
 ## Bauen
 ```sh
@@ -77,8 +103,13 @@ Löschen) werden übersprungen -- die reine Linux-Kontoverwaltung
 (`useradd`/`usermod`/`userdel`/`chpasswd`) läuft unverändert weiter.
 
 ## Bekannte Grenzen / mögliche nächste Schritte
-- Freigegebene Ordner (Freigaben, Sitzungen, Offene Dateien) fehlen
-  noch komplett -- kommt als nächster Zweig.
+- Bei Freigaben: keine Berechtigungsverwaltung (Freigabe- und
+  NTFS-Berechtigungen), kein Trennen einzelner Sitzungen und kein
+  Schließen einzelner geöffneter Dateien -- Sitzungen und geöffnete
+  Dateien sind reine Anzeige.
+- Weitere Zweige der Computerverwaltung (Ereignisanzeige,
+  Systemleistungsprotokolle, Geräte-Manager, Datenträgerverwaltung,
+  Dienste und Anwendungen) fehlen noch.
 - Kein "Benutzer muss Kennwort bei der nächsten Anmeldung ändern" /
   "Kennwort läuft nie ab" (chage-basierte Flags) -- nur "Konto ist
   deaktiviert" wird abgebildet.
