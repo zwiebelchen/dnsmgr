@@ -965,6 +965,115 @@ static bool writeScriptsIni(const std::string& path, const std::map<std::string,
 	return true;
 }
 
+// ---------------------------------------------------------------------
+// Ordnerumleitung -- der eigentliche Zielpfad wird (wie bei
+// Administrativen Vorlagen) ganz gewoehnlich per Registry.pol
+// uebertragen: die Windows-Shell liest den Ordnerort aus den
+// "User Shell Folders"-Registrierungswerten, unabhaengig von der
+// Gruppenrichtlinien-Erweiterung selbst. Zusaetzlich schreibt eine
+// echte Windows-2000-Gruppenrichtlinie eine "fdeploy.ini" (nach
+// [MS-GPFR], "Version Zero" -- die einzige Version, die Windows 2000
+// beherrscht) mit Verhaltens-Flags je Ordner; wir schreiben hier
+// bewusst nur den sichersten Standardwert (0, keine Zwangsrechte),
+// da die genaue Flag-Bit-Bedeutung oeffentlich nicht vollstaendig
+// dokumentiert ist -- die eigentliche Umleitung funktioniert bereits
+// unabhaengig davon ueber die Registrierungswerte.
+// ---------------------------------------------------------------------
+static const char* GPFR_CSE_GUID = "{25537BA6-77A8-11D2-9B6C-0000F8080861}";
+static const char* GPFR_TOOL_GUID_USER = "{88E729D6-BDC1-11D1-BD2A-00C04FB9603F}";
+static const char* USER_SHELL_FOLDERS_KEY = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
+
+struct FolderRedirEntry { std::string fdeployKey; std::string regValueName; FXString label; };
+static const std::vector<FolderRedirEntry> FOLDER_REDIR_TARGETS = {
+	{ "My Documents", "Personal", "Eigene Dateien (My Documents):" },
+	{ "My Pictures", "My Pictures", "Eigene Bilder (My Pictures):" },
+	{ "Start Menu", "Start Menu", "Startmenü:" },
+	{ "Application Data", "AppData", "Anwendungsdaten:" },
+	{ "Desktop", "Desktop", "Desktop:" },
+};
+
+// Liest die aktuell umgeleiteten Pfade aus der bestehenden User-
+// Registry.pol (leere Zeichenkette = nicht umgeleitet).
+static std::map<std::string, FXString> getFolderRedirectionPaths(const std::string& userPolPath) {
+	std::map<std::string, FXString> out;
+	RegPolFile file = parseRegPolFile(userPolPath);
+	RegLookup lk = buildRegLookup(file);
+	for (auto& t : FOLDER_REDIR_TARGETS) {
+		auto it = lk.values.find({ lowerCopy(USER_SHELL_FOLDERS_KEY), lowerCopy(t.regValueName) });
+		if (it != lk.values.end() && it->second.type == REG_TYPE_SZ) {
+			out[t.fdeployKey] = FXString(std::string((const char*)it->second.data.data(), it->second.data.size()).c_str());
+		} else {
+			out[t.fdeployKey] = "";
+		}
+	}
+	return out;
+}
+
+// Schreibt die Umleitungspfade -- leerer Pfad entfernt eine zuvor
+// gesetzte Umleitung wieder (aktives Loeschen wie beim ADM-Editor,
+// damit ein Client den Wert tatsaechlich zuruecknimmt).
+static bool setFolderRedirectionPaths(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid,
+                                       const std::map<std::string, FXString>& newPaths, FXString& errorMsg) {
+	FXString realmLower = domain.realm; realmLower.lower();
+	std::string userScopeDir = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(gpoGuid.text()) + "/USER";
+	std::string userPolPath = userScopeDir + "/Registry.pol";
+
+	RegPolFile origFile = parseRegPolFile(userPolPath);
+	RegLookup origLookup = buildRegLookup(origFile);
+	std::vector<RegPolEntry> finalEntries = origFile.entries;
+	auto removeEntry = [&](const std::string& valuename) {
+		std::string lv = lowerCopy(valuename);
+		finalEntries.erase(std::remove_if(finalEntries.begin(), finalEntries.end(), [&](const RegPolEntry& e) {
+			return lowerCopy(e.key) == lowerCopy(USER_SHELL_FOLDERS_KEY) && lowerCopy(e.valuename) == lv;
+		}), finalEntries.end());
+	};
+	for (auto& t : FOLDER_REDIR_TARGETS) {
+		auto it = newPaths.find(t.fdeployKey);
+		if (it == newPaths.end()) continue;
+		FXString path = it->second; path.trim();
+		removeEntry(t.regValueName);
+		bool wasConfigured = origLookup.values.count({ lowerCopy(USER_SHELL_FOLDERS_KEY), lowerCopy(t.regValueName) }) > 0;
+		if (!path.empty()) {
+			finalEntries.push_back(makeRegSzEntry(USER_SHELL_FOLDERS_KEY, t.regValueName, path.text()));
+		} else if (wasConfigured) {
+			finalEntries.push_back(makeDeleteValueEntry(USER_SHELL_FOLDERS_KEY, t.regValueName));
+		}
+	}
+
+	std::string writeErr;
+	FXString tmpPath = "/tmp/ice2k-folderredir-regpol.tmp";
+	if (!writeRegPolFile(tmpPath.text(), finalEntries, writeErr)) { errorMsg = writeErr.c_str(); return false; }
+	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(userScopeDir.c_str()) });
+	int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(userPolPath.c_str()) });
+	runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
+	if (rc != 0) { errorMsg = "Konnte Registry.pol nicht schreiben."; return false; }
+
+	// fdeploy.ini -- eine Zeile je tatsaechlich umgeleitetem Ordner.
+	std::string fdeployUtf8 = "[Folder Status]\r\n";
+	for (auto& t : FOLDER_REDIR_TARGETS) {
+		auto it = newPaths.find(t.fdeployKey);
+		if (it == newPaths.end()) continue;
+		FXString path = it->second; path.trim();
+		if (!path.empty()) fdeployUtf8 += t.fdeployKey + "=0\r\n";
+	}
+	std::string encoded = utf8ToUtf16leWithBom(fdeployUtf8);
+	FXString fdeployTmp = "/tmp/ice2k-fdeploy.tmp";
+	std::ofstream out(fdeployTmp.text(), std::ios::binary);
+	out.write(encoded.data(), (std::streamsize)encoded.size());
+	out.close();
+	std::string fdeployDestDir = userScopeDir + "/Documents & Settings";
+	std::string fdeployDest = fdeployDestDir + "/fdeploy.ini";
+	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(fdeployDestDir.c_str()) });
+	rc = runAsRoot({ FXString("cp"), fdeployTmp, FXString(fdeployDest.c_str()) });
+	runAsRoot({ FXString("rm"), FXString("-f"), fdeployTmp });
+	if (rc != 0) { errorMsg = "Konnte fdeploy.ini nicht schreiben."; return false; }
+
+	std::string log;
+	std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+	ensureExtensionRegistered(owner, domain.realm, gpoObjectDn, false, GPFR_CSE_GUID, GPFR_TOOL_GUID_USER, log, errorMsg);
+	return true;
+}
+
 // Legt "CN=Class Store" und "CN=Packages,CN=Class Store" unter dem
 // angegebenen skopierten GPO-DN an, falls sie noch nicht existieren.
 static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, const std::string& scopedGpoDn, std::string& log, FXString& errorMsg) {
@@ -2572,6 +2681,43 @@ FXDEFMAP(ScriptsDialog) ScriptsDialogMap[] = {
 };
 FXIMPLEMENT(ScriptsDialog, FXDialogBox, ScriptsDialogMap, ARRAYNUMBER(ScriptsDialogMap))
 
+// ---------------------------------------------------------------------
+// Dialog "Ordnerumleitung" -- fuenf Textfelder (leer = keine
+// Umleitung), vorbelegt mit den aktuell in der Registry.pol
+// gesetzten Zielpfaden.
+// ---------------------------------------------------------------------
+class FolderRedirectionDialog : public FXDialogBox {
+	FXDECLARE(FolderRedirectionDialog)
+private:
+	std::map<std::string, FXTextField*> fields;
+protected:
+	FolderRedirectionDialog() {}
+public:
+	FolderRedirectionDialog(FXWindow* owner, const std::map<std::string, FXString>& current)
+		: FXDialogBox(owner, "Ordnerumleitung", DECOR_TITLE | DECOR_BORDER, 0,0,460,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
+		new FXLabel(main, "UNC-Zielpfad je Ordner (leer lassen = keine Umleitung):");
+		for (auto& t : FOLDER_REDIR_TARGETS) {
+			new FXLabel(main, t.label);
+			FXTextField* f = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
+			auto it = current.find(t.fdeployKey);
+			if (it != current.end()) f->setText(it->second);
+			fields[t.fdeployKey] = f;
+		}
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	std::map<std::string, FXString> getPaths() const {
+		std::map<std::string, FXString> out;
+		for (auto& kv : fields) out[kv.first] = kv.second->getText();
+		return out;
+	}
+	virtual ~FolderRedirectionDialog() {}
+};
+FXIMPLEMENT(FolderRedirectionDialog, FXDialogBox, NULL, 0)
+
 class PropertiesDialog : public FXDialogBox {
 	FXDECLARE(PropertiesDialog)
 private:
@@ -2581,7 +2727,7 @@ private:
 	std::vector<FXString> linkedGuids;
 	std::map<FXString, FXString> guidToName;
 public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS };
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS, ID_FOLDER_REDIR };
 	long onNewGpo(FXObject*, FXSelector, void*);
 	long onAddGpo(FXObject*, FXSelector, void*);
 	long onRemoveGpo(FXObject*, FXSelector, void*);
@@ -2589,6 +2735,7 @@ public:
 	long onInstallSoftware(FXObject*, FXSelector, void*);
 	long onSecuritySettings(FXObject*, FXSelector, void*);
 	long onScripts(FXObject*, FXSelector, void*);
+	long onFolderRedirection(FXObject*, FXSelector, void*);
 
 	void reloadList() {
 		gpoList->clearItems();
@@ -2614,14 +2761,16 @@ public:
 		FXVerticalFrame* gpoPage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		new FXLabel(gpoPage, "Aktuelle Gruppenrichtlinienobjekt-Verknüpfungen für\n" + title + ":");
 		gpoList = new FXList(gpoPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
-		FXHorizontalFrame* gpoBtns = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		FXHorizontalFrame* gpoBtns = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,2);
 		new FXButton(gpoBtns, "&Neu", NULL, this, ID_NEW_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "&Software...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "S&icherheit...", NULL, this, ID_SECURITY_SETTINGS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "S&kripte...", NULL, this, ID_SCRIPTS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		FXHorizontalFrame* gpoBtns2 = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,4);
+		new FXButton(gpoBtns2, "&Software...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns2, "S&icherheit...", NULL, this, ID_SECURITY_SETTINGS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns2, "S&kripte...", NULL, this, ID_SCRIPTS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns2, "Or&dnerumleitung...", NULL, this, ID_FOLDER_REDIR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -2639,6 +2788,7 @@ FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_INSTALL_SOFTWARE, PropertiesDialog::onInstallSoftware),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SECURITY_SETTINGS, PropertiesDialog::onSecuritySettings),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SCRIPTS, PropertiesDialog::onScripts),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_FOLDER_REDIR, PropertiesDialog::onFolderRedirection),
 };
 FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
 
@@ -2771,6 +2921,36 @@ long PropertiesDialog::onScripts(FXObject*, FXSelector, void*) {
 	}
 	ScriptsDialog dlg(this, domain, guid);
 	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long PropertiesDialog::onFolderRedirection(FXObject*, FXSelector, void*) {
+	int idx = gpoList->getCurrentItem();
+	if (idx < 0 || idx >= (int)linkedGuids.size()) {
+		FXMessageBox::information(this, MBOX_OK, "Kein GPO ausgewählt", "Bitte zuerst ein Gruppenrichtlinienobjekt aus der Liste auswählen.");
+		return 1;
+	}
+	FXString guid = linkedGuids[idx];
+	DomainInfo domain = detectDomain();
+	if (domain.realm.empty()) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "Domäne konnte nicht ermittelt werden.");
+		return 1;
+	}
+	if (!g_haveRoot) {
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann die Ordnerumleitung nicht geändert werden.");
+		return 1;
+	}
+	FXString realmLower = domain.realm; realmLower.lower();
+	std::string userPolPath = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(guid.text()) + "/USER/Registry.pol";
+	auto current = getFolderRedirectionPaths(userPolPath);
+	FolderRedirectionDialog dlg(this, current);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	FXString errorMsg;
+	if (!setFolderRedirectionPaths(this, domain, guid, dlg.getPaths(), errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		return 1;
+	}
+	FXMessageBox::information(this, MBOX_OK, "Gespeichert", "Die Ordnerumleitung wurde gespeichert.");
 	return 1;
 }
 
