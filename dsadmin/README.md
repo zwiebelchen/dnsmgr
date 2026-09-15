@@ -78,7 +78,19 @@ selbst in `gPCMachineExtensionNames`/`gPCUserExtensionNames` des GPOs
 ein -- ohne diesen Eintrag würde ein echter Client die Erweiterung nie
 aufrufen, selbst wenn die Einstellungen vorhanden sind.
 
-- **Softwareinstallation** (nach [MS-GPSI]): "Durchsuchen..." startet im
+- **Softwareinstallation** (nach [MS-GPSI]): legt unterhalb des
+  skopierten GPO-Zweigs `CN=Class Store` (objectClass `classStore`) und
+  darunter `CN=Packages` (objectClass **`container`**, nicht
+  `classStore`) an. Die Klasse von `CN=Packages` ist heikel: mit
+  `classStore` legt der Server das Objekt klaglos an, aber der Client
+  findet die erwartete Struktur nicht und bricht beim Auflisten der
+  Anwendungen ab -- im `appmgmt.log` mit "Verzeichnis konnte nicht zum
+  Active Directory gebunden werden, um Anwendungen aufzulisten.
+  Fehlercode: 80040167", im `userenv.log` mit "Extension
+  Anwendungsverwaltung ProcessGroupPolicy failed". Da sich die
+  objectClass eines bestehenden Objekts nicht ändern lässt, muss ein
+  falsch angelegtes `CN=Packages` samt Inhalt gelöscht und das Paket
+  neu hinzugefügt werden. "Durchsuchen..." startet im
   zuletzt benutzten Verzeichnis (sonst `/srv/freigaben`) und schlägt
   nach der Auswahl den UNC-Pfad vor -- dazu wird in der `smb.conf` die
   Freigabe gesucht, unter der die Datei liegt (bei verschachtelten

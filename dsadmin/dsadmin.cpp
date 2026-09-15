@@ -1309,10 +1309,19 @@ static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, 
 	                     "description: Application Store\n";
 	if (!runLdapChange(owner, realm, ldif1, true, log, errorMsg)) return false;
 
+	// WICHTIG: "CN=Packages" ist ein gewoehnlicher container, KEIN
+	// classStore -- nur "CN=Class Store" darueber ist einer. Mit der
+	// falschen Klasse legt der Server das Objekt zwar klaglos an, aber
+	// der Client findet die erwartete Struktur nicht und bricht beim
+	// Auflisten der Anwendungen ab: im appmgmt.log des Clients steht dann
+	// "Verzeichnis konnte nicht zum Active Directory gebunden werden, um
+	// Anwendungen aufzulisten. Fehlercode: 80040167", im userenv.log
+	// "Extension Anwendungsverwaltung ProcessGroupPolicy failed". Genau
+	// so ist es in der Praxis aufgetreten.
 	std::string packagesDn = "CN=Packages," + classStoreDn;
 	std::string ldif2 = "dn: " + packagesDn + "\n"
 	                     "changetype: add\n"
-	                     "objectClass: classStore\n"
+	                     "objectClass: container\n"
 	                     "description: Application Packages\n";
 	if (!runLdapChange(owner, realm, ldif2, true, log, errorMsg)) return false;
 	return true;
