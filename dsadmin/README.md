@@ -98,6 +98,21 @@ aufrufen, selbst wenn die Einstellungen vorhanden sind.
   bewusst nur mit dem sichersten Standard-Flag (0), da die genaue
   Bit-Bedeutung öffentlich nicht vollständig dokumentiert ist.
 
+## Kodierung der ADM-Dateien
+
+ADM-Vorlagen liefert Microsoft sowohl in ANSI als auch in UTF-16 aus.
+Der Parser erkennt die Kodierung selbst -- über die
+Bytereihenfolge-Markierung, ersatzweise über die Verteilung der
+Nullbytes -- und wandelt vor dem Zerlegen nach UTF-8.
+
+Ohne das verschwindet eine UTF-16-kodierte Datei stillschweigend: hinter
+jedem Zeichen steht ein Nullbyte, der Tokenizer findet kein einziges
+`CATEGORY` und der Editor zeigt einen leeren Baum. In der Praxis fehlte
+dadurch die gesamte `system.adm` (Desktop, Startmenü, Systemsteuerung,
+System, Netzwerk, Drucker), während die ANSI-kodierte `inetres.adm`
+daneben sauber durchlief -- also genau die Art Fehler, die aussieht wie
+"da fehlt noch was" statt wie ein Fehler.
+
 ## Versionszähler
 
 Jede Änderung an einem GPO erhöht dessen Versionszähler, und zwar an

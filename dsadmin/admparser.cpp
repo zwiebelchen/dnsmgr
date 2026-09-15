@@ -2,6 +2,7 @@
 #include "admparser.h"
 #include <fstream>
 #include <sstream>
+#include <cstdint>
 #include <cctype>
 #include <algorithm>
 
@@ -268,7 +269,93 @@ public:
 	}
 };
 
-AdmFile parseAdmContent(const std::string& content) {
+// ---------------------------------------------------------------------
+// ADM-Dateien kommen in ANSI und in UTF-16 vor -- Microsoft liefert
+// beides aus. Byteweise gelesen steht in einer UTF-16-Datei hinter jedem
+// Zeichen ein Nullbyte; der Tokenizer findet dann kein einziges
+// CATEGORY und liefert stillschweigend einen leeren Baum. Genau so ist
+// bei einem Nutzer die komplette system.adm (Desktop, Startmenue,
+// Systemsteuerung, System, Netzwerk, Drucker) aus dem Editor
+// verschwunden, waehrend die ANSI-kodierte inetres.adm sauber durchlief.
+//
+// Erkennung ueber die Bytereihenfolge-Markierung, ersatzweise ueber
+// Nullbytes an gerader/ungerader Position -- nicht jede Datei hat eine
+// Markierung.
+// ---------------------------------------------------------------------
+enum AdmEncoding { ADMENC_ANSI, ADMENC_UTF16LE, ADMENC_UTF16BE };
+
+static AdmEncoding detectEncoding(const std::string& raw, size_t& skipBytes) {
+	skipBytes = 0;
+	if (raw.size() >= 2) {
+		unsigned char b0 = (unsigned char)raw[0], b1 = (unsigned char)raw[1];
+		if (b0 == 0xFF && b1 == 0xFE) { skipBytes = 2; return ADMENC_UTF16LE; }
+		if (b0 == 0xFE && b1 == 0xFF) { skipBytes = 2; return ADMENC_UTF16BE; }
+		if (b0 == 0xEF && b1 == 0xBB && raw.size() >= 3 && (unsigned char)raw[2] == 0xBF) { skipBytes = 3; return ADMENC_ANSI; }
+	}
+	// Ohne Markierung: in den ersten Kilobytes zaehlen, wo die Nullbytes
+	// sitzen. Bei UTF-16LE ist jedes zweite Byte 0 (ungerade Position).
+	size_t limit = raw.size() < 1024 ? raw.size() : 1024;
+	size_t zeroOdd = 0, zeroEven = 0;
+	for (size_t i = 0; i < limit; i++) {
+		if (raw[i] != 0) continue;
+		if (i % 2) zeroOdd++; else zeroEven++;
+	}
+	if (zeroOdd > limit / 4 && zeroEven == 0) return ADMENC_UTF16LE;
+	if (zeroEven > limit / 4 && zeroOdd == 0) return ADMENC_UTF16BE;
+	return ADMENC_ANSI;
+}
+
+static std::string utf16ToUtf8(const std::string& raw, size_t offset, bool bigEndian) {
+	std::string out;
+	for (size_t i = offset; i + 1 < raw.size(); i += 2) {
+		unsigned char lo = (unsigned char)raw[i], hi = (unsigned char)raw[i + 1];
+		uint32_t cp = bigEndian ? ((uint32_t)lo << 8 | hi) : ((uint32_t)hi << 8 | lo);
+
+		// Ersatzzeichenpaare zusammensetzen (in ADM-Dateien praktisch nie,
+		// aber wir wollen daran nicht scheitern).
+		if (cp >= 0xD800 && cp <= 0xDBFF && i + 3 < raw.size()) {
+			unsigned char lo2 = (unsigned char)raw[i + 2], hi2 = (unsigned char)raw[i + 3];
+			uint32_t low = bigEndian ? ((uint32_t)lo2 << 8 | hi2) : ((uint32_t)hi2 << 8 | lo2);
+			if (low >= 0xDC00 && low <= 0xDFFF) {
+				cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+				i += 2;
+			}
+		}
+
+		if (cp < 0x80) {
+			out += (char)cp;
+		} else if (cp < 0x800) {
+			out += (char)(0xC0 | (cp >> 6));
+			out += (char)(0x80 | (cp & 0x3F));
+		} else if (cp < 0x10000) {
+			out += (char)(0xE0 | (cp >> 12));
+			out += (char)(0x80 | ((cp >> 6) & 0x3F));
+			out += (char)(0x80 | (cp & 0x3F));
+		} else {
+			out += (char)(0xF0 | (cp >> 18));
+			out += (char)(0x80 | ((cp >> 12) & 0x3F));
+			out += (char)(0x80 | ((cp >> 6) & 0x3F));
+			out += (char)(0x80 | (cp & 0x3F));
+		}
+	}
+	return out;
+}
+
+// Wandelt den Rohinhalt einer ADM-Datei in UTF-8 um, egal wie er
+// kodiert war. ANSI-Dateien bleiben unveraendert (eine
+// Codepage-Umsetzung waere hier nur geraten; Umlaute in Beschriftungen
+// kommen ohnehin aus dem [strings]-Abschnitt).
+std::string admToUtf8(const std::string& raw) {
+	size_t skip = 0;
+	switch (detectEncoding(raw, skip)) {
+		case ADMENC_UTF16LE: return utf16ToUtf8(raw, skip, false);
+		case ADMENC_UTF16BE: return utf16ToUtf8(raw, skip, true);
+		default: return skip ? raw.substr(skip) : raw;
+	}
+}
+
+AdmFile parseAdmContent(const std::string& rawContent) {
+	const std::string content = admToUtf8(rawContent);
 	// [strings]-Abschnitt finden (eigene Zeile, Gross-/Kleinschreibung egal).
 	size_t stringsPos = std::string::npos;
 	{
@@ -294,7 +381,7 @@ AdmFile parseAdmContent(const std::string& content) {
 }
 
 AdmFile parseAdmFile(const std::string& path) {
-	std::ifstream in(path);
+	std::ifstream in(path, std::ios::binary);
 	if (!in.is_open()) {
 		AdmFile f;
 		f.parseError = "Datei konnte nicht geoeffnet werden: " + path;

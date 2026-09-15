@@ -97,4 +97,8 @@ AdmFile parseAdmContent(const std::string& content);
 // lesbare Pfade, z.B. unser eigenes ADM_DIR).
 AdmFile parseAdmFile(const std::string& path);
 
+// Wandelt den Rohinhalt einer ADM-Datei nach UTF-8 (erkennt UTF-16LE/BE
+// mit und ohne Bytereihenfolge-Markierung). Oeffentlich fuer die Tests.
+std::string admToUtf8(const std::string& raw);
+
 #endif

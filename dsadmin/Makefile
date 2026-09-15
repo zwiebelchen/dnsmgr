@@ -25,6 +25,9 @@ res/foxres.h: $(ICONS)
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
 
+test_admenc: test_admenc.cpp admparser.cpp admparser.h
+	$(CC) -Wall -std=c++17 -o test_admenc test_admenc.cpp admparser.cpp
+
 test_admparser: test_admparser.cpp admparser.cpp
 	$(CC) -Wall -std=c++17 -o test_admparser test_admparser.cpp admparser.cpp
 
@@ -35,7 +38,7 @@ test_aas: test_aas.cpp aas.cpp
 	$(CC) -Wall -std=c++17 -o test_aas test_aas.cpp aas.cpp
 
 clean:
-	rm -f res/foxres.h $(OBJECTS) $(EXECUTABLE) test_admparser test_regpol test_aas
+	rm -f res/foxres.h $(OBJECTS) $(EXECUTABLE) test_admparser test_admenc test_regpol test_aas
 
 install:
 	cp $(EXECUTABLE) $(PREFIX)/bin/$(EXECUTABLE)
