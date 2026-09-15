@@ -1320,38 +1320,20 @@ static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, 
 	                     "description: Application Store\n";
 	if (!runLdapChange(owner, realm, ldif1, true, log, errorMsg)) return false;   // CN=Class Store
 
-	// WICHTIG: "CN=Packages" ist ein gewoehnlicher container, KEIN
-	// classStore -- nur "CN=Class Store" darueber ist einer. Mit der
-	// falschen Klasse legt der Server das Objekt zwar klaglos an, aber
-	// der Client findet die erwartete Struktur nicht und bricht beim
-	// Auflisten der Anwendungen ab: im appmgmt.log des Clients steht dann
-	// "Verzeichnis konnte nicht zum Active Directory gebunden werden, um
-	// Anwendungen aufzulisten. Fehlercode: 80040167", im userenv.log
-	// "Extension Anwendungsverwaltung ProcessGroupPolicy failed". Genau
-	// so ist es in der Praxis aufgetreten.
+	// "CN=Packages" wird ebenfalls als classStore angelegt. Das ist keine
+	// Nachlaessigkeit, sondern vom Schema vorgegeben: unterhalb eines
+	// classStore sind laut possSuperiors nur packageRegistration,
+	// typeLibrary, classRegistration, categoryRegistration und classStore
+	// erlaubt -- ein gewoehnlicher container wird mit "Naming violation
+	// (64)" abgelehnt. (Ausprobiert; die Annahme, es muesse ein container
+	// sein, war falsch.)
 	std::string packagesDn = "CN=Packages," + classStoreDn;
 	std::string ldif2 = "dn: " + packagesDn + "\n"
 	                     "changetype: add\n"
-	                     "objectClass: container\n"
+	                     "objectClass: classStore\n"
 	                     "description: Application Packages\n";
 	if (!runLdapChange(owner, realm, ldif2, true, log, errorMsg)) return false;   // CN=Packages
 
-	// Gegenprobe: ein frueher mit falscher Klasse angelegtes CN=Packages
-	// (objectClass classStore statt container) bleibt beim erneuten
-	// Anlegen unbemerkt, weil "Already exists" toleriert wird -- der
-	// Client scheitert dann weiterhin mit 80040167. Deshalb hier
-	// ausdruecklich pruefen und deutlich sagen, was zu tun ist.
-	std::string cls = readLdapAttribute(owner, realm, packagesDn, "objectClass");
-	if (!cls.empty() && cls.find("container") == std::string::npos) {
-		errorMsg = FXString("Der Container\n") + packagesDn.c_str() +
-		           "\nexistiert bereits mit der falschen Objektklasse.\n\n"
-		           "Die Klasse eines vorhandenen Objekts lässt sich in AD nicht ändern.\n"
-		           "Bitte den Container samt Inhalt löschen und erneut hinzufügen:\n\n"
-		           "ldapdelete -H ldap://127.0.0.1 -Z -x -r \\\n"
-		           "  -D \"administrator@" + realm + "\" -W \\\n"
-		           "  \"" + packagesDn.c_str() + "\"";
-		return false;
-	}
 	return true;
 }
 
