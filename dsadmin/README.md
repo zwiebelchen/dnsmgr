@@ -21,6 +21,19 @@ Domänendatenbank. `dsadmin` übernimmt genau das: die Verwaltung von
   gruppe/Computer/Organisationseinheit/Container) und passenden Icons
 - **Neu**: Benutzer/Gruppe/Organisationseinheit anlegen
 - **Löschen** für Benutzer/Gruppe/Organisationseinheit
+- **Umbenennen...** -- bei Benutzern/Gruppen über `samba-tool ...
+  rename --force-new-cn`, ändert also nur den Anzeigenamen (CN) und
+  lässt den Anmeldenamen unberührt, genau wie das einfache
+  F2-Umbenennen im echten Active Directory; bei
+  Organisationseinheiten über `samba-tool ou rename`
+- **Verschieben...** zwischen Containern/Organisationseinheiten
+  (`samba-tool <user|group|ou> move`), mit Zielauswahl über eine Liste
+  aller OUs -- die Domänenwurzel selbst ist ebenfalls als Ziel wählbar
+- **Sicherheitseinstellungen**: domänenweite Kennwort- und
+  Kontosperrungsrichtlinie (`samba-tool domain passwordsettings`) --
+  Komplexität, Mindestlänge, Kennwortchronik, Mindest-/Höchstalter,
+  Sperrschwelle, Sperrdauer und Zurücksetzungsfenster. In AD gibt es
+  davon (vor den granularen Richtlinien von 2008) nur genau eine
 - **Eigenschaften** mit dem **"Gruppenrichtlinie"**-Reiter (GPOs
   anlegen/verknüpfen/lösen über `samba-tool gpo`) und dem
   vollständigen Gruppenrichtlinienobjekt-Editor dahinter (siehe unten)
@@ -116,7 +129,6 @@ make
 ## Bekannte Grenzen
 - Nur eine Ebene von Organisationseinheiten unter der Domänenwurzel
   wird im Baum abgebildet (keine rekursive Verschachtelung).
-- Kein Umbenennen, kein Verschieben zwischen Containern/OUs.
 - Bekannte, ungelöste Einschränkung aus dem Testen: Das Eingabefeld
   für einen neuen GPO-Namen (aus dem bereits modalen Eigenschaften-
   Dialog heraus geöffnet) nahm in der Xvfb-Testumgebung ohne
