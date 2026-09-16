@@ -137,7 +137,22 @@ Doppelklick bearbeitet.
   Beim ersten Definieren bekommt ein Dienst Standardberechtigungen
   (Administratoren/SYSTEM Vollzugriff, interaktive Benutzer und Dienste
   lesend); "Sicherheit bearbeiten..." öffnet den Berechtigungsdialog.
-- Noch ohne Funktion: Registrierung, Dateisystem,
+- **Registrierung** (`[Registry Keys]`) und **Dateisystem**
+  (`[File Security]`), Zeilen `"Pfad",Modus,"SDDL"`: Rechtsklick für
+  "Schlüssel hinzufügen..." bzw. "Datei hinzufügen...", Sicherheit...
+  und Löschen. Pfade werden wie auf dem Client angegeben (unter Linux
+  gibt es nichts zu durchsuchen); bei Schlüsseln werden HKLM/HKU/HKCR
+  zu MACHINE/USERS/CLASSES_ROOT umgesetzt. Wie im Original erst der
+  Berechtigungsdialog, dann die Vererbung.
+
+  Zum Modus widersprechen sich Microsofts Quellen: [MS-GPSB] 2.2.7 nennt
+  0 = weitergeben, 1 = ersetzen, 2 = nicht ersetzen; die WMI-Klasse
+  `RSOP_RegistryKey` aus der tatsächlichen Implementierung (SceRsop.mof)
+  dagegen 0 = Inherit, 1 = Ignore, 2 = Overwrite, und Windows' eigene
+  Vorlagen setzen kritische Einträge wie `regedit.exe` auf 2. Wir folgen
+  der Implementierung: 0 = vererbbare Berechtigungen weitergeben,
+  1 = nicht konfigurieren, 2 = Berechtigungen der Unterobjekte ersetzen.
+- Noch ohne Funktion:
   Richtlinien öffentlicher Schlüssel, IP-Sicherheit,
   Internet Explorer-Wartung, Remoteinstallationsdienste.
 
@@ -163,7 +178,10 @@ Dialog etwas geändert wurde, bekommen neu erzeugte Einträge -- in
 kanonischer Reihenfolge (Verweigern vor Zulassen, Geerbtes zuletzt);
 alles andere bleibt Zeichen für Zeichen stehen. Generische Rechte
 (`GA`/`GR`/`GW`/`GX`) werden für die Anzeige in die Bits der jeweiligen
-Objektart übersetzt. Geerbte Berechtigungen erscheinen grau angehakt;
+Objektart übersetzt. Abhaken einer Berechtigung nimmt wie im Original
+auch die umfassenderen mit ("Ändern" weg → "Vollzugriff" weg), lässt die
+kleineren aber stehen ("Lesen, Ausführen", "Lesen", "Schreiben").
+Geerbte Berechtigungen erscheinen grau angehakt;
 "Vererbbare übergeordnete Berechtigungen übernehmen" (nicht bei
 Diensten) schaltet das `P`-Flag und fragt beim Abschalten wie das
 Original, ob die geerbten Einträge übernommen oder entfernt werden.

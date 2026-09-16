@@ -5450,14 +5450,32 @@ public:
 
 	long onNameSelected(FXObject*, FXSelector, void*) { refreshChecks(); return 1; }
 
+	// Beim Abhaken einer Berechtigung nur das wegnehmen, was keine andere,
+	// kleinere angehakte Berechtigung braucht -- wie im Original: "Ändern"
+	// abhaken laesst "Lesen, Ausführen", "Lesen" und "Schreiben" stehen,
+	// nimmt aber "Vollzugriff" mit (das "Ändern" enthaelt).
+	uint32_t removePermission(uint32_t current, size_t i) const {
+		const auto& perms = simplePermissions(kind);
+		uint32_t pm = perms[i].mask, keep = 0, drop = pm;
+		for (size_t j = 0; j < perms.size(); j++) {
+			if (j == i) continue;
+			uint32_t other = perms[j].mask;
+			bool checked = (current & other) == other;
+			bool containsThis = (other & pm) == pm;
+			if (containsThis) drop |= other;          // umfassendere Rechte fallen mit weg
+			else if (checked) keep |= other;          // kleinere angehakte bleiben
+		}
+		return (current & ~drop) | keep;
+	}
+
 	long onAllow(FXObject*, FXSelector sel, void*) {
 		int idx = currentEntry();
 		int i = FXSELID(sel) - ID_ALLOW_FIRST;
 		if (idx < 0) return 1;
 		Entry& e = entries[idx];
 		uint32_t pm = simplePermissions(kind)[i].mask;
-		if (allowChecks[i]->getCheck()) { e.allow |= pm; e.deny &= ~pm; }
-		else e.allow &= ~pm;
+		if (allowChecks[i]->getCheck()) { e.allow |= pm; e.deny = removePermission(e.deny, i); }
+		else e.allow = removePermission(e.allow, i);
 		e.dirty = true;
 		refreshChecks();
 		return 1;
@@ -5469,8 +5487,8 @@ public:
 		if (idx < 0) return 1;
 		Entry& e = entries[idx];
 		uint32_t pm = simplePermissions(kind)[i].mask;
-		if (denyChecks[i]->getCheck()) { e.deny |= pm; e.allow &= ~pm; }
-		else e.deny &= ~pm;
+		if (denyChecks[i]->getCheck()) { e.deny |= pm; e.allow = removePermission(e.allow, i); }
+		else e.deny = removePermission(e.deny, i);
 		e.dirty = true;
 		refreshChecks();
 		return 1;
