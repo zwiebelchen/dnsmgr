@@ -285,7 +285,13 @@ struct DirObject {
 	ObjType type;
 	FXString description;
 	long groupType = 0;   // AD-Attribut groupType (nur bei Gruppen), 0 = unbekannt
+	bool advancedOnly = false; // showInAdvancedViewOnly -- nur unter "Ansicht -> Erweiterte Funktionen" sichtbar
+	FXString objectClass;      // speziellste Objektklasse (letzter objectClass-Wert)
 };
+
+// "Ansicht -> Erweiterte Funktionen" -- blendet Objekte mit
+// showInAdvancedViewOnly=TRUE ein (System, LostAndFound, Program Data ...).
+static bool g_advancedView = false;
 
 static std::vector<FXString> listNames(const std::vector<FXString>& args) {
 	std::string out;
@@ -2320,38 +2326,86 @@ static std::string ldifFirst(const std::multimap<std::string, std::string>& rec,
 // ---------------------------------------------------------------------
 static const char* SAMBA_LDAPI_URL = "ldapi://%2Fvar%2Flib%2Fsamba%2Fprivate%2Fldap_priv%2Fldapi";
 
-static void fillDescriptionsAndGroupTypes(std::vector<DirObject>& objects, const FXString& containerFullDN, const FXString& baseDN) {
-	if (objects.empty() || access("/usr/bin/ldapsearch", X_OK) != 0) return;
+// Objektklassen, die das Snap-In als Ordner zeigt und im Baum aufklappt.
+static bool isContainerClass(const std::string& cls) {
+	static const std::set<std::string> classes = {
+		"container", "builtindomain", "lostandfound", "msds-quotacontainer",
+		"mstpm-informationobjectscontainer", "rpccontainer", "msds-passwordsettingscontainer",
+		"filelinktracking"
+	};
+	return classes.count(lowerCopy(cls)) > 0;
+}
+
+struct LdapChildInfo {
+	std::string dn;          // volle DN
+	std::string description;
+	long groupType = 0;
+	bool advancedOnly = false;
+	std::string objectClass; // speziellste Klasse
+};
+
+// Direkte Kinder eines Containers ueber den ldapi-Socket. ok=false,
+// wenn ldapsearch fehlt oder die Abfrage scheitert -- der Aufrufer
+// faellt dann auf das bisherige Verhalten zurueck.
+static std::vector<LdapChildInfo> ldapListChildren(const FXString& containerFullDN, bool& ok) {
+	std::vector<LdapChildInfo> out;
+	ok = false;
+	if (access("/usr/bin/ldapsearch", X_OK) != 0) return out;
 	std::string raw;
 	int rc = runAsRootCaptured({
 		FXString("ldapsearch"), FXString("-x"), FXString("-LLL"), FXString("-o"), FXString("ldif-wrap=no"),
 		FXString("-H"), FXString(SAMBA_LDAPI_URL), FXString("-b"), containerFullDN, FXString("-s"), FXString("one"),
-		FXString("(objectClass=*)"), FXString("description"), FXString("groupType")
+		FXString("(objectClass=*)"), FXString("description"), FXString("groupType"),
+		FXString("showInAdvancedViewOnly"), FXString("objectClass")
 	}, raw);
-	if (rc != 0) return;
+	if (rc != 0) return out;
+	ok = true;
 
-	std::map<std::string, std::pair<std::string, long>> byDn;
 	std::string block;
 	auto flush = [&]() {
 		auto rec = parseLdifRecord(block);
 		block.clear();
-		std::string dn = ldifFirst(rec, "dn");
-		if (dn.empty()) return;
-		long gt = 0;
-		try { gt = std::stol(ldifFirst(rec, "groupType")); } catch (...) {}
-		byDn[lowerCopy(dn)] = { ldifFirst(rec, "description"), gt };
+		LdapChildInfo ci;
+		ci.dn = ldifFirst(rec, "dn");
+		if (ci.dn.empty()) return;
+		ci.description = ldifFirst(rec, "description");
+		try { ci.groupType = std::stol(ldifFirst(rec, "groupType")); } catch (...) {}
+		ci.advancedOnly = lowerCopy(ldifFirst(rec, "showInAdvancedViewOnly")) == "true";
+		// multimap haengt gleiche Schluessel in Einfuegereihenfolge an --
+		// ldapsearch liefert objectClass von "top" bis zur speziellsten.
+		auto range = rec.equal_range("objectclass");
+		for (auto it = range.first; it != range.second; ++it) ci.objectClass = it->second;
+		out.push_back(ci);
 	};
 	for (auto& l : splitLines(raw)) {
 		if (l.empty()) flush();
 		else block += l + "\n";
 	}
 	flush();
+	return out;
+}
+
+static void enrichFromLdap(std::vector<DirObject>& objects, const FXString& containerFullDN, const FXString& baseDN) {
+	if (objects.empty()) return;
+	bool ok;
+	std::vector<LdapChildInfo> children = ldapListChildren(containerFullDN, ok);
+	if (!ok) return;
+	std::map<std::string, const LdapChildInfo*> byDn;
+	for (auto& c : children) byDn[lowerCopy(c.dn)] = &c;
 
 	for (auto& obj : objects) {
 		auto it = byDn.find(lowerCopy(std::string((obj.dn + "," + baseDN).text())));
 		if (it == byDn.end()) continue;
-		obj.description = it->second.first.c_str();
-		obj.groupType = it->second.second;
+		const LdapChildInfo& ci = *it->second;
+		obj.description = ci.description.c_str();
+		obj.groupType = ci.groupType;
+		obj.advancedOnly = ci.advancedOnly;
+		obj.objectClass = ci.objectClass.c_str();
+		// Die Klassifizierung aus samba-tool kennt Container nur am Namen --
+		// die echte Objektklasse ist verlaesslicher (z.B. ist
+		// CN=Infrastructure ein infrastructureUpdate, kein Container).
+		if (obj.type == OBJ_OTHER && isContainerClass(ci.objectClass)) obj.type = OBJ_CONTAINER;
+		else if (obj.type == OBJ_CONTAINER && !ci.objectClass.empty() && !isContainerClass(ci.objectClass)) obj.type = OBJ_OTHER;
 	}
 }
 
@@ -4656,7 +4710,7 @@ class DsAdminWindow : public FXMainWindow {
 	FXDECLARE(DsAdminWindow)
 private:
 	FXMenuBar* menubar;
-	FXMenuPane *konsolemenu, *vorgangmenu, *hilfemenu;
+	FXMenuPane *konsolemenu, *vorgangmenu, *ansichtmenu, *hilfemenu;
 	FXToolBar* toolbar;
 	FXSplitter* splitter;
 	FXTreeList* tree;
@@ -4679,13 +4733,15 @@ public:
 	enum {
 		ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT,
 		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_NEW_COMPUTER, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS,
-		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT, ID_RESET_PASSWORD
+		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT, ID_RESET_PASSWORD, ID_ADVANCED_VIEW
 	};
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
 	long onListRightClick(FXObject*, FXSelector, void*);
 	long onListDoubleClick(FXObject*, FXSelector, void*);
 	long onResetPassword(FXObject*, FXSelector, void*);
+	long onAdvancedView(FXObject*, FXSelector, void*);
+	long onUpdAdvancedView(FXObject*, FXSelector, void*);
 	long onRefresh(FXObject*, FXSelector, void*);
 	long onAbout(FXObject*, FXSelector, void*);
 	long onNewUser(FXObject*, FXSelector, void*);
@@ -4712,6 +4768,8 @@ FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DsAdminWindow::ID_LIST, DsAdminWindow::onListRightClick),
 	FXMAPFUNC(SEL_DOUBLECLICKED, DsAdminWindow::ID_LIST, DsAdminWindow::onListDoubleClick),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_RESET_PASSWORD, DsAdminWindow::onResetPassword),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_ADVANCED_VIEW, DsAdminWindow::onAdvancedView),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_ADVANCED_VIEW, DsAdminWindow::onUpdAdvancedView),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_REFRESH, DsAdminWindow::onRefresh),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_ABOUT, DsAdminWindow::onAbout),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_USER, DsAdminWindow::onNewUser),
@@ -4731,6 +4789,7 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	: FXMainWindow(a, "Active Directory-Benutzer und -Computer", NULL, NULL, DECOR_ALL, 0, 0, 820, 480) {
 
 	domain = detectDomain();
+	g_advancedView = a->reg().readBoolEntry("Ansicht", "ErweiterteFunktionen", false);
 
 	FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
 
@@ -4741,6 +4800,9 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	vorgangmenu = new FXMenuPane(this);
 	new FXMenuTitle(menubar, "&Vorgang", NULL, vorgangmenu);
 	new FXMenuCommand(vorgangmenu, "&Aktualisieren", NULL, this, ID_REFRESH);
+	ansichtmenu = new FXMenuPane(this);
+	new FXMenuTitle(menubar, "&Ansicht", NULL, ansichtmenu);
+	new FXMenuCheck(ansichtmenu, "&Erweiterte Funktionen", this, ID_ADVANCED_VIEW);
 	hilfemenu = new FXMenuPane(this);
 	new FXMenuTitle(menubar, "&?", NULL, hilfemenu);
 	new FXMenuCommand(hilfemenu, "&Info...", NULL, this, ID_ABOUT);
@@ -4786,7 +4848,26 @@ void DsAdminWindow::loadTree() {
 	itemToRelDN[domainRootItem] = "";
 
 	std::map<std::string, FXTreeItem*> itemByRelDN;
-	for (auto& cont : listTopContainers()) {
+	std::vector<FXString> topContainers;
+	bool ldapOk;
+	std::vector<LdapChildInfo> rootChildren = ldapListChildren(domain.baseDN, ldapOk);
+	if (ldapOk) {
+		FXString suffix = "," + domain.baseDN;
+		for (auto& c : rootChildren) {
+			if (c.advancedOnly && !g_advancedView) continue;
+			bool isOu = lowerCopy(c.objectClass) == "organizationalunit";
+			if (!isOu && !isContainerClass(c.objectClass)) continue;
+			FXString rel = c.dn.c_str();
+			if (rel.length() > suffix.length()) rel = rel.left(rel.length() - suffix.length());
+			topContainers.push_back(rel);
+		}
+		std::sort(topContainers.begin(), topContainers.end(), [](const FXString& a, const FXString& b) {
+			return strcasecmp(dnLeafLabel(a).text(), dnLeafLabel(b).text()) < 0;
+		});
+	} else {
+		topContainers = listTopContainers();
+	}
+	for (auto& cont : topContainers) {
 		FXTreeItem* it = tree->appendItem(domainRootItem, dnLeafLabel(cont), icoFolder, icoFolder);
 		itemToRelDN[it] = cont;
 		itemByRelDN[cont.text()] = it;
@@ -4821,7 +4902,30 @@ void DsAdminWindow::loadTree() {
 void DsAdminWindow::showContainer(FXString relDN) {
 	currentContainerRelDN = relDN;
 	currentObjects = listContainerObjects(relDN, domain);
-	fillDescriptionsAndGroupTypes(currentObjects, relDN.empty() ? domain.baseDN : relDN + "," + domain.baseDN, domain.baseDN);
+	enrichFromLdap(currentObjects, relDN.empty() ? domain.baseDN : relDN + "," + domain.baseDN, domain.baseDN);
+	if (!g_advancedView) {
+		currentObjects.erase(std::remove_if(currentObjects.begin(), currentObjects.end(),
+		                     [](const DirObject& o) { return o.advancedOnly; }), currentObjects.end());
+	}
+
+	// Container, die (noch) nicht im Baum stehen -- z.B. unterhalb von
+	// CN=System in der erweiterten Ansicht --, beim Oeffnen einhaengen,
+	// damit man per Doppelklick weiter hinabsteigen kann.
+	FXTreeItem* parentItem = nullptr;
+	std::set<std::string> knownRelDNs;
+	for (auto& kv : itemToRelDN) {
+		knownRelDNs.insert(lowerCopy(kv.second.text()));
+		if (kv.second == relDN) parentItem = kv.first;
+	}
+	if (parentItem) {
+		for (auto& obj : currentObjects) {
+			if (obj.type != OBJ_CONTAINER && obj.type != OBJ_OU) continue;
+			if (knownRelDNs.count(lowerCopy(obj.dn.text()))) continue;
+			FXTreeItem* it = tree->appendItem(parentItem, obj.name, icoFolder, icoFolder);
+			itemToRelDN[it] = obj.dn;
+		}
+	}
+
 	list->clearItems();
 	for (auto& obj : currentObjects) {
 		const char* typeName = "Objekt";
@@ -4832,7 +4936,7 @@ void DsAdminWindow::showContainer(FXString relDN) {
 			case OBJ_COMPUTER: typeName = "Computer"; ic = icoServer; break;
 			case OBJ_OU: typeName = "Organisationseinheit"; ic = icoFolder; break;
 			case OBJ_CONTAINER: typeName = "Container"; ic = icoFolder; break;
-			default: typeName = "Objekt"; ic = icoFolder; break;
+			default: typeName = obj.objectClass.empty() ? "Objekt" : obj.objectClass.text(); ic = icoFolder; break;
 		}
 		FXString txt = obj.name + "\t" + typeName + "\t" + obj.description;
 		list->appendItem(txt, ic, ic);
@@ -5172,6 +5276,30 @@ long DsAdminWindow::onGroupProperties(FXObject*, FXSelector, void*) {
 	if (obj.type != OBJ_GROUP) return 1;
 	GroupMembersDialog dlg(this, obj.accountName);
 	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long DsAdminWindow::onAdvancedView(FXObject*, FXSelector, void*) {
+	g_advancedView = !g_advancedView;
+	getApp()->reg().writeBoolEntry("Ansicht", "ErweiterteFunktionen", g_advancedView);
+	getApp()->reg().write();   // sofort sichern, nicht erst beim Beenden
+	FXString keep = currentContainerRelDN;
+	loadTree();
+	// Den zuletzt offenen Container wieder anwaehlen, sofern er in der
+	// neuen Ansicht noch existiert -- sonst zur Domaenenwurzel.
+	FXTreeItem* target = domainRootItem;
+	for (auto& kv : itemToRelDN) if (kv.second == keep) { target = kv.first; break; }
+	if (target) {
+		tree->selectItem(target);
+		tree->setCurrentItem(target);
+		tree->makeItemVisible(target);
+		showContainer(itemToRelDN[target]);
+	}
+	return 1;
+}
+
+long DsAdminWindow::onUpdAdvancedView(FXObject* sender, FXSelector, void*) {
+	sender->handle(this, FXSEL(SEL_COMMAND, g_advancedView ? ID_CHECK : ID_UNCHECK), NULL);
 	return 1;
 }
 
