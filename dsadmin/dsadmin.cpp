@@ -428,6 +428,9 @@ static std::map<std::string, FXString> buildDnToSamMap(const char* subcmd, const
 	return out;
 }
 
+static std::vector<std::string> splitDnEscaped(const std::string& dn);
+static std::string rdnValue(const std::string& rdn);
+
 static std::vector<DirObject> listContainerObjects(const FXString& containerRelDN, const DomainInfo& domain) {
 	std::vector<DirObject> out;
 	std::string raw;
@@ -440,17 +443,18 @@ static std::vector<DirObject> listContainerObjects(const FXString& containerRelD
 	for (auto& l : splitLines(raw)) {
 		FXString full = trimStr(l).c_str();
 		if (full.empty()) continue;
-		// Nur direkte Kinder dieses Containers (kein "," nach dem ersten Segment
-		// ausser dem Container selbst) -- listobjects liefert leider auch
-		// tiefer verschachtelte Objekte, die wir hier ausfiltern.
-		int firstComma = full.find(',');
-		FXString rest = (firstComma >= 0) ? full.mid(firstComma + 1, full.length() - firstComma - 1) : FXString("");
-		if (rest != containerRelDN) continue;
+		// Nur direkte Kinder dieses Containers -- listobjects liefert leider
+		// auch tiefer verschachtelte Objekte, die wir hier ausfiltern. Die DN
+		// wird maskierungsfest zerlegt: "CN=Meier\, Hans,OU=..." enthaelt
+		// ein Komma im Namen, das kein Trenner ist.
+		std::vector<std::string> parts = splitDnEscaped(full.text());
+		if (parts.empty()) continue;
+		std::string restStr;
+		for (size_t i = 1; i < parts.size(); i++) restStr += (i > 1 ? "," : "") + parts[i];
+		if (FXString(restStr.c_str()) != containerRelDN) continue;
 
-		FXString cnPart = (firstComma >= 0) ? full.left(firstComma) : full;
-		FXString name = cnPart;
-		if (name.left(3) == "CN=") name = name.mid(3, name.length() - 3);
-		else if (name.left(3) == "OU=") name = name.mid(3, name.length() - 3);
+		FXString cnPart = parts[0].c_str();
+		FXString name = rdnValue(parts[0]).c_str();
 
 		DirObject obj;
 		obj.name = name;
@@ -7879,6 +7883,9 @@ public:
 		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X, 0,0,0,0, 10,10,10,10, 0,6);
 		nameField = propLabeledField(page, "&Name:", 100);
 		descField = propLabeledField(page, "&Beschreibung:", 100);
+		// Enter in einem Suchfeld startet wie im Original die Suche.
+		nameField->setTarget(this); nameField->setSelector(ID_FIND);
+		descField->setTarget(this); descField->setSelector(ID_FIND);
 
 		FXVerticalFrame* btns = new FXVerticalFrame(top, PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,24,0, 0,6);
 		new FXButton(btns, "&Jetzt suchen", NULL, this, ID_FIND, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);

@@ -459,6 +459,37 @@ Original die niedrigste Priorität. Der Gruppenrichtlinie-Reiter zeigt
 die Liste deshalb umgekehrt an: oben steht, was zuletzt in `gPLink`
 steht, und "Nach oben" bedeutet "höhere Priorität".
 
+## Hauptfenster: Werkzeugleiste und Menü "Vorgang"
+
+Wie im Original: Zurück/Vor (Verlauf der geöffneten Container), Ebene
+nach oben, Struktur anzeigen/ausblenden, Eigenschaften (markiertes
+Objekt, sonst der geöffnete Container), Aktualisieren, Liste exportieren
+(Tabstopp- oder kommagetrennt), Hilfe, dann die Snap-in-Knöpfe Neuer
+Benutzer, Neue Gruppe, Neue Organisationseinheit, Suchen und Zu Gruppe
+hinzufügen. Die Snap-in-Symbole unter `res/dsa` sind vorläufig, aus den
+vorhandenen Symbolen zusammengesetzt.
+
+Das Menü "Vorgang" bietet dieselben Aktionen samt "Neu"; Einträge, die
+ein markiertes Objekt brauchen, sind sonst grau.
+
+- **Neu**: Computer, Kontakt, Gruppe, Organisationseinheit, Benutzer,
+  Freigegebener Ordner (Reihenfolge des deutschen Originals). Kontakt
+  (`objectClass: contact`, vollständiger Name setzt sich aus Vorname,
+  Initialen und Nachname zusammen) und Freigegebener Ordner
+  (`objectClass: volume` mit `uNCName`) werden per LDAP angelegt; Namen
+  werden für die DN nach RFC 4514 maskiert.
+- **Suchen** ("Benutzer, Kontakte und Gruppen suchen"): Name
+  (cn/sAMAccountName/displayName) und Beschreibung als Teilstring, über
+  ldapi, Filterwerte nach RFC 4515 maskiert; Enter startet die Suche,
+  Doppelklick auf einen Treffer öffnet dessen Eigenschaften.
+- **Zu Gruppe hinzufügen**: für markierte Benutzer, Computer und
+  Gruppen über die Objektauswahl, geschrieben als `add: member` auf den
+  gewählten Gruppen.
+
+Die Liste zerlegt DNs jetzt maskierungsfest: Objekte mit Komma im Namen
+("Meier, Hans" -- als `CN=Meier\, Hans`) wurden vorher gar nicht
+angezeigt, weil am ersten Komma getrennt wurde.
+
 ## Eigenschaften einer Gruppe
 
 Doppelklick oder "Eigenschaften" öffnet wie im Original vier Reiter;
