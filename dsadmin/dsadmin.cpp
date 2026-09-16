@@ -5819,7 +5819,7 @@ protected:
 public:
 	enum { ID_CONFIGURE = FXDialogBox::ID_LAST, ID_PERMISSIONS };
 	ObjectPolicyDialog(FXWindow* owner, SecObjectKind kind_, const ObjectPolicy& op, const std::vector<GroupEntry>& principals_)
-		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,460,0),
+		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,540,0),
 		  kind(kind_), objectName(op.path.c_str()), sddl(op.sddl.empty() ? defaultObjectSddl(kind_) : op.sddl), principals(&principals_),
 		  configure(op.mode == OBJMODE_IGNORE ? 0 : 1), propagate(op.mode == OBJMODE_OVERWRITE ? OBJMODE_OVERWRITE : OBJMODE_INHERIT),
 		  configureTarget(configure, this, ID_CONFIGURE), propagateTarget(propagate) {
@@ -5831,16 +5831,16 @@ public:
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
 		new FXRadioButton(main, reg ? "Diesen Schlüssel &konfigurieren" : "Diese Datei bzw. diesen Ordner &konfigurieren",
-		                  &configureTarget, FXDataTarget::ID_OPTION + 1);
+		                  &configureTarget, FXDataTarget::ID_OPTION + 1, RADIOBUTTON_NORMAL | JUSTIFY_LEFT);
 		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
 		configControls.push_back(new FXRadioButton(body, reg ? "Vererbbare Berechtigungen an alle &Unterschlüssel weitergeben"
 		                                                     : "Vererbbare Berechtigungen an alle &Unterordner und Dateien weitergeben",
-		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_INHERIT));
+		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_INHERIT, RADIOBUTTON_NORMAL | JUSTIFY_LEFT));
 		configControls.push_back(new FXRadioButton(body, reg ? "Vorhandene Berechtigungen für alle Unterschlüssel durch\nvererbbare Berechtigungen &ersetzen"
 		                                                     : "Vorhandene Berechtigungen für alle Unterordner und Dateien\ndurch vererbbare Berechtigungen &ersetzen",
-		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_OVERWRITE));
+		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_OVERWRITE, RADIOBUTTON_NORMAL | JUSTIFY_LEFT));
 		new FXRadioButton(main, reg ? "Diesen Schlüssel &nicht konfigurieren" : "Diese Datei bzw. diesen Ordner &nicht konfigurieren",
-		                  &configureTarget, FXDataTarget::ID_OPTION + 0);
+		                  &configureTarget, FXDataTarget::ID_OPTION + 0, RADIOBUTTON_NORMAL | JUSTIFY_LEFT);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
 		configControls.push_back(new FXButton(btnf, "&Berechtigungen bearbeiten...", NULL, this, ID_PERMISSIONS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3));
