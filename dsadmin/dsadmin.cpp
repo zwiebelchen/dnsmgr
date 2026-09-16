@@ -86,6 +86,7 @@ static PolicyState determinePolicyState(const AdmPolicy& pol, const std::string&
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
@@ -2034,18 +2035,6 @@ FXDEFMAP(GroupMembersDialog) GroupMembersDialogMap[] = {
 };
 FXIMPLEMENT(GroupMembersDialog, FXDialogBox, GroupMembersDialogMap, ARRAYNUMBER(GroupMembersDialogMap))
 
-static bool setUserAttributes(FXWindow* owner, const FXString& realm, const FXString& userFullDN,
-                               const FXString& displayName, const FXString& description, FXString& errorMsg) {
-	std::string ldif = "dn: " + std::string(userFullDN.text()) + "\n"
-	                    "changetype: modify\n"
-	                    "replace: displayName\n"
-	                    "displayName: " + std::string(displayName.text()) + "\n-\n"
-	                    "replace: description\n"
-	                    "description: " + std::string(description.text()) + "\n";
-	std::string log;
-	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
-}
-
 static bool setUserEnabled(const FXString& username, bool enabled, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString(enabled ? "enable" : "disable"), username }, out);
@@ -2251,63 +2240,872 @@ public:
 FXIMPLEMENT(SetPasswordDialog, FXDialogBox, NULL, 0)
 
 // ---------------------------------------------------------------------
-// Dialog "Eigenschaften" eines Benutzers -- Anzeigename/Beschreibung,
-// Konto ist deaktiviert, sowie ein "Kennwort zurücksetzen..."-Knopf.
+// Symbole fuer Dialoge. Einmal erzeugt und fuer die ganze Laufzeit
+// gehalten -- Listeneintraege, die erst nach create() angehaengt
+// werden, erzeugen ihre Symbole naemlich nicht selbst.
+// ---------------------------------------------------------------------
+static FXIcon* sharedPngIcon(const unsigned char* data) {
+	static std::map<const unsigned char*, FXIcon*> cache;
+	auto it = cache.find(data);
+	if (it != cache.end()) return it->second;
+	FXIcon* ic = new FXPNGIcon(app, data, IMAGE_NEAREST);
+	ic->create();
+	cache[data] = ic;
+	return ic;
+}
+
+// ---------------------------------------------------------------------
+// LDIF-Ausgabe von "samba-tool user show" zerlegen. Fortsetzungszeilen
+// (beginnen mit einem Leerzeichen) werden angehaengt, "attr:: ..."
+// ist base64-kodiert. Schluessel in Kleinbuchstaben, mehrwertige
+// Attribute (memberOf, objectClass ...) bleiben alle erhalten.
+// ---------------------------------------------------------------------
+static std::string base64Decode(const std::string& in) {
+	auto val = [](char c) -> int {
+		if (c >= 'A' && c <= 'Z') return c - 'A';
+		if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+		if (c >= '0' && c <= '9') return c - '0' + 52;
+		if (c == '+') return 62;
+		if (c == '/') return 63;
+		return -1;
+	};
+	std::string out;
+	uint32_t buf = 0;
+	int bits = 0;
+	for (char c : in) {
+		int v = val(c);
+		if (v < 0) continue;
+		buf = (buf << 6) | (uint32_t)v;
+		bits += 6;
+		if (bits >= 8) { bits -= 8; out += (char)((buf >> bits) & 0xFF); }
+	}
+	return out;
+}
+
+static std::multimap<std::string, std::string> parseLdifRecord(const std::string& raw) {
+	std::vector<std::string> logical;
+	for (auto& l : splitLines(raw)) {
+		if (!l.empty() && l[0] == ' ' && !logical.empty()) logical.back() += l.substr(1);
+		else logical.push_back(l);
+	}
+	std::multimap<std::string, std::string> out;
+	for (auto& l : logical) {
+		size_t p = l.find(':');
+		if (p == std::string::npos || p == 0) continue;
+		std::string key = lowerCopy(l.substr(0, p));
+		if (key.find(' ') != std::string::npos) continue; // Rauschzeilen von samba-tool
+		std::string value;
+		if (p + 1 < l.size() && l[p + 1] == ':') value = base64Decode(trimStr(l.substr(p + 2)));
+		else value = trimStr(l.substr(p + 1));
+		out.emplace(key, value);
+	}
+	return out;
+}
+
+static std::string ldifFirst(const std::multimap<std::string, std::string>& rec, const char* attr) {
+	auto it = rec.find(lowerCopy(attr));
+	return it == rec.end() ? std::string() : it->second;
+}
+
+// ---------------------------------------------------------------------
+// DNs mit maskierten Zeichen ("CN=Meier\, Hans,OU=...") korrekt
+// zerlegen -- Gruppennamen koennen, anders als OUs, durchaus Kommas
+// enthalten.
+// ---------------------------------------------------------------------
+static std::vector<std::string> splitDnEscaped(const std::string& dn) {
+	std::vector<std::string> out;
+	std::string cur;
+	for (size_t i = 0; i < dn.size(); i++) {
+		char c = dn[i];
+		if (c == '\\' && i + 1 < dn.size()) { cur += c; cur += dn[++i]; continue; }
+		if (c == ',') { out.push_back(cur); cur.clear(); continue; }
+		cur += c;
+	}
+	if (!cur.empty()) out.push_back(cur);
+	return out;
+}
+
+static std::string rdnType(const std::string& rdn) {
+	size_t p = rdn.find('=');
+	return p == std::string::npos ? std::string() : lowerCopy(trimStr(rdn.substr(0, p)));
+}
+
+static std::string rdnValue(const std::string& rdn) {
+	size_t p = rdn.find('=');
+	std::string v = (p == std::string::npos) ? rdn : rdn.substr(p + 1);
+	std::string out;
+	for (size_t i = 0; i < v.size(); i++) {
+		if (v[i] == '\\' && i + 1 < v.size()) { out += v[++i]; continue; }
+		out += v[i];
+	}
+	return out;
+}
+
+// "CN=Domain Users,CN=Users,DC=linux,DC=zwiebelchen,DC=org" ->
+// "linux.zwiebelchen.org/Users" -- der kanonische Name des
+// UEBERGEORDNETEN Containers, so wie ihn die Spalte
+// "Active Directory-Ordner" im Original zeigt.
+static FXString dnToFolder(const std::string& dn) {
+	std::vector<std::string> parts = splitDnEscaped(dn);
+	std::string domainName;
+	std::vector<std::string> path;
+	for (size_t i = 1; i < parts.size(); i++) {
+		if (rdnType(parts[i]) == "dc") {
+			if (!domainName.empty()) domainName += ".";
+			domainName += rdnValue(parts[i]);
+		} else {
+			path.push_back(rdnValue(parts[i]));
+		}
+	}
+	std::string out = lowerCopy(domainName);
+	for (auto it = path.rbegin(); it != path.rend(); ++it) out += "/" + *it;
+	return FXString(out.c_str());
+}
+
+static FXString dnLeafName(const std::string& dn) {
+	std::vector<std::string> parts = splitDnEscaped(dn);
+	return parts.empty() ? FXString() : FXString(rdnValue(parts[0]).c_str());
+}
+
+// ---------------------------------------------------------------------
+// Alle Gruppen der Domaene mit Ordner, Typ und Bereich. Drei
+// samba-tool-Aufrufe: Anmeldenamen und DNs kommen in derselben
+// Reihenfolge (wie schon bei buildDnToSamMap), Typ/Bereich liefert
+// "group list -v" als Tabelle, deren letzte drei Spalten immer
+// Typ/Bereich/Mitgliederzahl sind -- der Name davor darf also
+// Leerzeichen enthalten.
+// ---------------------------------------------------------------------
+struct GroupEntry {
+	FXString sam;     // sAMAccountName -- fuer samba-tool
+	FXString cn;      // Anzeigename in den Listen
+	std::string dn;   // volle DN
+	FXString folder;  // "linux.zwiebelchen.org/Users"
+	bool security = true;
+	FXString scope;   // Builtin / Domain / Global / Universal
+};
+
+static std::vector<GroupEntry> listAllGroupsDetailed() {
+	std::vector<FXString> plain = listNames({ FXString("samba-tool"), FXString("group"), FXString("list") });
+	std::vector<FXString> dns = listNames({ FXString("samba-tool"), FXString("group"), FXString("list"), FXString("--full-dn") });
+
+	std::map<std::string, std::pair<bool, FXString>> typeBySam;
+	std::string raw;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("list"), FXString("-v") }, raw);
+	for (auto& line : splitLines(raw)) {
+		std::string l = trimStr(line);
+		std::string rest = l;
+		std::string cols[3];
+		bool ok = true;
+		for (int c = 2; c >= 0; c--) {
+			size_t sp = rest.find_last_of(" \t");
+			if (sp == std::string::npos) { ok = false; break; }
+			cols[c] = rest.substr(sp + 1);
+			rest = trimStr(rest.substr(0, sp));
+		}
+		if (!ok || rest.empty()) continue;
+		if (cols[0] != "Security" && cols[0] != "Distribution") continue; // Kopfzeile/Trenner
+		typeBySam[lowerCopy(rest)] = { cols[0] == "Security", FXString(cols[1].c_str()) };
+	}
+
+	std::vector<GroupEntry> out;
+	size_t n = std::min(plain.size(), dns.size());
+	for (size_t i = 0; i < n; i++) {
+		GroupEntry g;
+		g.sam = plain[i];
+		g.dn = dns[i].text();
+		g.cn = dnLeafName(g.dn);
+		g.folder = dnToFolder(g.dn);
+		auto t = typeBySam.find(lowerCopy(g.sam.text()));
+		if (t != typeBySam.end()) { g.security = t->second.first; g.scope = t->second.second; }
+		out.push_back(g);
+	}
+	std::sort(out.begin(), out.end(), [](const GroupEntry& a, const GroupEntry& b) {
+		int fa = strcasecmp(a.folder.text(), b.folder.text());
+		if (fa != 0) return fa < 0;
+		return strcasecmp(a.cn.text(), b.cn.text()) < 0;
+	});
+	return out;
+}
+
+static int findGroupByDn(const std::vector<GroupEntry>& groups, const std::string& dn) {
+	std::string needle = lowerCopy(dn);
+	for (size_t i = 0; i < groups.size(); i++)
+		if (lowerCopy(groups[i].dn) == needle) return (int)i;
+	return -1;
+}
+
+// Direkte Gruppenmitgliedschaften eines Benutzers als DNs. Die primaere
+// Gruppe steht bei "user getgroups" immer an erster Stelle -- sie kommt
+// nicht aus memberOf, sondern aus primaryGroupID.
+static bool getUserGroupDns(const FXString& username, std::vector<std::string>& dns, std::string& primaryDn, FXString& errorMsg) {
+	std::string raw;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("getgroups"), username, FXString("--full-dn") }, raw);
+	if (rc != 0) { errorMsg = condenseSambaToolError(raw).c_str(); return false; }
+	dns.clear();
+	for (auto& l : splitLines(raw)) {
+		std::string t = trimStr(l);
+		if (t.size() < 3 || lowerCopy(t.substr(0, 3)) != "cn=") continue;
+		dns.push_back(t);
+	}
+	primaryDn = dns.empty() ? std::string() : dns.front();
+	return true;
+}
+
+static bool setUserPrimaryGroup(FXWindow* owner, const FXString& username, const FXString& groupSam, FXString& errorMsg) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("setprimarygroup"), username, groupSam }, out);
+	if (rc != 0) {
+		FXString cred = ensureAdminCreds(owner);
+		if (cred.empty()) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
+		out.clear();
+		rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("setprimarygroup"), username, groupSam, cred }, out);
+		if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
+	}
+	return true;
+}
+
+// Ein LDIF-Wert, der nicht rein aus druckbarem ASCII besteht (Umlaute,
+// fuehrende Leerzeichen/Doppelpunkte ...), muss laut RFC 2849
+// base64-kodiert als "attr:: ..." uebergeben werden.
+static std::string ldifAttrLine(const std::string& attr, const std::string& value) {
+	bool safe = !value.empty() && value[0] != ' ' && value[0] != ':' && value[0] != '<' && value.back() != ' ';
+	for (unsigned char c : value) if (c < 0x20 || c > 0x7E) { safe = false; break; }
+	if (safe) return attr + ": " + value + "\n";
+	return attr + ":: " + base64Encode(std::vector<uint8_t>(value.begin(), value.end())) + "\n";
+}
+
+// ---------------------------------------------------------------------
+// Dialog "Gruppen auswählen" -- Nachbau der Objektauswahl, die der
+// Reiter "Mitglied von" unter Windows 2000 oeffnet: oben alle Gruppen
+// der Domaene, unten ein Eingabefeld fuer Namen getrennt durch
+// Semikolons. "Namen überprüfen" loest die Eingabe auf und
+// unterstreicht erkannte Namen.
+// ---------------------------------------------------------------------
+static const char* GROUP_PICKER_HINT = "<< Geben Sie die Namen getrennt durch Semikolons ein oder wählen Sie in der Liste aus >>";
+
+class GroupPickerDialog : public FXDialogBox {
+	FXDECLARE(GroupPickerDialog)
+private:
+	const std::vector<GroupEntry>* groups = nullptr;
+	FXIconList* groupList = nullptr;
+	FXText* namesText = nullptr;
+	bool showingHint = true;
+	std::vector<int> result;
+	FXHiliteStyle styles[1];
+protected:
+	GroupPickerDialog() {}
+public:
+	enum { ID_GROUPLIST = FXDialogBox::ID_LAST, ID_ADD, ID_CHECK_NAMES, ID_NAMES, ID_OK };
+
+	GroupPickerDialog(FXWindow* owner, const FXString& realm, const std::vector<GroupEntry>& groups_)
+		: FXDialogBox(owner, "Gruppen auswählen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE | DECOR_RESIZE, 0,0,566,440),
+		  groups(&groups_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,8,8, 0,6);
+
+		FXHorizontalFrame* lookin = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(lookin, "Suchen &in:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH, 0,0,64,0);
+		FXListBox* lookinBox = new FXListBox(lookin, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		FXString lowerRealm = realm; lowerRealm.lower();
+		lookinBox->appendItem(lowerRealm, sharedPngIcon(resico_server));
+		lookinBox->setNumVisible(1);
+		lookinBox->disable();
+
+		FXPacker* listFrame = new FXPacker(main, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		groupList = new FXIconList(listFrame, this, ID_GROUPLIST,
+		                           ICONLIST_DETAILED | ICONLIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		groupList->appendHeader("Name", NULL, 256);
+		groupList->appendHeader("Ordner", NULL, 270);
+		FXIcon* ic = sharedPngIcon(resico_users);
+		for (auto& g : *groups) groupList->appendItem(g.cn + "\t" + g.folder, ic, ic);
+
+		FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btns, "Hin&zufügen", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(btns, "&Namen überprüfen", NULL, this, ID_CHECK_NAMES, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+
+		FXPacker* textFrame = new FXPacker(main, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,130, 0,0,0,0);
+		namesText = new FXText(textFrame, this, ID_NAMES, TEXT_WORDWRAP | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		styles[0].normalForeColor = namesText->getTextColor();
+		styles[0].normalBackColor = namesText->getBackColor();
+		styles[0].selectForeColor = namesText->getSelTextColor();
+		styles[0].selectBackColor = namesText->getSelBackColor();
+		styles[0].hiliteForeColor = namesText->getHiliteTextColor();
+		styles[0].hiliteBackColor = namesText->getHiliteBackColor();
+		styles[0].activeBackColor = namesText->getActiveBackColor();
+		styles[0].style = FXText::STYLE_UNDERLINE;
+		namesText->setHiliteStyles(styles);
+		namesText->setStyled(TRUE);
+		showHint();
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0);
+		new FXFrame(btnf, LAYOUT_FILL_X);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,80,0, 14,14,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,80,0, 14,14,3,3);
+	}
+
+	void showHint() {
+		namesText->setText(GROUP_PICKER_HINT);
+		namesText->setSelection(0, namesText->getLength());
+		showingHint = true;
+	}
+
+	void leaveHint() {
+		if (!showingHint) return;
+		showingHint = false;
+		namesText->setText("");
+	}
+
+	FXString enteredText() const { return showingHint ? FXString() : namesText->getText(); }
+
+	virtual void create() {
+		FXDialogBox::create();
+		namesText->setFocus();
+	}
+
+	// Eingabe in Namen zerlegen -- Semikolon als Trenner, wie im Original.
+	static std::vector<FXString> splitNames(const FXString& text) {
+		std::vector<FXString> out;
+		FXString t = text;
+		t.substitute('\n', ';');
+		FXint start = 0;
+		for (;;) {
+			FXint p = t.find(';', start);
+			FXString part = (p < 0) ? t.mid(start, t.length() - start) : t.mid(start, p - start);
+			part.trim();
+			if (!part.empty()) out.push_back(part);
+			if (p < 0) break;
+			start = p + 1;
+		}
+		return out;
+	}
+
+	// Anzeigename oder Anmeldename, exakt (ohne Gross-/Kleinschreibung);
+	// sonst ein eindeutiger Namensanfang. -1 = nicht gefunden,
+	// -2 = mehrdeutig.
+	int resolveName(const FXString& name) const {
+		for (size_t i = 0; i < groups->size(); i++) {
+			if (strcasecmp((*groups)[i].cn.text(), name.text()) == 0 ||
+			    strcasecmp((*groups)[i].sam.text(), name.text()) == 0) return (int)i;
+		}
+		int found = -1;
+		for (size_t i = 0; i < groups->size(); i++) {
+			bool prefix = strncasecmp((*groups)[i].cn.text(), name.text(), name.length()) == 0 ||
+			              strncasecmp((*groups)[i].sam.text(), name.text(), name.length()) == 0;
+			if (!prefix) continue;
+			if (found >= 0) return -2;
+			found = (int)i;
+		}
+		return found;
+	}
+
+	// Loest alle eingegebenen Namen auf. Bei Erfolg steht die Eingabe
+	// danach in kanonischer Form (unterstrichen) im Feld.
+	// quiet: keine Meldungen, bei einem unbekannten Namen bleibt die
+	// Eingabe einfach unveraendert stehen.
+	bool checkNames(std::vector<int>& resolved, bool quiet = false) {
+		resolved.clear();
+		std::vector<FXString> names = splitNames(enteredText());
+		for (auto& n : names) {
+			int idx = resolveName(n);
+			if (idx < 0 && quiet) return false;
+			if (idx == -1) {
+				FXMessageBox::error(this, MBOX_OK, "Name nicht gefunden",
+					"Der Name \"%s\" wurde nicht gefunden.\n\n"
+					"Überprüfen Sie die Schreibweise, oder wählen Sie die Gruppe in der Liste aus.", n.text());
+				return false;
+			}
+			if (idx == -2) {
+				FXMessageBox::error(this, MBOX_OK, "Mehrere Namen gefunden",
+					"Der Name \"%s\" passt auf mehrere Gruppen.\n\n"
+					"Geben Sie den Namen genauer ein, oder wählen Sie die Gruppe in der Liste aus.", n.text());
+				return false;
+			}
+			if (std::find(resolved.begin(), resolved.end(), idx) == resolved.end()) resolved.push_back(idx);
+		}
+		if (resolved.empty()) return true;
+
+		FXString text;
+		std::vector<std::pair<FXint, FXint>> spans;
+		for (size_t i = 0; i < resolved.size(); i++) {
+			if (i > 0) text += "; ";
+			spans.push_back({ text.length(), (*groups)[resolved[i]].cn.length() });
+			text += (*groups)[resolved[i]].cn;
+		}
+		showingHint = false;
+		namesText->setText(text);
+		for (auto& s : spans) namesText->changeStyle(s.first, s.second, 1);
+		namesText->setCursorPos(text.length());
+		return true;
+	}
+
+	long onAdd(FXObject*, FXSelector, void*) {
+		FXString add;
+		for (FXint i = 0; i < groupList->getNumItems(); i++) {
+			if (!groupList->isItemSelected(i)) continue;
+			if (!add.empty()) add += "; ";
+			add += (*groups)[i].cn;
+		}
+		if (add.empty()) return 1;
+		leaveHint();
+		FXString cur = namesText->getText();
+		cur.trimEnd();
+		if (!cur.empty() && cur.right(1) != ";") cur += "; ";
+		else if (!cur.empty()) cur += " ";
+		namesText->setText(cur + add);
+		std::vector<int> dummy;
+		checkNames(dummy, true);
+		return 1;
+	}
+
+	long onUpdAdd(FXObject* sender, FXSelector, void*) {
+		bool any = false;
+		for (FXint i = 0; i < groupList->getNumItems() && !any; i++) any = groupList->isItemSelected(i);
+		sender->handle(this, FXSEL(SEL_COMMAND, any ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+
+	long onUpdNeedsText(FXObject* sender, FXSelector, void*) {
+		FXString t = enteredText();
+		t.trim();
+		sender->handle(this, FXSEL(SEL_COMMAND, t.empty() ? ID_DISABLE : ID_ENABLE), NULL);
+		return 1;
+	}
+
+	long onCheckNames(FXObject*, FXSelector, void*) {
+		std::vector<int> dummy;
+		checkNames(dummy);
+		return 1;
+	}
+
+	long onListDoubleClick(FXObject*, FXSelector, void*) {
+		return onAdd(NULL, 0, NULL);
+	}
+
+	// Klick ins Feld, solange der Hinweis steht: Hinweis weg, dann normal
+	// weiter (return 0 laesst FXText den Klick selbst verarbeiten).
+	long onNamesClick(FXObject*, FXSelector, void*) {
+		leaveHint();
+		return 0;
+	}
+
+	// Tippen ersetzt den markierten Hinweis ohnehin -- danach nur noch
+	// den Merker zuruecksetzen.
+	long onNamesChanged(FXObject*, FXSelector, void*) {
+		if (showingHint && namesText->getText() != GROUP_PICKER_HINT) showingHint = false;
+		return 1;
+	}
+
+	long onOk(FXObject*, FXSelector, void*) {
+		std::vector<int> resolved;
+		if (!checkNames(resolved)) return 1;
+		result = resolved;
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+
+	const std::vector<int>& getResult() const { return result; }
+	virtual ~GroupPickerDialog() {}
+};
+FXDEFMAP(GroupPickerDialog) GroupPickerDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, GroupPickerDialog::ID_ADD, GroupPickerDialog::onAdd),
+	FXMAPFUNC(SEL_UPDATE, GroupPickerDialog::ID_ADD, GroupPickerDialog::onUpdAdd),
+	FXMAPFUNC(SEL_COMMAND, GroupPickerDialog::ID_CHECK_NAMES, GroupPickerDialog::onCheckNames),
+	FXMAPFUNC(SEL_UPDATE, GroupPickerDialog::ID_CHECK_NAMES, GroupPickerDialog::onUpdNeedsText),
+	FXMAPFUNC(SEL_UPDATE, GroupPickerDialog::ID_OK, GroupPickerDialog::onUpdNeedsText),
+	FXMAPFUNC(SEL_COMMAND, GroupPickerDialog::ID_OK, GroupPickerDialog::onOk),
+	FXMAPFUNC(SEL_DOUBLECLICKED, GroupPickerDialog::ID_GROUPLIST, GroupPickerDialog::onListDoubleClick),
+	FXMAPFUNC(SEL_LEFTBUTTONPRESS, GroupPickerDialog::ID_NAMES, GroupPickerDialog::onNamesClick),
+	FXMAPFUNC(SEL_CHANGED, GroupPickerDialog::ID_NAMES, GroupPickerDialog::onNamesChanged),
+};
+FXIMPLEMENT(GroupPickerDialog, FXDialogBox, GroupPickerDialogMap, ARRAYNUMBER(GroupPickerDialogMap))
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" eines Benutzers -- mit Reitern wie im
+// Original. Umgesetzt sind "Allgemein", "Konto" und "Mitglied von";
+// alle Aenderungen werden erst mit OK/Übernehmen geschrieben.
 // ---------------------------------------------------------------------
 class UserPropertiesDialog : public FXDialogBox {
 	FXDECLARE(UserPropertiesDialog)
 private:
-	FXTextField *displayNameField, *descriptionField;
-	FXCheckButton* disabledCheck;
-	FXString username;
+	DomainInfo domain;
+	FXString accountName;
+	FXString userFullDN;
+
+	// Allgemein
+	struct AttrField { const char* attr; FXTextField* field; FXString orig; };
+	std::vector<AttrField> attrFields;
+
+	// Konto
+	FXCheckButton* disabledCheck = nullptr;
+	bool origDisabled = false;
+
+	// Mitglied von
+	FXIconList* memberList = nullptr;
+	FXLabel* primaryLabel = nullptr;
+	std::vector<GroupEntry> allGroups;
+	std::vector<std::string> origMemberDns, memberDns;
+	std::string origPrimaryDn, primaryDn;
+
 protected:
 	UserPropertiesDialog() {}
 public:
-	enum { ID_RESET_PW = FXDialogBox::ID_LAST };
-	long onResetPassword(FXObject*, FXSelector, void*) {
-		SetPasswordDialog dlg(this, username);
-		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-		FXString pw = dlg.getPassword(), confirm = dlg.getConfirm();
-		if (pw.empty()) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte ein Kennwort eingeben."); return 1; }
-		if (pw != confirm) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Die Kennwörter stimmen nicht überein."); return 1; }
+	enum { ID_MEMBER_ADD = FXDialogBox::ID_LAST, ID_MEMBER_REMOVE, ID_SET_PRIMARY, ID_APPLY, ID_OK };
+
+	UserPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const DirObject& obj)
+		: FXDialogBox(owner, "Eigenschaften von " + obj.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,430,480),
+		  domain(domain_), accountName(obj.accountName) {
+		userFullDN = obj.dn.empty() ? domain.baseDN : obj.dn + "," + domain.baseDN;
+
+		std::string raw;
+		runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("show"), accountName }, raw);
+		auto rec = parseLdifRecord(raw);
+		long uac = 0;
+		try { uac = std::stol(ldifFirst(rec, "userAccountControl")); } catch (...) {}
+		origDisabled = (uac & 0x2) != 0; // UF_ACCOUNTDISABLE
+
 		FXString errorMsg;
-		if (setUserPassword(username, pw, errorMsg)) {
-			FXMessageBox::information(this, MBOX_OK, "Fertig", "Das Kennwort wurde geändert.");
-		} else {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		allGroups = listAllGroupsDetailed();
+		if (!getUserGroupDns(accountName, origMemberDns, origPrimaryDn, errorMsg)) {
+			FXMessageBox::error(owner, MBOX_OK, "Fehler", "Die Gruppenmitgliedschaften konnten nicht gelesen werden.\n\n%s", errorMsg.text());
 		}
+		memberDns = origMemberDns;
+		primaryDn = origPrimaryDn;
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		buildGeneralTab(tabs, obj, rec);
+		buildAccountTab(tabs, rec);
+		buildMemberOfTab(tabs);
+
+		// Reihenfolge wie im Original: OK, Abbrechen, Übernehmen -- rechtsbuendig.
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		const FXuint bstyle = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
+		new FXButton(btnf, "OK", NULL, this, ID_OK, bstyle | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,82,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bstyle, 0,0,82,0, 4,4,3,3);
+		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bstyle, 0,0,82,0, 4,4,3,3);
+
+		reloadMemberList();
+	}
+
+	// ---- Allgemein ---------------------------------------------------
+	FXTextField* addAttrRow(FXComposite* parent, const char* label, const char* attr,
+	                        const std::multimap<std::string, std::string>& rec) {
+		FXHorizontalFrame* row = new FXHorizontalFrame(parent, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,96,0);
+		FXTextField* tf = new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		FXString v = ldifFirst(rec, attr).c_str();
+		tf->setText(v);
+		attrFields.push_back({ attr, tf, v });
+		return tf;
+	}
+
+	void buildGeneralTab(FXTabBook* tabs, const DirObject& obj, const std::multimap<std::string, std::string>& rec) {
+		new FXTabItem(tabs, "Allgemein", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,5);
+
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_user), LAYOUT_CENTER_Y);
+		new FXLabel(head, obj.name, NULL, LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		// Vorname und Initialen stehen im Original in einer Zeile.
+		FXHorizontalFrame* row = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, "&Vorname:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,96,0);
+		FXTextField* given = new FXTextField(row, 14, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		FXString gv = ldifFirst(rec, "givenName").c_str();
+		given->setText(gv);
+		attrFields.push_back({ "givenName", given, gv });
+		new FXLabel(row, "&Initialen:", NULL, LAYOUT_CENTER_Y);
+		FXTextField* initials = new FXTextField(row, 4, NULL, 0, FRAME_SUNKEN | FRAME_THICK);
+		initials->setNumColumns(4);
+		FXString iv = ldifFirst(rec, "initials").c_str();
+		initials->setText(iv);
+		attrFields.push_back({ "initials", initials, iv });
+
+		addAttrRow(page, "&Nachname:", "sn", rec);
+		addAttrRow(page, "Anzei&gename:", "displayName", rec);
+		addAttrRow(page, "&Beschreibung:", "description", rec);
+		addAttrRow(page, "Bü&ro:", "physicalDeliveryOfficeName", rec);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		addAttrRow(page, "&Rufnummer:", "telephoneNumber", rec);
+		addAttrRow(page, "&E-Mail:", "mail", rec);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		addAttrRow(page, "&Webseite:", "wWWHomePage", rec);
+	}
+
+	// ---- Konto -------------------------------------------------------
+	void buildAccountTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
+		new FXTabItem(tabs, "Konto", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,5);
+
+		FXString upn = ldifFirst(rec, "userPrincipalName").c_str();
+		FXString lowerRealm = domain.realm; lowerRealm.lower();
+		if (upn.empty()) upn = accountName + "@" + lowerRealm;
+		new FXLabel(page, "Benutzeranmeldename:");
+		FXTextField* upnField = new FXTextField(page, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
+		upnField->setText(upn);
+
+		std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
+		FXString netbios = smbConfValue(conf, "workgroup");
+		netbios.upper();
+		new FXLabel(page, "Benutzeranmeldename (Prä-Windows 2000):");
+		FXTextField* samField = new FXTextField(page, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
+		samField->setText(netbios + "\\" + accountName);
+
+		FXGroupBox* opts = new FXGroupBox(page, "Kontooptionen", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8);
+		disabledCheck = new FXCheckButton(opts, "Konto ist &deaktiviert");
+		disabledCheck->setCheck(origDisabled);
+	}
+
+	// ---- Mitglied von ------------------------------------------------
+	void buildMemberOfTab(FXTabBook* tabs) {
+		new FXTabItem(tabs, "Mitglied von", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,5);
+
+		new FXLabel(page, "&Mitglied von:");
+		FXPacker* listFrame = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		memberList = new FXIconList(listFrame, NULL, 0, ICONLIST_DETAILED | ICONLIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		memberList->appendHeader("Name", NULL, 140);
+		memberList->appendHeader("Active Directory-Ordner", NULL, 230);
+
+		FXHorizontalFrame* btns = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		new FXButton(btns, "Hin&zufügen...", NULL, this, ID_MEMBER_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "En&tfernen", NULL, this, ID_MEMBER_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		FXHorizontalFrame* prim = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,4);
+		new FXLabel(prim, "Primäre Gruppe:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
+		primaryLabel = new FXLabel(prim, "", NULL, LAYOUT_CENTER_Y | JUSTIFY_LEFT);
+
+		FXHorizontalFrame* primBtn = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 12,0);
+		new FXButton(primBtn, "&Primäre Gruppe festlegen", NULL, this, ID_SET_PRIMARY, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_TOP, 0,0,0,0, 8,8,3,3);
+		new FXLabel(primBtn, "Die primäre Gruppe muss nur geändert\nwerden, wenn Sie Macintosh-Clients\noder POSIX-kompatible Anwendungen\nhaben.", NULL, JUSTIFY_LEFT | LAYOUT_TOP);
+	}
+
+	GroupEntry groupForDn(const std::string& dn) const {
+		int idx = findGroupByDn(allGroups, dn);
+		if (idx >= 0) return allGroups[idx];
+		GroupEntry g;          // nicht in der Gruppenliste -- aus der DN ableiten
+		g.dn = dn;
+		g.cn = dnLeafName(dn);
+		g.sam = g.cn;
+		g.folder = dnToFolder(dn);
+		return g;
+	}
+
+	void reloadMemberList() {
+		memberList->clearItems();
+		FXIcon* ic = sharedPngIcon(resico_users);
+		for (auto& dn : memberDns) {
+			GroupEntry g = groupForDn(dn);
+			memberList->appendItem(g.cn + "\t" + g.folder, ic, ic);
+		}
+		if (!memberDns.empty()) { memberList->setCurrentItem(0); memberList->selectItem(0); }
+		primaryLabel->setText(primaryDn.empty() ? FXString("") : groupForDn(primaryDn).cn);
+	}
+
+	std::vector<int> selectedMembers() const {
+		std::vector<int> out;
+		for (FXint i = 0; i < memberList->getNumItems(); i++)
+			if (memberList->isItemSelected(i)) out.push_back(i);
+		return out;
+	}
+
+	static bool sameDn(const std::string& a, const std::string& b) { return lowerCopy(a) == lowerCopy(b); }
+	static bool containsDn(const std::vector<std::string>& v, const std::string& dn) {
+		for (auto& x : v) if (sameDn(x, dn)) return true;
+		return false;
+	}
+
+	long onMemberAdd(FXObject*, FXSelector, void*) {
+		GroupPickerDialog dlg(this, domain.realm, allGroups);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		for (int idx : dlg.getResult()) {
+			const std::string& dn = allGroups[idx].dn;
+			if (!containsDn(memberDns, dn)) memberDns.push_back(dn);
+		}
+		reloadMemberList();
 		return 1;
 	}
 
-	UserPropertiesDialog(FXWindow* owner, const FXString& username_, const FXString& displayName, const FXString& description, bool disabled)
-		: FXDialogBox(owner, "Eigenschaften von " + username_, DECOR_TITLE | DECOR_BORDER, 0,0,420,0),
-		  username(username_) {
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		new FXLabel(main, "Anmeldename: " + username_);
-		new FXLabel(main, "Anzeigename:");
-		displayNameField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-		displayNameField->setText(displayName);
-		new FXLabel(main, "Beschreibung:");
-		descriptionField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-		descriptionField->setText(description);
-		disabledCheck = new FXCheckButton(main, "Konto ist deaktiviert");
-		disabledCheck->setCheck(disabled);
-
-		FXHorizontalFrame* pwf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-		new FXButton(pwf, "&Kennwort zurücksetzen...", NULL, this, ID_RESET_PW, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	long onMemberRemove(FXObject*, FXSelector, void*) {
+		std::vector<int> sel = selectedMembers();
+		if (sel.empty()) return 1;
+		for (int i : sel) {
+			if (sameDn(memberDns[i], primaryDn)) {
+				FXMessageBox::error(this, MBOX_OK, "Active Directory",
+					"Die primäre Gruppe kann nicht entfernt werden.\n\n"
+					"Legen Sie zuerst eine andere Gruppe als primäre Gruppe fest.");
+				return 1;
+			}
+		}
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Active Directory",
+		        "Möchten Sie den Benutzer wirklich aus den ausgewählten Gruppen entfernen?") != MBOX_CLICKED_YES) return 1;
+		for (auto it = sel.rbegin(); it != sel.rend(); ++it) memberDns.erase(memberDns.begin() + *it);
+		reloadMemberList();
+		return 1;
 	}
-	FXString getDisplayName() const { return displayNameField->getText(); }
-	FXString getDescription() const { return descriptionField->getText(); }
-	bool getDisabled() const { return disabledCheck->getCheck(); }
+
+	long onUpdMemberRemove(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, selectedMembers().empty() ? ID_DISABLE : ID_ENABLE), NULL);
+		return 1;
+	}
+
+	// Primaere Gruppe kann nur eine globale oder universelle
+	// Sicherheitsgruppe werden -- Domaenen-lokale und vordefinierte
+	// (Builtin) Gruppen lehnt AD ab.
+	bool canBePrimary(int idx) const {
+		if (idx < 0 || idx >= (int)memberDns.size()) return false;
+		if (sameDn(memberDns[idx], primaryDn)) return false;
+		GroupEntry g = groupForDn(memberDns[idx]);
+		return g.security && (g.scope == "Global" || g.scope == "Universal");
+	}
+
+	long onUpdSetPrimary(FXObject* sender, FXSelector, void*) {
+		std::vector<int> sel = selectedMembers();
+		bool ok = sel.size() == 1 && canBePrimary(sel[0]);
+		sender->handle(this, FXSEL(SEL_COMMAND, ok ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+
+	long onSetPrimary(FXObject*, FXSelector, void*) {
+		std::vector<int> sel = selectedMembers();
+		if (sel.size() != 1 || !canBePrimary(sel[0])) return 1;
+		primaryDn = memberDns[sel[0]];
+		primaryLabel->setText(groupForDn(primaryDn).cn);
+		return 1;
+	}
+
+	// ---- Uebernehmen -------------------------------------------------
+	bool isDirty() const {
+		for (auto& f : attrFields) if (f.field->getText() != f.orig) return true;
+		if (disabledCheck->getCheck() != origDisabled) return true;
+		if (!sameDn(primaryDn, origPrimaryDn)) return true;
+		if (memberDns.size() != origMemberDns.size()) return true;
+		for (auto& dn : memberDns) if (!containsDn(origMemberDns, dn)) return true;
+		return false;
+	}
+
+	long onUpdApply(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, isDirty() ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+
+	bool apply() {
+		FXString errorMsg;
+
+		// Allgemein -- nur tatsaechlich geaenderte Attribute schreiben; ein
+		// geleertes Feld entfernt das Attribut (ein leerer Wert waere in AD
+		// ein Syntaxfehler).
+		std::string ldif;
+		for (auto& f : attrFields) {
+			FXString v = f.field->getText();
+			v.trim();
+			FXString o = f.orig;
+			o.trim();
+			if (v == o) continue;
+			ldif += std::string("replace: ") + f.attr + "\n";
+			if (!v.empty()) ldif += ldifAttrLine(f.attr, v.text());
+			ldif += "-\n";
+		}
+		if (!ldif.empty()) {
+			ldif = "dn: " + std::string(userFullDN.text()) + "\nchangetype: modify\n" + ldif;
+			std::string log;
+			if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+				return false;
+			}
+			for (auto& f : attrFields) { FXString v = f.field->getText(); v.trim(); f.field->setText(v); f.orig = v; }
+		}
+
+		// Konto
+		if (disabledCheck->getCheck() != origDisabled) {
+			if (!setUserEnabled(accountName, !disabledCheck->getCheck(), errorMsg)) {
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+				return false;
+			}
+			origDisabled = disabledCheck->getCheck();
+		}
+
+		// Mitglied von -- Reihenfolge ist wichtig: erst hinzufuegen (eine
+		// neue primaere Gruppe muss schon Mitglied sein), dann die primaere
+		// Gruppe umstellen, zuletzt entfernen.
+		bool membershipChanged = false;
+		for (auto& dn : memberDns) {
+			if (containsDn(origMemberDns, dn)) continue;
+			GroupEntry g = groupForDn(dn);
+			if (!addGroupMember(this, g.sam, accountName, errorMsg)) {
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "\"%s\" konnte nicht zur Gruppe \"%s\" hinzugefügt werden.\n\n%s",
+				                    accountName.text(), g.cn.text(), errorMsg.text());
+				resyncMembership();
+				return false;
+			}
+			membershipChanged = true;
+		}
+		if (!sameDn(primaryDn, origPrimaryDn)) {
+			GroupEntry g = groupForDn(primaryDn);
+			if (!setUserPrimaryGroup(this, accountName, g.sam, errorMsg)) {
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "Die primäre Gruppe konnte nicht auf \"%s\" gesetzt werden.\n\n%s",
+				                    g.cn.text(), errorMsg.text());
+				resyncMembership();
+				return false;
+			}
+			membershipChanged = true;
+		}
+		for (auto& dn : origMemberDns) {
+			if (containsDn(memberDns, dn)) continue;
+			// Die bisherige primaere Gruppe fuehrt AD beim Umstellen selbst
+			// als normale Mitgliedschaft weiter -- wurde sie im Dialog
+			// entfernt, jetzt ebenfalls entfernen.
+			GroupEntry g = groupForDn(dn);
+			if (!removeGroupMember(this, g.sam, accountName, errorMsg)) {
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "\"%s\" konnte nicht aus der Gruppe \"%s\" entfernt werden.\n\n%s",
+				                    accountName.text(), g.cn.text(), errorMsg.text());
+				resyncMembership();
+				return false;
+			}
+			membershipChanged = true;
+		}
+		if (membershipChanged) resyncMembership();
+		return true;
+	}
+
+	// Nach dem Schreiben (oder einem Teilfehler) den echten Stand aus AD
+	// holen -- beim Wechsel der primaeren Gruppe ergaenzt AD die
+	// bisherige primaere Gruppe z.B. selbst als normale Mitgliedschaft.
+	void resyncMembership() {
+		FXString errorMsg;
+		std::vector<std::string> dns;
+		std::string prim;
+		if (getUserGroupDns(accountName, dns, prim, errorMsg)) {
+			origMemberDns = memberDns = dns;
+			origPrimaryDn = primaryDn = prim;
+		}
+		reloadMemberList();
+	}
+
+	long onApply(FXObject*, FXSelector, void*) {
+		apply();
+		return 1;
+	}
+
+	long onOk(FXObject*, FXSelector, void*) {
+		if (isDirty() && !apply()) return 1;
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+
 	virtual ~UserPropertiesDialog() {}
 };
 FXDEFMAP(UserPropertiesDialog) UserPropertiesDialogMap[] = {
-	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_RESET_PW, UserPropertiesDialog::onResetPassword),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MEMBER_ADD, UserPropertiesDialog::onMemberAdd),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MEMBER_REMOVE, UserPropertiesDialog::onMemberRemove),
+	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_MEMBER_REMOVE, UserPropertiesDialog::onUpdMemberRemove),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_SET_PRIMARY, UserPropertiesDialog::onSetPrimary),
+	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_SET_PRIMARY, UserPropertiesDialog::onUpdSetPrimary),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_APPLY, UserPropertiesDialog::onApply),
+	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_APPLY, UserPropertiesDialog::onUpdApply),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_OK, UserPropertiesDialog::onOk),
 };
 FXIMPLEMENT(UserPropertiesDialog, FXDialogBox, UserPropertiesDialogMap, ARRAYNUMBER(UserPropertiesDialogMap))
 
@@ -3822,11 +4620,13 @@ public:
 	enum {
 		ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT,
 		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_NEW_COMPUTER, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS,
-		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT
+		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT, ID_RESET_PASSWORD
 	};
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
 	long onListRightClick(FXObject*, FXSelector, void*);
+	long onListDoubleClick(FXObject*, FXSelector, void*);
+	long onResetPassword(FXObject*, FXSelector, void*);
 	long onRefresh(FXObject*, FXSelector, void*);
 	long onAbout(FXObject*, FXSelector, void*);
 	long onNewUser(FXObject*, FXSelector, void*);
@@ -3851,6 +4651,8 @@ FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
 	FXMAPFUNC(SEL_CHANGED, DsAdminWindow::ID_TREE, DsAdminWindow::onTreeChanged),
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DsAdminWindow::ID_TREE, DsAdminWindow::onTreeRightClick),
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DsAdminWindow::ID_LIST, DsAdminWindow::onListRightClick),
+	FXMAPFUNC(SEL_DOUBLECLICKED, DsAdminWindow::ID_LIST, DsAdminWindow::onListDoubleClick),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_RESET_PASSWORD, DsAdminWindow::onResetPassword),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_REFRESH, DsAdminWindow::onRefresh),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_ABOUT, DsAdminWindow::onAbout),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_USER, DsAdminWindow::onNewUser),
@@ -4070,6 +4872,8 @@ long DsAdminWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_GROUP_PROPS);
 		new FXMenuSeparator(&menu);
 	} else if (obj.type == OBJ_USER) {
+		new FXMenuCommand(&menu, "&Kennwort zurücksetzen...", NULL, this, ID_RESET_PASSWORD);
+		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_USER_PROPS);
 		new FXMenuSeparator(&menu);
 	}
@@ -4173,35 +4977,67 @@ long DsAdminWindow::onUserProperties(FXObject*, FXSelector, void*) {
 	DirObject obj = currentObjects[idx];
 	if (obj.type != OBJ_USER) return 1;
 
-	// Aktuelle Werte lesen (displayName/description/Kontostatus) --
-	// samba-tool user list liefert das nicht, daher per "user show".
-	std::string raw;
-	runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("show"), obj.accountName }, raw);
-	FXString curDisplayName, curDescription;
-	bool curDisabled = false;
-	for (auto& l : splitLines(raw)) {
-		FXString fl = l.c_str();
-		if (fl.left(12) == "displayName:") curDisplayName = fl.mid(12, fl.length() - 12).trim();
-		else if (fl.left(12) == "description:") curDescription = fl.mid(12, fl.length() - 12).trim();
-		else if (fl.left(19) == "userAccountControl:") {
-			long uac = 0;
-			try { uac = std::stol(fl.mid(19, fl.length() - 19).trim().text()); } catch (...) {}
-			curDisabled = (uac & 0x2) != 0; // UF_ACCOUNTDISABLE
-		}
-	}
-
-	UserPropertiesDialog dlg(this, obj.accountName, curDisplayName, curDescription, curDisabled);
-	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-
-	FXString errorMsg;
-	FXString userFullDN = relDNToFullDN(obj.dn, domain);
-	bool ok = setUserAttributes(this, domain.realm, userFullDN, dlg.getDisplayName(), dlg.getDescription(), errorMsg);
-	if (ok && dlg.getDisabled() != curDisabled) {
-		ok = setUserEnabled(obj.accountName, !dlg.getDisabled(), errorMsg);
-	}
-	if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	getApp()->beginWaitCursor();
+	UserPropertiesDialog dlg(this, domain, obj);
+	getApp()->endWaitCursor();
+	dlg.execute(PLACEMENT_OWNER);
+	// Auch nach "Abbrechen" neu laden -- "Übernehmen" kann vorher schon
+	// geschrieben haben.
 	onRefresh(NULL, 0, NULL);
 	return 1;
+}
+
+// Im Original steht "Kennwort zurücksetzen..." im Kontextmenue des
+// Benutzers, nicht in dessen Eigenschaften.
+long DsAdminWindow::onResetPassword(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	DirObject obj = currentObjects[idx];
+	if (obj.type != OBJ_USER) return 1;
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Kennwort gesetzt werden."); return 1; }
+
+	SetPasswordDialog dlg(this, obj.name);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	FXString pw = dlg.getPassword(), confirm = dlg.getConfirm();
+	if (pw != confirm) { FXMessageBox::error(this, MBOX_OK, "Active Directory", "Die Kennwörter stimmen nicht überein."); return 1; }
+	FXString errorMsg;
+	if (setUserPassword(obj.accountName, pw, errorMsg)) {
+		FXMessageBox::information(this, MBOX_OK, "Active Directory", "Das Kennwort für %s wurde geändert.", obj.name.text());
+	} else {
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+	return 1;
+}
+
+// Doppelklick in der Liste: Benutzer und Gruppen oeffnen ihre
+// Eigenschaften, Container und Organisationseinheiten werden -- wie im
+// Original -- im Baum geoeffnet.
+long DsAdminWindow::onListDoubleClick(FXObject*, FXSelector, void* ptr) {
+	FXint idx = (FXint)(FXival)ptr;
+	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
+	list->setCurrentItem(idx);
+	DirObject obj = currentObjects[idx];
+	switch (obj.type) {
+		case OBJ_USER:
+			return onUserProperties(NULL, 0, NULL);
+		case OBJ_GROUP:
+			return onGroupProperties(NULL, 0, NULL);
+		case OBJ_OU:
+		case OBJ_CONTAINER:
+			for (auto& kv : itemToRelDN) {
+				if (kv.second != obj.dn) continue;
+				FXTreeItem* item = kv.first;
+				if (item->getParent()) tree->expandTree(item->getParent());
+				tree->selectItem(item);
+				tree->setCurrentItem(item);
+				tree->makeItemVisible(item);
+				showContainer(obj.dn);
+				return 1;
+			}
+			return 1;
+		default:
+			return 1;
+	}
 }
 
 long DsAdminWindow::onMoveObject(FXObject*, FXSelector, void*) {
