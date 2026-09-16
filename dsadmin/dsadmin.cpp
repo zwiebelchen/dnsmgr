@@ -5103,6 +5103,502 @@ static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::st
 }
 
 // ---------------------------------------------------------------------
+// Berechtigungen als SDDL -- gemeinsam fuer Systemdienste, Registrierung
+// und Dateisystem. "O:..G:..D:<Flags>(ACE)(ACE)S:..." -- bearbeitet wird
+// nur die DACL; Besitzer, Gruppe und SACL gehen unveraendert durch.
+// ACE: "(Typ;Flags;Rechte;Objekt-GUID;geerbte GUID;SID)".
+// ---------------------------------------------------------------------
+struct SddlAce {
+	std::string type;      // "A" zulassen, "D" verweigern, sonst unveraendert durchreichen
+	std::string flags;     // "OICI", "CI", "ID" ...
+	uint32_t mask = 0;
+	std::string objGuid, inhGuid;
+	std::string sid;       // immer als "S-1-..." (Kuerzel beim Lesen aufgeloest)
+};
+
+struct SddlDescriptor {
+	std::string prefix;    // alles vor "D:" (O:/G:)
+	std::string daclFlags; // "P", "AR", "AI" ...
+	std::vector<SddlAce> aces;
+	std::string suffix;    // ab "S:" (SACL)
+	bool hasDacl = false;
+};
+
+struct SddlAlias { const char* alias; const char* sid; };
+// Relative Kuerzel ("DA", "DU" ...) haengen an die Domaenen-SID.
+static const SddlAlias SDDL_ALIASES[] = {
+	{ "WD", "S-1-1-0" }, { "CO", "S-1-3-0" }, { "CG", "S-1-3-1" },
+	{ "NU", "S-1-5-2" }, { "IU", "S-1-5-4" }, { "SU", "S-1-5-6" }, { "AN", "S-1-5-7" },
+	{ "ED", "S-1-5-9" }, { "PS", "S-1-5-10" }, { "AU", "S-1-5-11" }, { "RC", "S-1-5-12" },
+	{ "SY", "S-1-5-18" }, { "LS", "S-1-5-19" }, { "NS", "S-1-5-20" },
+	{ "BA", "S-1-5-32-544" }, { "BU", "S-1-5-32-545" }, { "BG", "S-1-5-32-546" }, { "PU", "S-1-5-32-547" },
+	{ "AO", "S-1-5-32-548" }, { "SO", "S-1-5-32-549" }, { "PO", "S-1-5-32-550" }, { "BO", "S-1-5-32-551" },
+	{ "RE", "S-1-5-32-552" }, { "RU", "S-1-5-32-554" }, { "RD", "S-1-5-32-555" },
+};
+static const SddlAlias SDDL_DOMAIN_ALIASES[] = {
+	{ "LA", "-500" }, { "LG", "-501" }, { "DA", "-512" }, { "DU", "-513" }, { "DG", "-514" },
+	{ "DC", "-515" }, { "DD", "-516" }, { "CA", "-517" }, { "SA", "-518" }, { "EA", "-519" }, { "PA", "-520" },
+};
+
+static std::string sddlSidToFull(const std::string& s, const std::string& domainSid) {
+	if (s.compare(0, 2, "S-") == 0) return s;
+	for (auto& a : SDDL_ALIASES) if (s == a.alias) return a.sid;
+	if (!domainSid.empty())
+		for (auto& a : SDDL_DOMAIN_ALIASES) if (s == a.alias) return domainSid + a.sid;
+	return s; // unbekannt -- so lassen, wie es war
+}
+
+static std::string sddlSidToShort(const std::string& full, const std::string& domainSid) {
+	for (auto& a : SDDL_ALIASES) if (full == a.sid) return a.alias;
+	if (!domainSid.empty())
+		for (auto& a : SDDL_DOMAIN_ALIASES) if (full == domainSid + a.sid) return a.alias;
+	return full;
+}
+
+struct SddlRightCode { const char* code; uint32_t mask; };
+// Zusammengesetzte Kuerzel zuerst -- beim Schreiben wird ein exakt
+// passender Gesamtwert bevorzugt, sonst Einzelbits, sonst hexadezimal.
+static const SddlRightCode SDDL_COMBINED_RIGHTS[] = {
+	{ "FA", 0x1F01FF }, { "FR", 0x120089 }, { "FW", 0x120116 }, { "FX", 0x1200A0 },
+	{ "KA", 0xF003F }, { "KR", 0x20019 }, { "KW", 0x20006 },
+};
+static const SddlRightCode SDDL_BIT_RIGHTS[] = {
+	{ "CC", 0x1 }, { "DC", 0x2 }, { "LC", 0x4 }, { "SW", 0x8 }, { "RP", 0x10 }, { "WP", 0x20 },
+	{ "DT", 0x40 }, { "LO", 0x80 }, { "CR", 0x100 }, { "SD", 0x10000 }, { "RC", 0x20000 },
+	{ "WD", 0x40000 }, { "WO", 0x80000 },
+	{ "GA", 0x10000000 }, { "GX", 0x20000000 }, { "GW", 0x40000000 }, { "GR", 0x80000000 },
+};
+
+static uint32_t sddlParseRights(const std::string& r) {
+	if (r.size() > 2 && (r.compare(0, 2, "0x") == 0 || r.compare(0, 2, "0X") == 0)) {
+		try { return (uint32_t)std::stoul(r.substr(2), nullptr, 16); } catch (...) { return 0; }
+	}
+	uint32_t m = 0;
+	for (size_t i = 0; i + 1 < r.size(); i += 2) {
+		std::string c = r.substr(i, 2);
+		bool found = false;
+		for (auto& x : SDDL_COMBINED_RIGHTS) if (c == x.code) { m |= x.mask; found = true; }
+		for (auto& x : SDDL_BIT_RIGHTS) if (c == x.code) { m |= x.mask; found = true; }
+		// "KX" ist identisch mit KR
+		if (!found && c == "KX") m |= 0x20019;
+	}
+	return m;
+}
+
+static std::string sddlFormatRights(uint32_t m) {
+	for (auto& x : SDDL_COMBINED_RIGHTS) if (m == x.mask) return x.code;
+	uint32_t rest = m;
+	std::string out;
+	for (auto& x : SDDL_BIT_RIGHTS) if (rest & x.mask) { out += x.code; rest &= ~x.mask; }
+	if (rest == 0 && !out.empty()) return out;
+	char buf[16];
+	snprintf(buf, sizeof(buf), "0x%x", m);
+	return buf;
+}
+
+static SddlDescriptor parseSddl(const std::string& sddl, const std::string& domainSid) {
+	SddlDescriptor d;
+	size_t dpos = sddl.find("D:");
+	if (dpos == std::string::npos) { d.prefix = sddl; return d; }
+	d.hasDacl = true;
+	d.prefix = sddl.substr(0, dpos);
+	size_t i = dpos + 2;
+	while (i < sddl.size() && sddl[i] != '(' && sddl.compare(i, 2, "S:") != 0) d.daclFlags += sddl[i++];
+	while (i < sddl.size() && sddl[i] == '(') {
+		size_t end = sddl.find(')', i);
+		if (end == std::string::npos) break;
+		std::vector<std::string> f;
+		std::string cur;
+		for (size_t k = i + 1; k < end; k++) {
+			if (sddl[k] == ';') { f.push_back(cur); cur.clear(); } else cur += sddl[k];
+		}
+		f.push_back(cur);
+		if (f.size() >= 6) {
+			SddlAce a;
+			a.type = f[0];
+			a.flags = f[1];
+			a.mask = sddlParseRights(f[2]);
+			a.objGuid = f[3];
+			a.inhGuid = f[4];
+			a.sid = sddlSidToFull(f[5], domainSid);
+			d.aces.push_back(a);
+		}
+		i = end + 1;
+	}
+	d.suffix = sddl.substr(i);
+	return d;
+}
+
+static std::string formatSddl(const SddlDescriptor& d, const std::string& domainSid) {
+	std::string out = d.prefix;
+	if (d.hasDacl) {
+		out += "D:" + d.daclFlags;
+		for (auto& a : d.aces)
+			out += "(" + a.type + ";" + a.flags + ";" + sddlFormatRights(a.mask) + ";" + a.objGuid + ";" + a.inhGuid + ";" +
+			       sddlSidToShort(a.sid, domainSid) + ")";
+	}
+	return out + d.suffix;
+}
+
+// ---------------------------------------------------------------------
+// Einfache Berechtigungen je Objektart, wie sie der Dialog von Windows
+// 2000 anbietet. Generische Rechte (GA/GR/GW/GX) werden vor dem Abgleich
+// in die objektspezifischen Bits uebersetzt.
+// ---------------------------------------------------------------------
+enum SecObjectKind { SECOBJ_SERVICE, SECOBJ_REGISTRY, SECOBJ_FILE };
+
+struct SimplePermission { const char* label; uint32_t mask; };
+
+static const std::vector<SimplePermission>& simplePermissions(SecObjectKind kind) {
+	static const std::vector<SimplePermission> service = {
+		{ "Vollzugriff", 0xF01FF },
+		{ "Lesen", 0x2018D },
+		{ "Starten, beenden und anhalten", 0x70 },
+		{ "Schreiben", 0x20002 },
+		{ "Löschen", 0x10000 },
+	};
+	static const std::vector<SimplePermission> registry = {
+		{ "Vollzugriff", 0xF003F },
+		{ "Lesen", 0x20019 },
+	};
+	static const std::vector<SimplePermission> file = {
+		{ "Vollzugriff", 0x1F01FF },
+		{ "Ändern", 0x1301BF },
+		{ "Lesen, Ausführen", 0x1200A9 },
+		{ "Lesen", 0x120089 },
+		{ "Schreiben", 0x100116 },
+	};
+	return kind == SECOBJ_SERVICE ? service : kind == SECOBJ_REGISTRY ? registry : file;
+}
+
+static uint32_t expandGenericRights(uint32_t m, SecObjectKind kind) {
+	uint32_t all = kind == SECOBJ_SERVICE ? 0xF01FF : kind == SECOBJ_REGISTRY ? 0xF003F : 0x1F01FF;
+	uint32_t read = kind == SECOBJ_SERVICE ? 0x2018D : kind == SECOBJ_REGISTRY ? 0x20019 : 0x120089;
+	uint32_t write = kind == SECOBJ_SERVICE ? 0x20002 : kind == SECOBJ_REGISTRY ? 0x20006 : 0x120116;
+	uint32_t exec = kind == SECOBJ_SERVICE ? 0x20170 : kind == SECOBJ_REGISTRY ? 0x20019 : 0x1200A0;
+	uint32_t out = m & 0x0FFFFFFF;
+	if (m & 0x10000000) out |= all;
+	if (m & 0x80000000) out |= read;
+	if (m & 0x40000000) out |= write;
+	if (m & 0x20000000) out |= exec;
+	return out;
+}
+
+// Vorgabe fuer neu hinzugefuegte Konten: Dateien/Ordner und Schluessel
+// vererben an Unterobjekte, Dienste haben keine.
+static const char* defaultAceFlags(SecObjectKind kind) {
+	return kind == SECOBJ_FILE ? "OICI" : kind == SECOBJ_REGISTRY ? "CI" : "";
+}
+
+// Domaenen-SID aus der Kontenliste (die SID von "Domain Admins" ohne -512).
+static std::string domainSidFromPrincipals(const std::vector<GroupEntry>& principals) {
+	for (auto& p : principals) {
+		const std::string& s = p.sid;
+		if (s.compare(0, 9, "S-1-5-21-") == 0 && s.size() > 4 && s.compare(s.size() - 4, 4, "-512") == 0)
+			return s.substr(0, s.size() - 4);
+	}
+	return "";
+}
+
+// ---------------------------------------------------------------------
+// Dialog "Sicherheit für ..." -- oben die Konten, unten die einfachen
+// Berechtigungen mit Zulassen/Verweigern. Geerbte Eintraege werden
+// angezeigt, aber nicht veraendert; Konten, an denen nichts geaendert
+// wurde, behalten ihre Eintraege Byte fuer Byte (auch Flags und
+// Sonderrechte, die der einfache Dialog nicht darstellen kann).
+// ---------------------------------------------------------------------
+class SecurityDialog : public FXDialogBox {
+	FXDECLARE(SecurityDialog)
+private:
+	struct Entry {
+		std::string sid;
+		uint32_t allow = 0, deny = 0;                 // explizit
+		uint32_t inheritedAllow = 0, inheritedDeny = 0;
+		std::string allowFlags, denyFlags;            // Flags der ersten expliziten Eintraege
+		bool dirty = false;
+	};
+
+	SecObjectKind kind;
+	std::string domainSid;
+	const std::vector<GroupEntry>* principals = nullptr;
+	SddlDescriptor desc;
+	std::vector<Entry> entries;
+
+	FXIconList* nameList = nullptr;
+	std::vector<FXCheckButton*> allowChecks, denyChecks;
+	FXCheckButton* inheritCheck = nullptr;
+
+protected:
+	SecurityDialog() {}
+public:
+	enum { ID_NAMES = FXDialogBox::ID_LAST, ID_ADD, ID_REMOVE, ID_INHERIT, ID_ALLOW_FIRST = ID_INHERIT + 1,
+	       ID_ALLOW_LAST = ID_ALLOW_FIRST + 15, ID_DENY_FIRST, ID_DENY_LAST = ID_DENY_FIRST + 15 };
+
+	SecurityDialog(FXWindow* owner, const FXString& objectName, SecObjectKind kind_, const std::string& sddl,
+	               const std::vector<GroupEntry>& principals_)
+		: FXDialogBox(owner, "Sicherheit für " + objectName, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0),
+		  kind(kind_), principals(&principals_) {
+		domainSid = domainSidFromPrincipals(principals_);
+		desc = parseSddl(sddl, domainSid);
+		desc.hasDacl = true;
+		buildEntries();
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		new FXLabel(main, "&Name");
+		FXHorizontalFrame* top = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 8,0);
+		FXPacker* lf = new FXPacker(top, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,130, 0,0,0,0);
+		nameList = new FXIconList(lf, this, ID_NAMES, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		nameList->appendHeader("Name", NULL, 280);
+		FXVerticalFrame* btns = new FXVerticalFrame(top, LAYOUT_FILL_Y | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,0,0, 0,6);
+		new FXButton(btns, "&Hinzufügen...", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+
+		FXMatrix* m = new FXMatrix(main, 3, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,6,0, 10,2);
+		new FXLabel(m, "&Berechtigungen:", NULL, JUSTIFY_LEFT | LAYOUT_FILL_COLUMN | LAYOUT_FILL_X);
+		new FXLabel(m, "Zulassen", NULL, JUSTIFY_CENTER_X);
+		new FXLabel(m, "Verweigern", NULL, JUSTIFY_CENTER_X);
+		const auto& perms = simplePermissions(kind);
+		for (size_t i = 0; i < perms.size(); i++) {
+			new FXLabel(m, perms[i].label, NULL, JUSTIFY_LEFT | LAYOUT_FILL_COLUMN | LAYOUT_FILL_X);
+			allowChecks.push_back(new FXCheckButton(m, "", this, ID_ALLOW_FIRST + (int)i, CHECKBUTTON_NORMAL | LAYOUT_CENTER_X));
+			denyChecks.push_back(new FXCheckButton(m, "", this, ID_DENY_FIRST + (int)i, CHECKBUTTON_NORMAL | LAYOUT_CENTER_X));
+		}
+
+		if (kind != SECOBJ_SERVICE) {
+			inheritCheck = new FXCheckButton(main, "Vererbbare übergeordnete Berechtigungen &übernehmen", this, ID_INHERIT);
+			inheritCheck->setCheck(desc.daclFlags.find('P') == std::string::npos);
+		}
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+
+		reloadNames(0);
+	}
+
+	void buildEntries() {
+		auto entryFor = [&](const std::string& sid) -> Entry& {
+			for (auto& e : entries) if (e.sid == sid) return e;
+			Entry e;
+			e.sid = sid;
+			entries.push_back(e);
+			return entries.back();
+		};
+		for (auto& a : desc.aces) {
+			if ((a.type != "A" && a.type != "D") || !a.objGuid.empty() || !a.inhGuid.empty()) continue;
+			// "Nur Unterobjekte" (IO) gilt nicht fuer das Objekt selbst.
+			bool inherited = a.flags.find("ID") != std::string::npos;
+			uint32_t m = expandGenericRights(a.mask, kind);
+			Entry& e = entryFor(a.sid);
+			if (a.type == "A") {
+				if (inherited) e.inheritedAllow |= m;
+				else { if (e.allow == 0 && e.allowFlags.empty()) e.allowFlags = a.flags; e.allow |= m; }
+			} else {
+				if (inherited) e.inheritedDeny |= m;
+				else { if (e.deny == 0 && e.denyFlags.empty()) e.denyFlags = a.flags; e.deny |= m; }
+			}
+		}
+	}
+
+	FXString displayName(const std::string& sid) const {
+		return accountTokenDisplay("*" + sid, *principals);
+	}
+
+	void reloadNames(int select) {
+		nameList->clearItems();
+		for (auto& e : entries) {
+			const unsigned char* icon = resico_users;
+			for (auto& p : *principals) if (p.sid == e.sid && p.icon) icon = p.icon;
+			FXIcon* ic = sharedPngIcon(icon);
+			nameList->appendItem(displayName(e.sid), ic, ic);
+		}
+		if (!entries.empty()) {
+			select = std::max(0, std::min(select, (int)entries.size() - 1));
+			nameList->setCurrentItem(select);
+			nameList->selectItem(select);
+		}
+		refreshChecks();
+	}
+
+	int currentEntry() const {
+		int i = nameList->getCurrentItem();
+		return (i >= 0 && i < (int)entries.size()) ? i : -1;
+	}
+
+	void refreshChecks() {
+		int idx = currentEntry();
+		const auto& perms = simplePermissions(kind);
+		for (size_t i = 0; i < perms.size(); i++) {
+			if (idx < 0) {
+				allowChecks[i]->setCheck(FALSE); allowChecks[i]->disable();
+				denyChecks[i]->setCheck(FALSE); denyChecks[i]->disable();
+				continue;
+			}
+			const Entry& e = entries[idx];
+			uint32_t pm = perms[i].mask;
+			bool expAllow = (e.allow & pm) == pm, inhAllow = (e.inheritedAllow & pm) == pm;
+			bool expDeny = (e.deny & pm) == pm, inhDeny = (e.inheritedDeny & pm) == pm;
+			allowChecks[i]->setCheck(expAllow || inhAllow);
+			denyChecks[i]->setCheck(expDeny || inhDeny);
+			// Wie im Original: nur geerbt = grau angehakt, nicht aenderbar.
+			if (inhAllow && !expAllow) allowChecks[i]->disable(); else allowChecks[i]->enable();
+			if (inhDeny && !expDeny) denyChecks[i]->disable(); else denyChecks[i]->enable();
+		}
+	}
+
+	long onNameSelected(FXObject*, FXSelector, void*) { refreshChecks(); return 1; }
+
+	long onAllow(FXObject*, FXSelector sel, void*) {
+		int idx = currentEntry();
+		int i = FXSELID(sel) - ID_ALLOW_FIRST;
+		if (idx < 0) return 1;
+		Entry& e = entries[idx];
+		uint32_t pm = simplePermissions(kind)[i].mask;
+		if (allowChecks[i]->getCheck()) { e.allow |= pm; e.deny &= ~pm; }
+		else e.allow &= ~pm;
+		e.dirty = true;
+		refreshChecks();
+		return 1;
+	}
+
+	long onDeny(FXObject*, FXSelector sel, void*) {
+		int idx = currentEntry();
+		int i = FXSELID(sel) - ID_DENY_FIRST;
+		if (idx < 0) return 1;
+		Entry& e = entries[idx];
+		uint32_t pm = simplePermissions(kind)[i].mask;
+		if (denyChecks[i]->getCheck()) { e.deny |= pm; e.allow &= ~pm; }
+		else e.deny &= ~pm;
+		e.dirty = true;
+		refreshChecks();
+		return 1;
+	}
+
+	long onAdd(FXObject*, FXSelector, void*) {
+		DomainInfo domain = detectDomain();
+		GroupPickerDialog dlg(this, domain.realm, *principals, "Benutzer, Computer oder Gruppen auswählen", resico_users);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		int select = currentEntry();
+		for (int pi : dlg.getResult()) {
+			const std::string& sid = (*principals)[pi].sid;
+			int found = -1;
+			for (size_t k = 0; k < entries.size(); k++) if (entries[k].sid == sid) found = (int)k;
+			if (found < 0) {
+				// Wie im Original: ein neues Konto bekommt zunaechst "Lesen".
+				Entry e;
+				e.sid = sid;
+				e.allow = kind == SECOBJ_FILE ? 0x1200A9 : simplePermissions(kind)[1].mask;
+				e.allowFlags = defaultAceFlags(kind);
+				e.dirty = true;
+				entries.push_back(e);
+				found = (int)entries.size() - 1;
+			}
+			select = found;
+		}
+		reloadNames(select);
+		return 1;
+	}
+
+	long onRemove(FXObject*, FXSelector, void*) {
+		int idx = currentEntry();
+		if (idx < 0) return 1;
+		Entry& e = entries[idx];
+		if (e.inheritedAllow || e.inheritedDeny) {
+			FXMessageBox::error(this, MBOX_OK, "Sicherheit",
+				"Dieses Objekt kann nicht entfernt werden, da es Berechtigungen vom\n"
+				"übergeordneten Objekt erbt. Deaktivieren Sie zuerst die Vererbung.");
+			return 1;
+		}
+		std::string sid = e.sid;
+		desc.aces.erase(std::remove_if(desc.aces.begin(), desc.aces.end(), [&](const SddlAce& a) {
+			return a.sid == sid && (a.type == "A" || a.type == "D") && a.objGuid.empty() && a.inhGuid.empty();
+		}), desc.aces.end());
+		entries.erase(entries.begin() + idx);
+		reloadNames(idx);
+		return 1;
+	}
+
+	long onUpdRemove(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, currentEntry() >= 0 ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+
+	long onInherit(FXObject*, FXSelector, void*) {
+		bool inherit = inheritCheck->getCheck();
+		std::string f = desc.daclFlags;
+		f.erase(std::remove(f.begin(), f.end(), 'P'), f.end());
+		if (!inherit) {
+			// Wie im Original: geerbte Eintraege beim Abschalten der Vererbung
+			// als eigene uebernehmen, statt die Berechtigungen zu verlieren.
+			if (FXMessageBox::question(this, MBOX_YES_NO, "Sicherheit",
+			        "Die geerbten Berechtigungen als explizite Berechtigungen übernehmen?\n\n"
+			        "\"Nein\" entfernt die geerbten Berechtigungen.") == MBOX_CLICKED_YES) {
+				for (auto& a : desc.aces) {
+					size_t p = a.flags.find("ID");
+					if (p != std::string::npos) a.flags.erase(p, 2);
+				}
+			} else {
+				desc.aces.erase(std::remove_if(desc.aces.begin(), desc.aces.end(), [](const SddlAce& a) {
+					return a.flags.find("ID") != std::string::npos;
+				}), desc.aces.end());
+			}
+			f = "P" + f;
+			desc.daclFlags = f;
+			entries.clear();
+			buildEntries();
+			reloadNames(0);
+			return 1;
+		}
+		desc.daclFlags = f;
+		return 1;
+	}
+
+	// Setzt die DACL wieder zusammen: je geaendertem Konto erst
+	// Verweigern, dann Zulassen (kanonische Reihenfolge), unveraenderte
+	// Eintraege bleiben, geerbte ans Ende.
+	std::string getSddl() {
+		std::vector<SddlAce> explicitAces, inheritedAces;
+		std::set<std::string> dirtySids;
+		for (auto& e : entries) if (e.dirty) dirtySids.insert(e.sid);
+		for (auto& a : desc.aces) {
+			bool simple = (a.type == "A" || a.type == "D") && a.objGuid.empty() && a.inhGuid.empty();
+			if (a.flags.find("ID") != std::string::npos) { inheritedAces.push_back(a); continue; }
+			if (simple && dirtySids.count(a.sid)) continue; // wird neu erzeugt
+			explicitAces.push_back(a);
+		}
+		std::vector<SddlAce> denies, allows;
+		for (auto& e : entries) {
+			if (!e.dirty) continue;
+			if (e.deny) { SddlAce a; a.type = "D"; a.flags = e.denyFlags.empty() ? defaultAceFlags(kind) : e.denyFlags; a.mask = e.deny; a.sid = e.sid; denies.push_back(a); }
+			if (e.allow) { SddlAce a; a.type = "A"; a.flags = e.allowFlags.empty() ? defaultAceFlags(kind) : e.allowFlags; a.mask = e.allow; a.sid = e.sid; allows.push_back(a); }
+		}
+		std::vector<SddlAce> result;
+		for (auto& a : denies) result.push_back(a);
+		for (auto& a : explicitAces) if (a.type == "D") result.push_back(a);
+		for (auto& a : allows) result.push_back(a);
+		for (auto& a : explicitAces) if (a.type != "D") result.push_back(a);
+		for (auto& a : inheritedAces) result.push_back(a);
+		SddlDescriptor out = desc;
+		out.aces = result;
+		return formatSddl(out, domainSid);
+	}
+
+	virtual ~SecurityDialog() {}
+};
+FXDEFMAP(SecurityDialog) SecurityDialogMap[] = {
+	FXMAPFUNC(SEL_CHANGED, SecurityDialog::ID_NAMES, SecurityDialog::onNameSelected),
+	FXMAPFUNC(SEL_SELECTED, SecurityDialog::ID_NAMES, SecurityDialog::onNameSelected),
+	FXMAPFUNC(SEL_COMMAND, SecurityDialog::ID_ADD, SecurityDialog::onAdd),
+	FXMAPFUNC(SEL_COMMAND, SecurityDialog::ID_REMOVE, SecurityDialog::onRemove),
+	FXMAPFUNC(SEL_UPDATE, SecurityDialog::ID_REMOVE, SecurityDialog::onUpdRemove),
+	FXMAPFUNC(SEL_COMMAND, SecurityDialog::ID_INHERIT, SecurityDialog::onInherit),
+	FXMAPFUNCS(SEL_COMMAND, SecurityDialog::ID_ALLOW_FIRST, SecurityDialog::ID_ALLOW_LAST, SecurityDialog::onAllow),
+	FXMAPFUNCS(SEL_COMMAND, SecurityDialog::ID_DENY_FIRST, SecurityDialog::ID_DENY_LAST, SecurityDialog::onDeny),
+};
+FXIMPLEMENT(SecurityDialog, FXDialogBox, SecurityDialogMap, ARRAYNUMBER(SecurityDialogMap))
+
+// ---------------------------------------------------------------------
 // Systemdienste ([Service General Setting]): je Dienst eine Zeile
 // "\"Name\",Starttyp,\"SDDL\"" -- Starttyp 2 = Automatisch, 3 = Manuell,
 // 4 = Deaktiviert. Die Liste der Dienste kommt wie im Original vom
@@ -5173,13 +5669,19 @@ private:
 	FXint mode = 2;
 	FXDataTarget modeTarget;
 	std::vector<FXWindow*> controls;
+	FXString serviceName;
+	std::string sddl;
+	const std::vector<GroupEntry>* principals = nullptr;
 protected:
 	ServicePolicyDialog() {}
 public:
-	enum { ID_DEFINE = FXDialogBox::ID_LAST };
-	ServicePolicyDialog(FXWindow* owner, const FXString& serviceName, const ServicePolicy& sp)
+	enum { ID_DEFINE = FXDialogBox::ID_LAST, ID_SECURITY };
+	ServicePolicyDialog(FXWindow* owner, const FXString& serviceName_, const ServicePolicy& sp,
+	                    const std::vector<GroupEntry>& principals_)
 		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0),
-		  mode(sp.defined && sp.startMode >= 2 && sp.startMode <= 4 ? sp.startMode : 2), modeTarget(mode) {
+		  mode(sp.defined && sp.startMode >= 2 && sp.startMode <= 4 ? sp.startMode : 2), modeTarget(mode),
+		  serviceName(serviceName_), sddl(sp.sddl.empty() ? SERVICE_DEFAULT_SDDL : sp.sddl), principals(&principals_) {
+		const FXString& serviceName = serviceName_;
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
 		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
 		new FXLabel(head, "", sharedPngIcon(resico_server), LAYOUT_TOP);
@@ -5194,10 +5696,7 @@ public:
 		controls.push_back(new FXRadioButton(body, "D&eaktiviert", &modeTarget, FXDataTarget::ID_OPTION + 4));
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
-		// Der Berechtigungsdialog folgt; bis dahin behaelt ein Dienst seine
-		// Berechtigungen bzw. bekommt beim ersten Definieren die Vorgabe.
-		FXButton* sec = new FXButton(btnf, "&Sicherheit bearbeiten...", NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
-		sec->disable();
+		controls.push_back(new FXButton(btnf, "&Sicherheit bearbeiten...", NULL, this, ID_SECURITY, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3));
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
@@ -5207,12 +5706,19 @@ public:
 		for (auto* w : controls) { if (defineCheck->getCheck()) w->enable(); else w->disable(); }
 	}
 	long onDefine(FXObject*, FXSelector, void*) { updateEnabled(); return 1; }
+	long onSecurity(FXObject*, FXSelector, void*) {
+		SecurityDialog dlg(this, serviceName, SECOBJ_SERVICE, sddl, *principals);
+		if (dlg.execute(PLACEMENT_OWNER)) sddl = dlg.getSddl();
+		return 1;
+	}
 	bool isDefined() const { return defineCheck->getCheck(); }
 	int getMode() const { return mode; }
+	const std::string& getSddl() const { return sddl; }
 	virtual ~ServicePolicyDialog() {}
 };
 FXDEFMAP(ServicePolicyDialog) ServicePolicyDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, ServicePolicyDialog::ID_DEFINE, ServicePolicyDialog::onDefine),
+	FXMAPFUNC(SEL_COMMAND, ServicePolicyDialog::ID_SECURITY, ServicePolicyDialog::onSecurity),
 };
 FXIMPLEMENT(ServicePolicyDialog, FXDialogBox, ServicePolicyDialogMap, ARRAYNUMBER(ServicePolicyDialogMap))
 
@@ -5660,13 +6166,14 @@ public:
 		inf = loadGptTmpl(domain, guid);
 		std::string name = info.displayName();
 		ServicePolicy sp = findServicePolicy(inf, name);
-		ServicePolicyDialog dlg(this, name.c_str(), sp);
+		ensurePrincipals();
+		ServicePolicyDialog dlg(this, name.c_str(), sp, principals);
 		if (!dlg.execute(PLACEMENT_OWNER)) return;
-		if (dlg.isDefined() == sp.defined && (!sp.defined || dlg.getMode() == sp.startMode)) return;
+		if (dlg.isDefined() == sp.defined && (!sp.defined || (dlg.getMode() == sp.startMode && dlg.getSddl() == sp.sddl))) return;
 		ServicePolicy changed = sp;
 		changed.defined = dlg.isDefined();
 		changed.startMode = dlg.getMode();
-		if (changed.defined && changed.sddl.empty()) changed.sddl = SERVICE_DEFAULT_SDDL;
+		changed.sddl = dlg.getSddl();
 		setServicePolicy(inf, name, changed);
 		saveTemplate(false);
 		inf = loadGptTmpl(domain, guid);
