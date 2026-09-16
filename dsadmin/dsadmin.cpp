@@ -1508,6 +1508,29 @@ struct SoftwarePackageParams {
 	bool published;             // nur relevant fuer Benutzerkonfiguration (assignedPerMachine=false)
 };
 
+// Uebertraegt Besitzer, Modus und die NT-ACL eines vorhandenen
+// SYSVOL-Verzeichnisses auf eine neu angelegte Datei oder ein neues
+// Verzeichnis. Ohne das fehlen einer frisch per mkdir/cp erzeugten
+// Datei genau die Rechte, ueber die Clients auf SYSVOL zugreifen.
+static void inheritSysvolPermissions(const std::string& referenceDir, const std::string& target, bool isDir) {
+	runAsRoot({ FXString("chown"), FXString(("--reference=" + referenceDir).c_str()), FXString(target.c_str()) });
+	runAsRoot({ FXString("chmod"), FXString(isDir ? "0770" : "0770"), FXString(target.c_str()) });
+
+	// NT-ACL vom Vorbild holen. "samba-tool ntacl get" schreibt diverse
+	// Meldungen mit; die SDDL-Zeile ist die, die mit "O:" beginnt.
+	std::string out;
+	runAsRootCaptured({ FXString("samba-tool"), FXString("ntacl"), FXString("get"),
+	                    FXString(referenceDir.c_str()), FXString("--as-sddl") }, out);
+	std::string sddl;
+	for (auto& line : splitLines(out)) {
+		std::string l = trimStr(line);
+		if (l.compare(0, 2, "O:") == 0) { sddl = l; break; }
+	}
+	if (sddl.empty()) return;
+	runAsRoot({ FXString("samba-tool"), FXString("ntacl"), FXString("set"),
+	            FXString(sddl.c_str()), FXString(target.c_str()) });
+}
+
 // Kompletter Ablauf: MSI-Metadaten lesen, .aas-Datei schreiben,
 // PackageRegistration-Objekt in AD anlegen, GPO-Erweiterungsliste
 // aktualisieren.
@@ -1568,6 +1591,14 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 	int rc = runAsRoot({ FXString("cp"), FXString(aasLocalTmp.c_str()), FXString(aasDestPath.c_str()) });
 	runAsRoot({ FXString("rm"), FXString("-f"), FXString(aasLocalTmp.c_str()) });
 	if (rc != 0) { errorMsg = "Konnte .aas-Datei nicht nach SYSVOL kopieren."; return false; }
+
+	// Rechte angleichen. "mkdir"/"cp" als root erzeugen root:root ohne
+	// NT-ACL -- das Maschinenkonto des Clients kommt dann nicht an die
+	// Datei heran und meldet beim Kopieren der Skriptdatei "Fehler 3"
+	// (Pfad nicht gefunden). In der Praxis genau so aufgetreten.
+	// Vorbild ist das uebergeordnete Verzeichnis des GPO-Zweigs.
+	inheritSysvolPermissions(sysvolScopeDir, appsDir, true);
+	inheritSysvolPermissions(sysvolScopeDir, aasDestPath, false);
 
 	// UNC-Pfad zur .aas-Datei fuer das msiScriptPath-Attribut.
 	std::string msiScriptPath = "\\\\" + std::string(realmLower.text()) + "\\sysvol\\" + std::string(realmLower.text()) +

@@ -134,6 +134,20 @@ Nicht gegengeprüft ist der Wert von `packageFlags` für
 wird das Assigned-Bit gegen das Published-Bit getauscht, was eine
 Annahme bleibt.
 
+## Rechte im SYSVOL
+
+Die `.aas`-Datei und ihr `Applications`-Verzeichnis werden per
+`mkdir`/`cp` als root angelegt und gehören dann `root:root` ohne
+NT-ACL. Das Maschinenkonto des Clients kommt so nicht heran: der
+Client meldet beim Kopieren der Skriptdatei "Fehler 3" (Pfad nicht
+gefunden), obwohl die Datei existiert. Deshalb werden Besitzer, Modus
+und NT-ACL anschließend vom übergeordneten Verzeichnis des GPO-Zweigs
+übernommen (`samba-tool ntacl get --as-sddl` → `ntacl set`).
+
+Dasselbe Muster ist auch eine Ebene höher aufgetreten: nach einer
+Neuinstallation oder manuellen Eingriffen hilft dort
+`samba-tool ntacl sysvolreset`.
+
 ## Weitere Gruppenrichtlinien-Erweiterungen
 
 Neben den Administrativen Vorlagen sind drei weitere
