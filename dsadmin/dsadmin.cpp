@@ -284,6 +284,7 @@ struct DirObject {
 	FXString dn;          // volle relative DN (ohne Basis-DN), z.B. "CN=Max Mustermann,CN=Users"
 	ObjType type;
 	FXString description;
+	long groupType = 0;   // AD-Attribut groupType (nur bei Gruppen), 0 = unbekannt
 };
 
 static std::vector<FXString> listNames(const std::vector<FXString>& args) {
@@ -2308,6 +2309,64 @@ static std::string ldifFirst(const std::multimap<std::string, std::string>& rec,
 }
 
 // ---------------------------------------------------------------------
+// Beschreibung und Gruppentyp fuer die Listenansicht. "samba-tool ...
+// list" liefert beides nicht, und fuer jedes Objekt einzeln "show"
+// aufzurufen waere viel zu langsam. Samba stellt aber fuer root einen
+// privilegierten ldapi-Socket bereit, ueber den ohne Anmeldedaten
+// GELESEN werden darf (schreiben nicht) -- eine einzige Abfrage pro
+// Container. Fehlt ldap-utils oder laeuft der Dienst nicht, bleiben die
+// Spalten einfach leer; hier wird bewusst nichts nachinstalliert, das
+// bleibt den schreibenden Aktionen vorbehalten.
+// ---------------------------------------------------------------------
+static const char* SAMBA_LDAPI_URL = "ldapi://%2Fvar%2Flib%2Fsamba%2Fprivate%2Fldap_priv%2Fldapi";
+
+static void fillDescriptionsAndGroupTypes(std::vector<DirObject>& objects, const FXString& containerFullDN, const FXString& baseDN) {
+	if (objects.empty() || access("/usr/bin/ldapsearch", X_OK) != 0) return;
+	std::string raw;
+	int rc = runAsRootCaptured({
+		FXString("ldapsearch"), FXString("-x"), FXString("-LLL"), FXString("-o"), FXString("ldif-wrap=no"),
+		FXString("-H"), FXString(SAMBA_LDAPI_URL), FXString("-b"), containerFullDN, FXString("-s"), FXString("one"),
+		FXString("(objectClass=*)"), FXString("description"), FXString("groupType")
+	}, raw);
+	if (rc != 0) return;
+
+	std::map<std::string, std::pair<std::string, long>> byDn;
+	std::string block;
+	auto flush = [&]() {
+		auto rec = parseLdifRecord(block);
+		block.clear();
+		std::string dn = ldifFirst(rec, "dn");
+		if (dn.empty()) return;
+		long gt = 0;
+		try { gt = std::stol(ldifFirst(rec, "groupType")); } catch (...) {}
+		byDn[lowerCopy(dn)] = { ldifFirst(rec, "description"), gt };
+	};
+	for (auto& l : splitLines(raw)) {
+		if (l.empty()) flush();
+		else block += l + "\n";
+	}
+	flush();
+
+	for (auto& obj : objects) {
+		auto it = byDn.find(lowerCopy(std::string((obj.dn + "," + baseDN).text())));
+		if (it == byDn.end()) continue;
+		obj.description = it->second.first.c_str();
+		obj.groupType = it->second.second;
+	}
+}
+
+// Typbezeichnung wie im deutschen Windows 2000.
+static const char* groupTypeName(long groupType) {
+	uint32_t gt = (uint32_t)groupType;
+	bool security = (gt & 0x80000000u) != 0;
+	if (gt & 0x1) return "Sicherheitsgruppe - Lokal (vordefiniert)";
+	if (gt & 0x4) return security ? "Sicherheitsgruppe - Lokal (in Domäne)" : "Verteilergruppe - Lokal (in Domäne)";
+	if (gt & 0x8) return security ? "Sicherheitsgruppe - Universal" : "Verteilergruppe - Universal";
+	if (gt & 0x2) return security ? "Sicherheitsgruppe - Global" : "Verteilergruppe - Global";
+	return "Gruppe";
+}
+
+// ---------------------------------------------------------------------
 // DNs mit maskierten Zeichen ("CN=Meier\, Hans,OU=...") korrekt
 // zerlegen -- Gruppennamen koennen, anders als OUs, durchaus Kommas
 // enthalten.
@@ -2780,9 +2839,9 @@ public:
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		const FXuint bstyle = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
-		new FXButton(btnf, "OK", NULL, this, ID_OK, bstyle | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,82,0, 4,4,3,3);
-		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bstyle, 0,0,82,0, 4,4,3,3);
-		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bstyle, 0,0,82,0, 4,4,3,3);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, bstyle | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bstyle, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bstyle, 0,0,88,0, 4,4,3,3);
 
 		reloadMemberList();
 	}
@@ -4699,7 +4758,7 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	list = new FXIconList(listframe, this, ID_LIST,
 	                       ICONLIST_DETAILED|ICONLIST_BROWSESELECT|LAYOUT_FILL_X|LAYOUT_FILL_Y|FRAME_NORMAL);
 	list->appendHeader("Name", NULL, 200);
-	list->appendHeader("Typ", NULL, 140);
+	list->appendHeader("Typ", NULL, 260);
 	list->appendHeader("Beschreibung", NULL, 260);
 
 	statusLabel = new FXLabel(main, " ", NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 4,4,2,2);
@@ -4762,13 +4821,14 @@ void DsAdminWindow::loadTree() {
 void DsAdminWindow::showContainer(FXString relDN) {
 	currentContainerRelDN = relDN;
 	currentObjects = listContainerObjects(relDN, domain);
+	fillDescriptionsAndGroupTypes(currentObjects, relDN.empty() ? domain.baseDN : relDN + "," + domain.baseDN, domain.baseDN);
 	list->clearItems();
 	for (auto& obj : currentObjects) {
 		const char* typeName = "Objekt";
 		FXIcon* ic = icoFolder;
 		switch (obj.type) {
 			case OBJ_USER: typeName = "Benutzer"; ic = icoUser; break;
-			case OBJ_GROUP: typeName = "Sicherheitsgruppe - Global"; ic = icoUsers; break;
+			case OBJ_GROUP: typeName = groupTypeName(obj.groupType); ic = icoUsers; break;
 			case OBJ_COMPUTER: typeName = "Computer"; ic = icoServer; break;
 			case OBJ_OU: typeName = "Organisationseinheit"; ic = icoFolder; break;
 			case OBJ_CONTAINER: typeName = "Container"; ic = icoFolder; break;

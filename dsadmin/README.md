@@ -21,6 +21,36 @@ Domänendatenbank. `dsadmin` übernimmt genau das: die Verwaltung von
   werden nach Tiefe sortiert eingehängt)
 - Container-Anzeige mit Typ-Klassifizierung (Benutzer/Sicherheits-
   gruppe/Computer/Organisationseinheit/Container) und passenden Icons
+- Beschreibung und genauer Gruppentyp in der Liste ("Sicherheitsgruppe
+  - Global", "- Lokal (in Domäne)", "- Universal", "- Lokal
+  (vordefiniert)", Verteilergruppen entsprechend) -- gelesen mit einer
+  einzigen Abfrage pro Container über Sambas privilegierten
+  ldapi-Socket, der root ohne Anmeldedaten lesen (nicht schreiben)
+  lässt
+- **Doppelklick** öffnet bei Benutzern und Gruppen die Eigenschaften;
+  Container und Organisationseinheiten werden wie im Original im Baum
+  geöffnet
+- **Benutzereigenschaften** mit Reitern, geschrieben wird erst bei
+  OK/Übernehmen:
+  - *Allgemein*: Vorname, Initialen, Nachname, Anzeigename,
+    Beschreibung, Büro, Rufnummer, E-Mail, Webseite. Nur geänderte
+    Attribute werden per LDAP geschrieben; ein geleertes Feld entfernt
+    das Attribut (ein leerer Wert wäre in AD ein Syntaxfehler), Werte
+    mit Umlauten gehen base64-kodiert (`attr:: ...`) raus
+  - *Konto*: Anmeldenamen, "Konto ist deaktiviert"
+  - *Mitglied von*: Gruppen mit Active Directory-Ordner, Hinzufügen
+    über den Dialog **"Gruppen auswählen"** (Liste mit Mehrfachauswahl
+    plus Eingabefeld, "Namen überprüfen" löst auch eindeutige
+    Namensanfänge auf und unterstreicht sie), Entfernen, **primäre
+    Gruppe festlegen** (nur globale/universelle Sicherheitsgruppen;
+    die primäre Gruppe selbst lässt sich nicht entfernen). Backend
+    `samba-tool user getgroups --full-dn` (primäre Gruppe steht immer
+    zuerst) und `user setprimarygroup`. Reihenfolge beim Schreiben:
+    erst hinzufügen, dann primäre Gruppe umstellen, zuletzt entfernen;
+    danach wird der echte Stand neu gelesen, weil AD die bisherige
+    primäre Gruppe selbst als normale Mitgliedschaft weiterführt
+- **Kennwort zurücksetzen...** im Kontextmenü eines Benutzers (wie im
+  Original, nicht in den Eigenschaften)
 - **Neu**: Benutzer/Gruppe/Organisationseinheit anlegen
 - **Löschen** für Benutzer/Gruppe/Organisationseinheit
 - **Umbenennen...** -- bei Benutzern/Gruppen über `samba-tool ...
