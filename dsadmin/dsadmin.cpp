@@ -1696,7 +1696,7 @@ static std::vector<SoftwarePackageInfo> listSoftwarePackages(FXWindow* owner, co
 	runAsRootCaptured({
 		FXString("bash"), FXString("-c"),
 		FXString("LDAPTLS_REQCERT=never ldapsearch -H ldap://127.0.0.1 -Z -x -o ldif-wrap=no -LLL -D '") + g_adminUser + "@" + domain.realm +
-			"' -w '" + g_adminPass + "' -b '" + packagesDn.c_str() + "' -s one '(objectClass=packageRegistration)' cn displayName packageFlags msiScriptPath 2>/dev/null"
+			"' -w '" + g_adminPass + "' -b '" + packagesDn.c_str() + "' -s one '(objectClass=packageRegistration)' cn displayName packageFlags msiScriptPath msiScriptName 2>/dev/null"
 	}, raw);
 
 	SoftwarePackageInfo cur;
