@@ -100,8 +100,8 @@ Doppelklick bearbeitet.
 
 - **Softwareinstallation** (Computer/Benutzer): Pakete mit
   Bereitstellungsstatus, Rechtsklick für Neu → Paket... und Entfernen...
-- **Skripts**, **Ordnerumleitung**, **Administrative Vorlagen**: öffnen
-  die bestehenden Dialoge bzw. den ADM-Editor.
+- **Skripts**, **Ordnerumleitung**: öffnen die bestehenden Dialoge.
+- **Administrative Vorlagen**: Kategorien direkt im Baum (siehe unten).
 - **Sicherheitseinstellungen** in `Machine/Microsoft/Windows
   NT/SecEdit/GptTmpl.inf` (UTF-16LE mit BOM; Abschnitte und Schlüssel,
   die hier nicht bearbeitet werden, bleiben erhalten):
@@ -135,35 +135,34 @@ Die Zweige heißen bei den provisionierten Standard-GPOs `MACHINE`/`USER`,
 bei neu angelegten `Machine`/`User`; geschrieben wird immer in das
 vorhandene Verzeichnis.
 
-## Gruppenrichtlinienobjekt-Editor
+## Administrative Vorlagen
 
-Der "&Bearbeiten..."-Button im Gruppenrichtlinie-Reiter öffnet den
-vollständigen Editor: Baum links (Kategorien aus den zusammengeführten
-`.adm`-Dateien), Liste rechts (Richtlinien mit Status). Doppelklick
-öffnet Nicht konfiguriert/Aktiviert/Deaktiviert plus das passende
-Eingabefeld (Checkbox/Textfeld/Zahlenfeld/Dropdown). "Speichern"
-schreibt die Änderungen in die echte `Registry.pol` des GPOs unter
-`/var/lib/samba/sysvol/<Domäne>/Policies/{GUID}/MACHINE/Registry.pol`
-und erhöht die `GPT.INI`-Versionsnummer.
+Die Kategorien aus den zusammengeführten `.adm`-Dateien hängen direkt
+im Baum des Gruppenrichtlinienfensters, unter "Computerkonfiguration"
+(`CLASS MACHINE`) und "Benutzerkonfiguration" (`CLASS USER`). Rechts
+stehen erst die Unterkategorien, dann die Richtlinien mit ihrer
+Einstellung. Doppelklick öffnet Nicht konfiguriert/Aktiviert/Deaktiviert
+plus das passende Eingabefeld (Checkbox/Textfeld/Zahlenfeld/Dropdown,
+auch mehrere Parts je Richtlinie).
 
-Ende-zu-Ende gegen eine echte Domäne und ein echtes GPO getestet --
-alle Feldtypen (Checkbox/Text/Zahl/Dropdown), byte-genaue Verifikation
-des Dateiinhalts, Rundlauf über einen kompletten Programmneustart.
+Wie im Original wirkt jede Änderung sofort mit OK -- es gibt keinen
+eigenen Speichern-Knopf mehr. Geschrieben wird die `Registry.pol` des
+jeweiligen Zweigs (vorhandenes `Machine`/`MACHINE` bzw. `User`/`USER`);
+eine neu angelegte Datei erbt die SYSVOL-Rechte. Danach wird die
+Registry-Erweiterung `{35378EAC-683F-11D2-A89A-00C04FBBCFA2}` mit dem
+Tool `{0F6B957D-...}` (Computer) bzw. `{0F6B957E-...}` (Benutzer) im
+GPO eingetragen -- das hatte der frühere, separate Editor versäumt --
+und die Version genau dieses Zweigs erhöht. Schließt man den Dialog
+unverändert mit OK, wird nichts geschrieben.
 
-Unterstützt sowohl Computer- als auch Benutzerkonfiguration (`CLASS
-MACHINE`/`CLASS USER`, jeweils eigener Baum-Wurzelknoten und eigene
-`Registry.pol` im SYSVOL) sowie Richtlinien mit mehreren Parts (jeder
-Part bekommt sein eigenes Eingabefeld und seinen eigenen
-Registry.pol-Eintrag). `GPT.INI` kodiert Computer-/Benutzer-Version
-getrennt und wird beim Speichern gezielt nur für den tatsächlich
-geänderten Zweig erhöht.
+## Reihenfolge der Erweiterungsliste
 
-Mehrere Richtlinien lassen sich gemeinsam markieren (Strg/Umschalt) und
-über die Schaltflächen unter der Liste auf einen Schlag auf
-"Aktiviert"/"Deaktiviert"/"Nicht konfiguriert" setzen. Ausgenommen ist
-"Aktiviert" bei Richtlinien mit Eingabefeldern -- deren Werte kann eine
-Sammelaktion nicht erraten, sie werden übersprungen und gemeldet, damit
-man sie einzeln per Doppelklick setzt.
+`gPCMachineExtensionNames`/`gPCUserExtensionNames` bestehen aus
+Blöcken `[{CSE}{Tool}...]`. [MS-GPOL] verlangt die Blöcke nach
+CSE-GUID aufsteigend sortiert, die Tool-GUIDs innerhalb eines Blocks
+ebenso. Neue Einträge wurden bisher einfach angehängt; jetzt werden
+sie einsortiert, und eine vorhandene unsortierte Liste wird bei der
+nächsten Änderung richtiggestellt.
 
 ## Advertise-Skript (.aas)
 

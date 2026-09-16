@@ -58,7 +58,7 @@ static std::string germanSortKey(const std::string& s) {
 				case 0x9C: case 0xBC: rep = "u"; break;   // Ü ü
 				case 0x9F: rep = "ss"; break;             // ß
 			}
-			if (rep) { out += rep; out += '\x7f'; i++; continue; } // \x7f: bei Gleichstand nach dem Grundbuchstaben
+			if (rep) { out += rep; i++; continue; }
 		}
 		out += (char)std::tolower(c);
 	}
@@ -66,7 +66,9 @@ static std::string germanSortKey(const std::string& s) {
 }
 
 static bool germanLess(const std::string& a, const std::string& b) {
-	return germanSortKey(a) < germanSortKey(b);
+	std::string ka = germanSortKey(a), kb = germanSortKey(b);
+	if (ka != kb) return ka < kb;
+	return a < b; // nur bei Gleichstand ("Mull" / "Müll") entscheidet der Umlaut
 }
 
 static RegLookup buildRegLookup(const RegPolFile& file) {
@@ -1088,15 +1090,44 @@ static void bumpGpoVersion(FXWindow* owner, const FXString& realm, const std::st
 	log += "GPO-Version auf " + std::to_string(newVersion) + " erhoeht (AD und GPT.INI).\n";
 }
 
+// gPC*ExtensionNames: Bloecke "[{CSE}{Tool}...]". Laut [MS-GPOL] muessen
+// die Bloecke nach CSE-GUID aufsteigend sortiert sein, ebenso die
+// Tool-GUIDs innerhalb eines Blocks -- neue Eintraege werden deshalb
+// einsortiert statt angehaengt (und eine vorhandene unsortierte Liste
+// dabei gleich richtiggestellt).
+static std::string mergeExtensionNames(const std::string& current, const std::string& cseGuid, const std::string& toolGuid) {
+	auto upper = [](std::string x) { std::transform(x.begin(), x.end(), x.begin(), [](unsigned char c) { return std::toupper(c); }); return x; };
+	std::map<std::string, std::set<std::string>> blocks; // CSE -> Tools (beides in Grossbuchstaben)
+	for (auto& block : parseGpLinkBlocks(current)) {
+		std::vector<std::string> guids;
+		size_t pos = 0;
+		while ((pos = block.find('{', pos)) != std::string::npos) {
+			size_t end = block.find('}', pos);
+			if (end == std::string::npos) break;
+			guids.push_back(upper(block.substr(pos, end - pos + 1)));
+			pos = end + 1;
+		}
+		if (guids.empty()) continue;
+		auto& tools = blocks[guids[0]];
+		for (size_t i = 1; i < guids.size(); i++) tools.insert(guids[i]);
+	}
+	blocks[upper(cseGuid)].insert(upper(toolGuid));
+	std::string out;
+	for (auto& kv : blocks) {
+		out += "[" + kv.first;
+		for (auto& t : kv.second) out += t;
+		out += "]";
+	}
+	return out;
+}
+
 static bool registerExtensionOnly(FXWindow* owner, const FXString& realm, const std::string& gpoObjectDn, bool isMachine,
                                    const std::string& cseGuid, const std::string& toolGuid, std::string& log, FXString& errorMsg) {
 	std::string attrName = isMachine ? "gPCMachineExtensionNames" : "gPCUserExtensionNames";
-	std::string ourPair = std::string("[") + cseGuid + toolGuid + "]";
+	std::string curVal = trimStr(readLdapAttribute(owner, realm, gpoObjectDn, attrName));
+	std::string newVal = mergeExtensionNames(curVal, cseGuid, toolGuid);
+	if (newVal == curVal) return true; // schon registriert und sortiert
 
-	std::string curVal = readLdapAttribute(owner, realm, gpoObjectDn, attrName);
-	if (curVal.find(cseGuid) != std::string::npos) return true; // schon registriert
-
-	std::string newVal = curVal + ourPair;
 	std::string ldif = "dn: " + gpoObjectDn + "\n"
 	                    "changetype: modify\n"
 	                    "replace: " + attrName + "\n" +
@@ -5403,7 +5434,9 @@ public:
 		ed.state = dlg.getState();
 		ed.partValues = dlg.getPartValues();
 		ed.effectiveKey = key;
-		if (ed.state == curState && ed.partValues == curPartValues) return;
+		// Unveraendert? Die Eingabefelder zaehlen nur bei "Aktiviert" -- sonst
+		// zeigt der Dialog bloss Vorgabewerte an.
+		if (ed.state == curState && (ed.state != POLSTATE_ENABLED || ed.partValues == curPartValues)) return;
 
 		std::vector<RegPolEntry> entries = h.file.entries;
 		applyAdmPolicyEdit(entries, h.lookup, pol, ed);
