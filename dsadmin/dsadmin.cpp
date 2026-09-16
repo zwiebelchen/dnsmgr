@@ -1009,6 +1009,17 @@ static std::string generateNewGuidUpper() {
 // Der CN eines packageRegistration-Objekts ist auf einem echten
 // Windows-2000-Server eine GUID in Kleinbuchstaben OHNE geschweifte
 // Klammern -- im Gegensatz zum Dateinamen der .aas, der sie hat.
+// WICHTIG: "samba-tool gpo create" legt die Zweige als "Machine" und
+// "User" an -- genau so, wie sie auch im msiScriptPath und in den
+// Pfaden stehen, die ein Client anfragt. Frueher stand hier an
+// mehreren Stellen "MACHINE"/"USER", was auf einem
+// gross-/kleinschreibungsempfindlichen Dateisystem ein ZWEITES
+// Verzeichnis erzeugt hat: mit falschen Rechten, und vom Client nie
+// gelesen. Betroffen waren die .aas-Datei, Registry.pol und
+// scripts.ini -- also praktisch alles, was ins SYSVOL geschrieben wird.
+static const char* SYSVOL_MACHINE_DIR = "Machine";
+static const char* SYSVOL_USER_DIR = "User";
+
 static std::string generateNewGuidLowerPlain() {
 	std::string out;
 	runAsRootCaptured({ FXString("cat"), FXString("/proc/sys/kernel/random/uuid") }, out);
@@ -1312,7 +1323,7 @@ static std::map<std::string, FXString> getFolderRedirectionPaths(const std::stri
 static bool setFolderRedirectionPaths(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid,
                                        const std::map<std::string, FXString>& newPaths, FXString& errorMsg) {
 	FXString realmLower = domain.realm; realmLower.lower();
-	std::string userScopeDir = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(gpoGuid.text()) + "/USER";
+	std::string userScopeDir = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(gpoGuid.text()) + "/" + SYSVOL_USER_DIR;
 	std::string userPolPath = userScopeDir + "/Registry.pol";
 
 	RegPolFile origFile = parseRegPolFile(userPolPath);
@@ -1581,7 +1592,7 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 
 	// .aas-Datei schreiben -- lokal, dann als root nach SYSVOL kopieren.
 	std::string sysvolScopeDir = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" +
-	                              std::string(gpoGuid.text()) + "/" + (params.assignedPerMachine ? "MACHINE" : "USER");
+	                              std::string(gpoGuid.text()) + "/" + (params.assignedPerMachine ? SYSVOL_MACHINE_DIR : SYSVOL_USER_DIR);
 	std::string appsDir = sysvolScopeDir + "/Applications";
 	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(appsDir.c_str()) });
 	std::string aasLocalTmp = "/tmp/ice2k-package.aas";
@@ -1712,7 +1723,7 @@ static bool deleteSoftwarePackage(FXWindow* owner, const DomainInfo& domain, con
 
 	FXString realmLower = domain.realm; realmLower.lower();
 	std::string aasPath = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" +
-	                       std::string(gpoGuid.text()) + "/" + (isMachine ? "MACHINE" : "USER") +
+	                       std::string(gpoGuid.text()) + "/" + (isMachine ? SYSVOL_MACHINE_DIR : SYSVOL_USER_DIR) +
 	                       "/Applications/" + pkg.guid + ".aas";
 	runAsRoot({ FXString("rm"), FXString("-f"), FXString(aasPath.c_str()) });
 	return true;
@@ -3166,8 +3177,8 @@ public:
 		  domain(domain_), gpoGuid(gpoGuid_) {
 		FXString realmLower = domain.realm; realmLower.lower();
 		std::string sysvolBase = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(gpoGuid.text());
-		machinePath = sysvolBase + "/MACHINE/Scripts/scripts.ini";
-		userPath = sysvolBase + "/USER/Scripts/scripts.ini";
+		machinePath = sysvolBase + "/" + SYSVOL_MACHINE_DIR + "/Scripts/scripts.ini";
+		userPath = sysvolBase + "/" + SYSVOL_USER_DIR + "/Scripts/scripts.ini";
 
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
 		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
@@ -3513,8 +3524,8 @@ long PropertiesDialog::onEditGpo(FXObject*, FXSelector, void*) {
 	FXString guid = linkedGuids[idx];
 	FXString realmLower = realm; realmLower.lower();
 	std::string sysvolBase = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + guid.text();
-	std::string machinePolPath = sysvolBase + "/MACHINE/Registry.pol";
-	std::string userPolPath = sysvolBase + "/USER/Registry.pol";
+	std::string machinePolPath = sysvolBase + "/" + SYSVOL_MACHINE_DIR + "/Registry.pol";
+	std::string userPolPath = sysvolBase + "/" + SYSVOL_USER_DIR + "/Registry.pol";
 	std::string gptIniPath = sysvolBase + "/GPT.INI";
 
 	std::vector<AdmCategory> machineCats = loadMergedAdmCategories("MACHINE");
@@ -3602,7 +3613,7 @@ long PropertiesDialog::onFolderRedirection(FXObject*, FXSelector, void*) {
 		return 1;
 	}
 	FXString realmLower = domain.realm; realmLower.lower();
-	std::string userPolPath = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(guid.text()) + "/USER/Registry.pol";
+	std::string userPolPath = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(guid.text()) + "/" + SYSVOL_USER_DIR + "/Registry.pol";
 	auto current = getFolderRedirectionPaths(userPolPath);
 	FolderRedirectionDialog dlg(this, current);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;

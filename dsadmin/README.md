@@ -134,6 +134,18 @@ Nicht gegengeprüft ist der Wert von `packageFlags` für
 wird das Assigned-Bit gegen das Published-Bit getauscht, was eine
 Annahme bleibt.
 
+## Schreibweise der SYSVOL-Zweige
+
+`samba-tool gpo create` legt die Zweige als `Machine` und `User` an --
+genau so stehen sie auch im `msiScriptPath` und in den Pfaden, die ein
+Client anfragt. An mehreren Stellen stand im Code dagegen
+`MACHINE`/`USER`. Auf einem groß-/kleinschreibungsempfindlichen
+Dateisystem entsteht dadurch ein **zweites** Verzeichnis daneben, das
+root gehört und das der Client nie liest. Betroffen waren die
+`.aas`-Datei, `Registry.pol` und `scripts.ini` -- also praktisch alles,
+was ins SYSVOL geschrieben wird. Die Namen stehen jetzt an einer Stelle
+als Konstante.
+
 ## Rechte im SYSVOL
 
 Die `.aas`-Datei und ihr `Applications`-Verzeichnis werden per
