@@ -1,6 +1,7 @@
 // svccore.cpp -- siehe svccore.h
 
 #include "svccore.h"
+#include <set>
 
 #include <cstdio>
 #include <cstdlib>
@@ -278,6 +279,30 @@ std::vector<std::string> splitUnitList(const std::string& value, bool servicesOn
 	return out;
 }
 
+std::vector<std::string> parseUnitNames(const std::string& raw) {
+	std::vector<std::string> out;
+	std::set<std::string> seen;
+	size_t start = 0;
+	while (start <= raw.size()) {
+		size_t end = raw.find('\n', start);
+		if (end == std::string::npos) end = raw.size();
+		std::string line = raw.substr(start, end - start);
+		start = end + 1;
+		size_t a = line.find_first_not_of(" \t");
+		if (a == std::string::npos) continue;
+		// Ohne --plain setzt list-units einen Punkt vor fehlerhafte Units.
+		if (line.compare(a, 3, "\xE2\x97\x8F") == 0) a = line.find_first_not_of(" \t", a + 3);
+		if (a == std::string::npos) continue;
+		size_t b = line.find_first_of(" \t", a);
+		std::string name = line.substr(a, b == std::string::npos ? std::string::npos : b - a);
+		const std::string suffix = ".service";
+		if (name.size() <= suffix.size() || name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) continue;
+		if (name.find("@.service") != std::string::npos) continue;
+		if (seen.insert(name).second) out.push_back(name);
+	}
+	return out;
+}
+
 std::string dropInPath(const std::string& unit) {
 	return "/etc/systemd/system/" + unit + ".d/ice2k.conf";
 }
@@ -348,17 +373,50 @@ bool systemdAvailable() {
 
 std::vector<ServiceInfo> listServices() {
 	std::vector<ServiceInfo> out;
-	std::string raw;
-	// Ein einziger Aufruf fuer alle Dienste -- "systemctl show" trennt die
-	// Bloecke durch Leerzeilen. Deutlich schneller als ein Aufruf je Unit.
-	if (runCaptured(showCommand("*.service"), raw) != 0 && raw.empty()) return out;
 
-	for (auto& rec : parseShowRecords(raw)) {
+	// "systemctl show '*.service'" reicht NICHT: ein Muster passt nur auf
+	// Units, die systemd gerade im Speicher hat. Maskierte oder nie
+	// gestartete Dienste fehlen dann -- z.B. samba-ad-dc, das Debian bis
+	// zur Einrichtung eines Domaenencontrollers maskiert ausliefert.
+	// Deshalb erst alle Namen einsammeln (installierte Unit-Dateien plus
+	// geladene Units, etwa aus Generatoren ohne eigene Datei) und dann
+	// gezielt nach genau diesen Namen fragen -- dabei laedt systemd sie.
+	std::vector<std::string> names;
+	std::set<std::string> seen;
+	std::string raw;
+	if (runCaptured({ "systemctl", "list-unit-files", "--type=service", "--no-legend", "--no-pager" }, raw) == 0 || !raw.empty())
+		for (auto& n : parseUnitNames(raw)) if (seen.insert(n).second) names.push_back(n);
+	raw.clear();
+	if (runCaptured({ "systemctl", "list-units", "--all", "--type=service", "--no-legend", "--no-pager", "--plain" }, raw) == 0 || !raw.empty())
+		for (auto& n : parseUnitNames(raw)) if (seen.insert(n).second) names.push_back(n);
+
+	std::vector<std::map<std::string, std::string> > records;
+	if (names.empty()) {
+		// Aeltere Umgebung ohne list-unit-files: wenigstens die geladenen.
+		raw.clear();
+		if (runCaptured(showCommand("*.service"), raw) != 0 && raw.empty()) return out;
+		records = parseShowRecords(raw);
+	} else {
+		// In Paketen abfragen, damit die Befehlszeile nicht zu lang wird.
+		const size_t chunk = 150;
+		for (size_t i = 0; i < names.size(); i += chunk) {
+			std::vector<std::string> args = showCommand(names[i]);
+			for (size_t j = i + 1; j < std::min(names.size(), i + chunk); j++)
+				args.insert(args.begin() + 2 + (j - i), names[j]);
+			raw.clear();
+			runCaptured(args, raw);
+			for (auto& r : parseShowRecords(raw)) records.push_back(r);
+		}
+	}
+
+	std::set<std::string> added;
+	for (auto& rec : records) {
 		ServiceInfo si = recordToInfo(rec);
 		if (si.unit.empty()) continue;
 		// Instanz-Vorlagen ("getty@.service") sind keine startbaren
 		// Dienste, sondern Schablonen -- die zeigt das Original auch nicht.
 		if (si.unit.find("@.service") != std::string::npos) continue;
+		if (!added.insert(si.unit).second) continue;
 		out.push_back(si);
 	}
 	std::sort(out.begin(), out.end(), [](const ServiceInfo& a, const ServiceInfo& b) {

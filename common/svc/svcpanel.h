@@ -17,14 +17,27 @@
 #include <vector>
 #include "svccore.h"
 
+// Wer die Dienstliste fuer etwas anderes als die lokale Verwaltung
+// braucht -- etwa die Gruppenrichtlinie ("Systemdienste") --, haengt
+// sich hier ein: eigene Spalten, eigener Zeileninhalt, eigene Aktion bei
+// Doppelklick bzw. "Eigenschaften". Starten/Beenden entfaellt dann.
+class SvcPanelDelegate {
+public:
+	virtual ~SvcPanelDelegate() {}
+	virtual std::vector<std::pair<FXString, FXint> > svcColumns() = 0;
+	virtual FXString svcRowText(const svc::ServiceInfo& info) = 0;
+	virtual void svcActivate(FXWindow* owner, const svc::ServiceInfo& info) = 0;
+};
+
 class SvcPanel : public FXVerticalFrame {
 	FXDECLARE(SvcPanel)
 private:
 	FXIconList* list;
 	FXIcon* icoService;
+	SvcPanelDelegate* delegate;
 	std::vector<svc::ServiceInfo> services;
 protected:
-	SvcPanel() : list(NULL), icoService(NULL) {}
+	SvcPanel() : list(NULL), icoService(NULL), delegate(NULL) {}
 public:
 	enum {
 		ID_LIST = FXVerticalFrame::ID_LAST,
@@ -32,10 +45,17 @@ public:
 		ID_LAST
 	};
 
-	SvcPanel(FXComposite* parent, FXIcon* serviceIcon);
+	// delegate: optional, siehe SvcPanelDelegate. Ohne Delegate verhaelt
+	// sich das Panel wie in "Dienste".
+	SvcPanel(FXComposite* parent, FXIcon* serviceIcon, SvcPanelDelegate* delegate = NULL, FXuint opts = 0);
 
-	// Liste neu einlesen; behaelt die Markierung nach Moeglichkeit bei.
+	// Liste neu einlesen -- liest jedes Mal alle installierten Dienste
+	// aus; behaelt die Markierung nach Moeglichkeit bei.
 	void reload();
+
+	// Zeilen neu beschriften, ohne systemd erneut zu fragen (z.B. nachdem
+	// der Delegate eigene Daten geaendert hat).
+	void relabel();
 
 	// Vom Host (Toolbar/Menue) aufrufbar.
 	void startSelected();

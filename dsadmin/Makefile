@@ -9,7 +9,7 @@ LDFLAGS = `fox-config --libs`
 PREFIX = /usr/local
 
 ICONS = res/*/*.gif res/*/*.png res/*.gif
-SOURCES = dsadmin.cpp admparser.cpp regpol.cpp aas.cpp
+SOURCES = dsadmin.cpp admparser.cpp regpol.cpp aas.cpp ../common/svc/svccore.cpp ../common/svc/svcpanel.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 EXECUTABLE = dsadmin
 

@@ -144,7 +144,33 @@ static void testAccountValidation() {
 	assert(s.find("User=") == std::string::npos);
 }
 
+static void testUnitNames() {
+	// list-unit-files: Unit, Zustand, Vorgabe -- samba-ad-dc ist maskiert
+	// und taucht in "systemctl show '*.service'" deshalb nie auf.
+	std::string files =
+		"samba-ad-dc.service                        masked          enabled\n"
+		"ssh.service                                enabled         enabled\n"
+		"getty@.service                             enabled         enabled\n"
+		"systemd-journald.socket                    static          -\n";
+	auto a = parseUnitNames(files);
+	assert(a.size() == 2);
+	assert(a[0] == "samba-ad-dc.service");
+	assert(a[1] == "ssh.service");
+
+	// list-units ohne --plain: Punkt vor fehlerhaften Units; Instanzen
+	// wie getty@tty1 sind echte Dienste und bleiben.
+	std::string units =
+		"\xE2\x97\x8F bind9.service   loaded failed failed BIND Domain Name Server\n"
+		"  ssh.service     loaded active running OpenBSD Secure Shell server\n"
+		"  getty@tty1.service loaded active running Getty on tty1\n";
+	auto b = parseUnitNames(units);
+	assert(b.size() == 3);
+	assert(b[0] == "bind9.service");
+	assert(b[2] == "getty@tty1.service");
+}
+
 int main() {
+	testUnitNames();
 	testAccountValidation();
 	testShowRecords();
 	testStartTypeMapping();

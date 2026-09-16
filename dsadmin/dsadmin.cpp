@@ -17,6 +17,7 @@
 #include "admparser.h"
 #include "regpol.h"
 #include "aas.h"
+#include "../common/svc/svcpanel.h"
 #include <algorithm>
 #include <map>
 #include <tuple>
@@ -4313,6 +4314,11 @@ static const std::vector<CountryEntry>& countryList() {
 // Reihenfolge von Abschnitten und Schluesseln bleibt erhalten, damit
 // nichts verlorengeht, was hier (noch) nicht bearbeitet wird.
 // ---------------------------------------------------------------------
+// Zeilen ohne "=" (Systemdienste, Registrierung, Dateisystem:
+// "\"Name\",2,\"D:...\"") stehen komplett im Schluessel; dieser Wert
+// markiert sie, damit beim Schreiben kein " = " angehaengt wird.
+static const char* INF_BARE_LINE = "\x01";
+
 struct InfFile {
 	std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> sections;
 
@@ -4363,7 +4369,7 @@ static InfFile parseInf(const std::string& raw) {
 		}
 		if (!cur) continue;
 		size_t eq = l.find('=');
-		if (eq == std::string::npos) cur->push_back({ l, "" });
+		if (eq == std::string::npos || (!l.empty() && l[0] == '"')) cur->push_back({ l, INF_BARE_LINE });
 		else cur->push_back({ trimStr(l.substr(0, eq)), trimStr(l.substr(eq + 1)) });
 	}
 	return inf;
@@ -4378,6 +4384,7 @@ static std::string serializeInf(InfFile inf) {
 	for (auto& s : inf.sections) {
 		out += "[" + s.first + "]\r\n";
 		for (auto& kv : s.second) {
+			if (kv.second == INF_BARE_LINE) { out += kv.first + "\r\n"; continue; }
 			// Wie secedit selbst: Registrierungswerte und die Pflichtabschnitte
 			// ohne Leerzeichen um das Gleichheitszeichen.
 			bool unicodeSection = lowerCopy(s.first) == "unicode" || lowerCopy(s.first) == "version" ||
@@ -5096,14 +5103,128 @@ static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::st
 }
 
 // ---------------------------------------------------------------------
+// Systemdienste ([Service General Setting]): je Dienst eine Zeile
+// "\"Name\",Starttyp,\"SDDL\"" -- Starttyp 2 = Automatisch, 3 = Manuell,
+// 4 = Deaktiviert. Die Liste der Dienste kommt wie im Original vom
+// Rechner, auf dem der Editor laeuft; hier also die systemd-Dienste
+// dieses Servers.
+// ---------------------------------------------------------------------
+static const char* SERVICE_SECTION = "Service General Setting";
+
+// Standard-Berechtigungen, wenn ein Dienst zum ersten Mal definiert wird:
+// Administratoren und SYSTEM Vollzugriff, interaktive Benutzer und
+// Dienste duerfen den Status abfragen.
+static const char* SERVICE_DEFAULT_SDDL =
+	"D:AR(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)";
+
+struct ServicePolicy { bool defined = false; int startMode = 0; std::string sddl; };
+
+// Zerlegt "\"a\",2,\"b\"" in seine Felder (Anfuehrungszeichen entfernt).
+static std::vector<std::string> splitQuotedCsv(const std::string& line) {
+	std::vector<std::string> out;
+	std::string cur;
+	bool quoted = false;
+	for (char c : line) {
+		if (c == '"') { quoted = !quoted; continue; }
+		if (c == ',' && !quoted) { out.push_back(trimStr(cur)); cur.clear(); continue; }
+		cur += c;
+	}
+	out.push_back(trimStr(cur));
+	return out;
+}
+
+static ServicePolicy findServicePolicy(InfFile& inf, const std::string& name) {
+	ServicePolicy sp;
+	auto* sec = inf.find(SERVICE_SECTION);
+	if (!sec) return sp;
+	for (auto& kv : *sec) {
+		auto f = splitQuotedCsv(kv.first);
+		if (f.size() < 2 || lowerCopy(f[0]) != lowerCopy(name)) continue;
+		sp.defined = true;
+		try { sp.startMode = std::stoi(f[1]); } catch (...) {}
+		sp.sddl = f.size() > 2 ? f[2] : "";
+		return sp;
+	}
+	return sp;
+}
+
+static void setServicePolicy(InfFile& inf, const std::string& name, const ServicePolicy& sp) {
+	auto matches = [&](const std::pair<std::string, std::string>& kv) {
+		auto f = splitQuotedCsv(kv.first);
+		return !f.empty() && lowerCopy(f[0]) == lowerCopy(name);
+	};
+	if (auto* sec = inf.find(SERVICE_SECTION))
+		sec->erase(std::remove_if(sec->begin(), sec->end(), matches), sec->end());
+	if (!sp.defined) return;
+	std::string line = "\"" + name + "\"," + std::to_string(sp.startMode) + ",\"" + sp.sddl + "\"";
+	if (!inf.find(SERVICE_SECTION)) inf.set(SERVICE_SECTION, line, INF_BARE_LINE);
+	else inf.find(SERVICE_SECTION)->push_back({ line, INF_BARE_LINE });
+}
+
+static const char* serviceModeLabel(int mode) {
+	return mode == 2 ? "Automatisch" : mode == 3 ? "Manuell" : mode == 4 ? "Deaktiviert" : "Nicht definiert";
+}
+
+// Dialog "Sicherheitsrichtlinieneinstellung" fuer einen Dienst.
+class ServicePolicyDialog : public FXDialogBox {
+	FXDECLARE(ServicePolicyDialog)
+private:
+	FXCheckButton* defineCheck = nullptr;
+	FXint mode = 2;
+	FXDataTarget modeTarget;
+	std::vector<FXWindow*> controls;
+protected:
+	ServicePolicyDialog() {}
+public:
+	enum { ID_DEFINE = FXDialogBox::ID_LAST };
+	ServicePolicyDialog(FXWindow* owner, const FXString& serviceName, const ServicePolicy& sp)
+		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0),
+		  mode(sp.defined && sp.startMode >= 2 && sp.startMode <= 4 ? sp.startMode : 2), modeTarget(mode) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
+		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
+		new FXLabel(head, "", sharedPngIcon(resico_server), LAYOUT_TOP);
+		new FXLabel(head, serviceName, NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		defineCheck = new FXCheckButton(main, "Diese Richtlinieneinstellung &definieren", this, ID_DEFINE);
+		defineCheck->setCheck(sp.defined);
+		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
+		controls.push_back(new FXLabel(body, "Startmodus für Dienst auswählen:"));
+		controls.push_back(new FXRadioButton(body, "&Automatisch", &modeTarget, FXDataTarget::ID_OPTION + 2));
+		controls.push_back(new FXRadioButton(body, "&Manuell", &modeTarget, FXDataTarget::ID_OPTION + 3));
+		controls.push_back(new FXRadioButton(body, "D&eaktiviert", &modeTarget, FXDataTarget::ID_OPTION + 4));
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		// Der Berechtigungsdialog folgt; bis dahin behaelt ein Dienst seine
+		// Berechtigungen bzw. bekommt beim ersten Definieren die Vorgabe.
+		FXButton* sec = new FXButton(btnf, "&Sicherheit bearbeiten...", NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		sec->disable();
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		updateEnabled();
+	}
+	void updateEnabled() {
+		for (auto* w : controls) { if (defineCheck->getCheck()) w->enable(); else w->disable(); }
+	}
+	long onDefine(FXObject*, FXSelector, void*) { updateEnabled(); return 1; }
+	bool isDefined() const { return defineCheck->getCheck(); }
+	int getMode() const { return mode; }
+	virtual ~ServicePolicyDialog() {}
+};
+FXDEFMAP(ServicePolicyDialog) ServicePolicyDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ServicePolicyDialog::ID_DEFINE, ServicePolicyDialog::onDefine),
+};
+FXIMPLEMENT(ServicePolicyDialog, FXDialogBox, ServicePolicyDialogMap, ARRAYNUMBER(ServicePolicyDialogMap))
+
+// ---------------------------------------------------------------------
 // Fenster "Gruppenrichtlinie" -- Nachbau des Gruppenrichtlinienobjekt-
 // Editors: links der Baum mit Computer- und Benutzerkonfiguration,
 // rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
 // ---------------------------------------------------------------------
-class GpoEditorWindow : public FXDialogBox {
+class GpoEditorWindow : public FXDialogBox, public SvcPanelDelegate {
 	FXDECLARE(GpoEditorWindow)
 private:
-	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_ADM, GN_ADMCAT, GN_FOLDERREDIR, GN_TODO };
+	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_SERVICES, GN_ADM, GN_ADMCAT, GN_FOLDERREDIR, GN_TODO };
 	struct Node {
 		NodeKind kind = GN_FOLDER;
 		bool machine = true;
@@ -5115,6 +5236,8 @@ private:
 	FXString gpoName;
 	FXTreeList* tree = nullptr;
 	FXIconList* list = nullptr;
+	FXSwitcher* rightSwitcher = nullptr;   // 0 = Liste, 1 = Dienste-Panel
+	SvcPanel* servicePanel = nullptr;
 	FXLabel* status = nullptr;
 	std::map<FXTreeItem*, Node> nodes;
 	FXTreeItem* shownItem = nullptr;
@@ -5149,8 +5272,12 @@ public:
 		FXPacker* treeframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_Y, 0,0,340,0, 0,0,0,0);
 		tree = new FXTreeList(treeframe, this, ID_TREE,
 		                      LAYOUT_FILL_X | LAYOUT_FILL_Y | TREELIST_SHOWS_BOXES | TREELIST_SHOWS_LINES | TREELIST_BROWSESELECT | TREELIST_ROOT_BOXES);
-		FXPacker* listframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		rightSwitcher = new FXSwitcher(splitter, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		FXPacker* listframe = new FXPacker(rightSwitcher, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
 		list = new FXIconList(listframe, this, ID_LIST, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		// Dieselbe Dienstliste wie in "Dienste" und der Computerverwaltung --
+		// nur mit den Spalten und dem Doppelklick der Gruppenrichtlinie.
+		servicePanel = new SvcPanel(rightSwitcher, sharedPngIcon(resico_server), this);
 		status = new FXLabel(main, " ", NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 4,4,2,2);
 		buildTree();
 	}
@@ -5205,7 +5332,7 @@ public:
 		FXTreeItem* evt = add(cSec, "Ereignisprotokoll", resico_key, GN_FOLDER, true);
 		add(evt, "Einstellungen für Ereignisprotokolle", resico_key, GN_SECPOL, true, &SEC_EVENTLOG_POLICIES);
 		add(cSec, "Eingeschränkte Gruppen", resico_key, GN_RESTRICTED, true);
-		add(cSec, "Systemdienste", resico_key, GN_TODO, true);
+		add(cSec, "Systemdienste", resico_key, GN_SERVICES, true);
 		add(cSec, "Registrierung", resico_key, GN_TODO, true);
 		add(cSec, "Dateisystem", resico_key, GN_TODO, true);
 		FXTreeItem* pk = add(cSec, "Richtlinien öffentlicher Schlüssel", resico_folder, GN_FOLDER, true);
@@ -5260,6 +5387,7 @@ public:
 		rowPolicies.clear();
 		rowPolicyKeys.clear();
 		status->setText(" ");
+		rightSwitcher->setCurrent(0);
 		auto nit = nodes.find(item);
 		if (nit == nodes.end()) return;
 		const Node& node = nit->second;
@@ -5311,6 +5439,15 @@ public:
 					}
 					list->appendItem(FXString(USER_RIGHTS[i].label) + "\t" + shown, ic, ic);
 				}
+				break;
+			}
+			case GN_SERVICES: {
+				// Jedes Mal frisch: Vorlage und alle installierten Dienste.
+				inf = loadGptTmpl(domain, guid);
+				rightSwitcher->setCurrent(1);
+				getApp()->beginWaitCursor();
+				servicePanel->reload();
+				getApp()->endWaitCursor();
 				break;
 			}
 			case GN_RESTRICTED: {
@@ -5507,6 +5644,32 @@ public:
 				break;
 		}
 		return 1;
+	}
+
+	// ---- SvcPanelDelegate: Systemdienste ------------------------------
+	virtual std::vector<std::pair<FXString, FXint> > svcColumns() {
+		return { { "Dienstname", 260 }, { "Starttyp", 140 }, { "Berechtigung", 140 } };
+	}
+	virtual FXString svcRowText(const svc::ServiceInfo& info) {
+		ServicePolicy sp = findServicePolicy(inf, info.displayName());
+		return FXString(info.displayName().c_str()) + "\t" + serviceModeLabel(sp.defined ? sp.startMode : 0) + "\t" +
+		       (sp.defined && !sp.sddl.empty() ? "Konfiguriert" : "Nicht definiert");
+	}
+	virtual void svcActivate(FXWindow*, const svc::ServiceInfo& info) {
+		if (!requireRoot()) return;
+		inf = loadGptTmpl(domain, guid);
+		std::string name = info.displayName();
+		ServicePolicy sp = findServicePolicy(inf, name);
+		ServicePolicyDialog dlg(this, name.c_str(), sp);
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		if (dlg.isDefined() == sp.defined && (!sp.defined || dlg.getMode() == sp.startMode)) return;
+		ServicePolicy changed = sp;
+		changed.defined = dlg.isDefined();
+		changed.startMode = dlg.getMode();
+		if (changed.defined && changed.sddl.empty()) changed.sddl = SERVICE_DEFAULT_SDDL;
+		setServicePolicy(inf, name, changed);
+		saveTemplate(false);
+		inf = loadGptTmpl(domain, guid);
 	}
 
 	void ensurePrincipals() {

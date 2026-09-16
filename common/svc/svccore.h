@@ -70,6 +70,11 @@ RecoverySettings recordToRecovery(const std::map<std::string, std::string>& rec)
 // Wir zeigen wie das Original nur Dienste an, keine Targets/Sockets.
 std::vector<std::string> splitUnitList(const std::string& value, bool servicesOnly = true);
 
+// Unit-Namen aus "systemctl list-unit-files" bzw. "list-units --plain"
+// (erste Spalte). Nur Dienste, ohne Instanz-Vorlagen ("getty@.service"),
+// ohne Doppelte, in Eingabereihenfolge.
+std::vector<std::string> parseUnitNames(const std::string& raw);
+
 // Zeitangaben aus "systemctl show": je nach Version "30s", "1min 30s",
 // "infinity" oder blanke Mikrosekunden. Rueckgabe in Sekunden, -1 bei
 // "infinity"/unlesbar.

@@ -322,11 +322,15 @@ FXDEFMAP(SvcPanel) SvcPanelMap[] = {
 };
 FXIMPLEMENT(SvcPanel, FXVerticalFrame, SvcPanelMap, ARRAYNUMBER(SvcPanelMap))
 
-SvcPanel::SvcPanel(FXComposite* parent, FXIcon* serviceIcon)
-	: FXVerticalFrame(parent, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0),
-	  icoService(serviceIcon) {
+SvcPanel::SvcPanel(FXComposite* parent, FXIcon* serviceIcon, SvcPanelDelegate* delegate_, FXuint opts)
+	: FXVerticalFrame(parent, opts | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0),
+	  icoService(serviceIcon), delegate(delegate_) {
 	list = new FXIconList(this, this, ID_LIST,
 	                       ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y | FRAME_NORMAL);
+	if (delegate) {
+		for (auto& c : delegate->svcColumns()) list->appendHeader(c.first, NULL, c.second);
+		return;
+	}
 	list->appendHeader("Name", NULL, 200);
 	list->appendHeader("Beschreibung", NULL, 240);
 	list->appendHeader("Status", NULL, 90);
@@ -335,18 +339,28 @@ SvcPanel::SvcPanel(FXComposite* parent, FXIcon* serviceIcon)
 }
 
 void SvcPanel::reload() {
+	services = listServices();
+	relabel();
+}
+
+void SvcPanel::relabel() {
 	FXint keep = list->getCurrentItem();
 	list->clearItems();
-	services = listServices();
 	for (auto& s : services) {
-		FXString txt = FXString(s.displayName().c_str()) + "\t" + s.description.c_str() + "\t"
-		             + s.statusLabel().c_str() + "\t" + s.startTypeLabel().c_str() + "\t"
-		             + s.logonLabel().c_str();
+		FXString txt;
+		if (delegate) {
+			txt = delegate->svcRowText(s);
+		} else {
+			txt = FXString(s.displayName().c_str()) + "\t" + s.description.c_str() + "\t"
+			    + s.statusLabel().c_str() + "\t" + s.startTypeLabel().c_str() + "\t"
+			    + s.logonLabel().c_str();
+		}
 		list->appendItem(txt, icoService, icoService);
 	}
 	if (keep >= 0 && keep < list->getNumItems()) {
 		list->setCurrentItem(keep);
 		list->selectItem(keep);
+		list->makeItemVisible(keep);
 	}
 }
 
@@ -381,6 +395,11 @@ void SvcPanel::restartSelected() {
 
 void SvcPanel::propertiesForSelected() {
 	if (!hasSelection()) return;
+	if (delegate) {
+		delegate->svcActivate(this, services[list->getCurrentItem()]);
+		relabel();
+		return;
+	}
 	std::string unit = services[list->getCurrentItem()].unit;
 
 	ServiceInfo info;
@@ -407,6 +426,15 @@ long SvcPanel::onListRightClick(FXObject*, FXSelector, void* ptr) {
 	list->selectItem(idx);
 
 	FXMenuPane menu(this);
+	if (delegate) {
+		new FXMenuCommand(&menu, "&Sicherheit...", NULL, this, ID_PROPERTIES);
+		new FXMenuSeparator(&menu);
+		new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
+		menu.create();
+		menu.popup(NULL, ev->root_x, ev->root_y);
+		getApp()->runModalWhileShown(&menu);
+		return 1;
+	}
 	bool running = services[idx].running();
 	FXMenuCommand* mcStart = new FXMenuCommand(&menu, "&Starten", NULL, this, ID_START);
 	FXMenuCommand* mcStop = new FXMenuCommand(&menu, "&Beenden", NULL, this, ID_STOP);
