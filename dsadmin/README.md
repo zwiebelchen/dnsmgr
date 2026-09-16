@@ -70,6 +70,34 @@ Mehrere Richtlinien lassen sich gemeinsam markieren (Strg/Umschalt) und
 Sammelaktion nicht erraten, sie werden übersprungen und gemeldet, damit
 man sie einzeln per Doppelklick setzt.
 
+## Advertise-Skript (.aas)
+
+Die `.aas`-Datei wird gegen zwei echte, von einem Windows-2000-Server
+erzeugte Skripte abgeglichen: für dieselben Eingaben ist die Ausgabe
+byteweise identisch (bis auf den Zeitstempel im Kopf).
+
+Die erste, allein aus [MS-GPSI] abgeleitete Fassung war an mehreren
+Stellen falsch und hat auf dem Client nichts bewirkt:
+
+| | vorher | richtig |
+|---|---|---|
+| Produkt- und Dateiname | Unicode | **ASCII** |
+| ProductInfo | 16 Argumente | **13** |
+| Header-Version | 400 | **200** |
+| Ende-Datensatz | 3 Argumente | **2** |
+| Quellenliste | voller Pfad zur .msi | nur das **Quellverzeichnis** |
+| Features | fehlten ganz | je ein `0x41`-Datensatz |
+| PublishFeatures/PublishProduct | fehlten | `0x08` |
+| Rollback-Aktionstexte | fehlten | `0x06` |
+| UpgradeCode | fehlte | `0x62` |
+
+Entscheidend sind die Feature-Datensätze: ohne sie veröffentlicht das
+Skript keine Features, und der Windows Installer weiß nicht, was er
+installieren soll. Die Feature-Liste kommt aus der Feature-Tabelle der
+`.msi` (`msiinfo export <datei> Feature`), der Package Code aus dem
+Summary-Information-Stream (`msiinfo suminfo`) statt aus einer selbst
+erzeugten GUID, und Sprache sowie UpgradeCode aus der Property-Tabelle.
+
 ## Weitere Gruppenrichtlinien-Erweiterungen
 
 Neben den Administrativen Vorlagen sind drei weitere

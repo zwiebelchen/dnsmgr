@@ -18,3 +18,4 @@ dsadmin/test_regpol
 dsadmin/test_aas
 services/test_svccore
 common/svc/test_svccore
+dsadmin/test_aas_struct

@@ -22,6 +22,14 @@
 #include <vector>
 #include <cstdint>
 
+// Ein Eintrag der Feature-Tabelle der MSI. Ohne diese Datensaetze
+// veroeffentlicht das Skript keine Features -- und der Windows
+// Installer weiss dann nicht, was er installieren soll.
+struct AasFeature {
+	std::string name;    // Feature-Spalte der MSI ("Program", "Complete", ...)
+	std::string parent;  // Feature_Parent, leer bei der Wurzel
+};
+
 struct AasPackageInfo {
 	std::string productName;     // z.B. "Ice2K Testprodukt" (aus der .msi, Property ProductName)
 	std::string packageFileName; // z.B. "test.msi" (nur der Dateiname, aus der .msi PackageName-Konvention)
@@ -31,6 +39,8 @@ struct AasPackageInfo {
 	std::string msiUncPath;      // volle UNC-Pfad-Angabe, z.B. "\\\\server\\share\\apps\\test.msi"
 	bool assignedPerMachine = true; // true = Computer-Zuweisung, false = Benutzer (zugewiesen ODER veroeffentlicht)
 	uint32_t langId = 1031;      // LCID, Standard Deutsch (Deutschland)
+	std::string upgradeCodeGuid; // Property UpgradeCode der .msi
+	std::vector<AasFeature> features; // Feature-Tabelle der .msi, in Tabellenreihenfolge
 };
 
 // Baut die rohen Bytes einer .aas-Datei fuer ein einzelnes Paket.

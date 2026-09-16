@@ -122,64 +122,124 @@ static void splitUncPath(const std::string& full, std::string& dir, std::string&
 
 } // namespace
 
+// ---------------------------------------------------------------------
+// Aufbau der Datei.
+//
+// Die Reihenfolge und die Argumentzahl jedes Datensatzes stammen nicht
+// aus einer Auslegung der Spezifikation, sondern aus dem Vergleich mit
+// zwei .aas-Dateien, die ein echter Windows-2000-Server erzeugt hat.
+// Die frueheren, aus [MS-GPSI] abgeleiteten Annahmen waren an mehreren
+// Stellen falsch: Produkt- und Dateiname schreibt Windows als ASCII
+// (nicht Unicode), ProductInfo hat 13 statt 16 Argumente, der Header
+// traegt 200 statt 400 -- und vor allem fehlten die Datensaetze, die
+// die Features des Pakets veroeffentlichen. Ohne die weiss der Windows
+// Installer nicht, was er installieren soll.
+// ---------------------------------------------------------------------
 std::vector<uint8_t> buildAasFile(const AasPackageInfo& info) {
 	AasWriter w;
 	std::string dir, filename;
 	splitUncPath(info.msiUncPath, dir, filename);
 
-	// --- Header (Opcode 2, 9 Argumente) ---
-	w.record(2, 9);
-	w.argInt32(1397708873);          // Signature (fest laut Spezifikation)
-	w.argInt32(400);                 // Version
-	w.argInt32((int32_t)currentDosTimestamp()); // Timestamp
-	w.argInt32((int32_t)info.langId); // LangId
-	w.argInt32(0);                   // Platform (0 = keine Einschraenkung)
-	w.argInt32(3);                   // ScriptType (MUSS 3 sein)
-	w.argInt32(21);                  // ScriptMajorVersion (MUSS 21 sein)
-	w.argInt32(4);                   // ScriptMinorVersion (MUSS 4 sein)
-	w.argInt32(0);                   // ScriptAttributes (MUSS 0 sein)
+	// --- Header (Opcode 0x02, 9 Argumente) ---
+	w.record(0x02, 9);
+	w.argInt32(1397708873);           // "IXOS"
+	w.argInt32(200);                  // Version (Windows 2000 schreibt 200)
+	w.argInt32((int32_t)currentDosTimestamp());
+	w.argInt32((int32_t)info.langId);
+	w.argInt32(0);
+	w.argInt32(3);                    // ScriptType
+	w.argInt32(21);                   // ScriptMajorVersion
+	w.argInt32(4);                    // ScriptMinorVersion
+	w.argInt32(0);                    // ScriptAttributes
 
-	// --- ProductInfo (Opcode 4, 16 Argumente) ---
-	w.record(4, 16);
-	w.argAsciiString(info.productCodeGuid); // ProductKey
-	w.argUnicodeString(info.productName);   // ProductName
-	w.argUnicodeString(filename);           // PackageName
-	w.argInt32((int32_t)info.langId);       // Language
-	w.argInt32((int32_t)encodeVersion(info.versionString)); // Version
-	w.argInt32(info.assignedPerMachine ? 1 : 0); // Assignment (0=Benutzer, 1=Computer)
-	w.argInt32(0);                          // ObsoleteArg
-	w.argNullString();                      // ProductIcon
-	w.argNullString();                      // PackageMediaPath
-	w.argAsciiString(info.packageCodeGuid); // PackageCode
-	w.argNull();                            // null argument (1)
-	w.argNull();                            // null argument (2)
-	w.argInt32(0);                          // InstanceType
-	w.argInt32(0);                          // LUASetting
-	w.argInt32(0);                          // RemoteURTInstalls
-	w.argInt32(1);                          // ProductDeploymentFlags (1 = MSIDEPLOYFLAGS_GPDEPLOY)
+	// --- ProductInfo (Opcode 0x04, 13 Argumente) ---
+	w.record(0x04, 13);
+	w.argAsciiString(info.productCodeGuid);
+	w.argAsciiString(info.productName);      // ASCII, nicht Unicode
+	w.argAsciiString(filename);              // ASCII, nicht Unicode
+	w.argInt32((int32_t)info.langId);
+	w.argInt32((int32_t)encodeVersion(info.versionString));
+	w.argInt32(info.assignedPerMachine ? 1 : 0);
+	w.argInt32(0);
+	w.argNull();
+	w.argNull();
+	w.argAsciiString(info.packageCodeGuid);
+	w.argNull();
+	w.argNull();
+	w.argInt32(0);
 
-	// --- SourceListPublish (Opcode 9, 5 + 3*Anzahl_Datentraeger + 1 Argumente) ---
-	// Wir modellieren immer genau einen "Datentraeger" (die Netzwerkfreigabe).
-	w.record(9, 9);
-	w.argNullString();          // PatchCode
-	w.argNullString();          // PatchPackageName
-	w.argNullString();          // DiskPromptTemplate
-	w.argUnicodeString(info.msiUncPath); // PackagePath
-	w.argInt32(1);               // NumberOfDisks
-	w.argInt32(1);               // DiskId
-	w.argNullString();          // VolumeName
-	w.argNullString();          // DiskPrompt
-	w.argUnicodeString(dir);    // LaunchPath
+	// --- Sprache/Produktname (Opcode 0x05) ---
+	w.record(0x05, 3);
+	w.argInt32(0);
+	w.argInt32((int32_t)info.langId);
+	w.argInt32(0);
 
-	// --- ProductPublish (Opcode 16, 1 Argument) ---
-	w.record(16, 1);
-	w.argAsciiString(info.packageCodeGuid); // PackageKey
+	w.record(0x05, 2);
+	w.argInt32(1);
+	w.argAsciiString(info.productName);
 
-	// --- End (Opcode 3, 3 Argumente) ---
-	w.record(3, 3);
-	w.argInt32(0); // Checksum
-	w.argInt32(0); // ProgressTotalHDWord
-	w.argInt32(0); // ProgressTotalLDWord
+	// --- Rollback-Aktionstexte (Opcode 0x06) -- feste Zeichenketten,
+	// die Windows unveraendert in jedes Skript schreibt.
+	w.record(0x06, 7);
+	w.argNull();
+	w.argAsciiString("Rollback");
+	w.argAsciiString("Rolling back action:");
+	w.argAsciiString("[1]");
+	w.argAsciiString("RollbackCleanup");
+	w.argAsciiString("Removing backup files");
+	w.argAsciiString("File: [1]");
+
+	// --- Features veroeffentlichen (Opcode 0x08 + je ein 0x41) ---
+	w.record(0x08, 3);
+	w.argAsciiString("PublishFeatures");
+	w.argAsciiString("Publishing Product Features");
+	w.argAsciiString("Feature: [1]");
+
+	for (const auto& f : info.features) {
+		w.record(0x41, 3);
+		w.argAsciiString(f.name);
+		if (f.parent.empty()) w.argNull(); else w.argAsciiString(f.parent);
+		w.argInt32(1);
+	}
+
+	// --- Produkt veroeffentlichen (Opcode 0x08) ---
+	w.record(0x08, 3);
+	w.argAsciiString("PublishProduct");
+	w.argAsciiString("Publishing product information");
+	w.argNull();
+
+	// --- PackageCode und UpgradeCode ---
+	w.record(0x10, 1);
+	w.argAsciiString(info.packageCodeGuid);
+
+	if (!info.upgradeCodeGuid.empty()) {
+		w.record(0x62, 1);
+		w.argAsciiString(info.upgradeCodeGuid);
+	}
+
+	// --- Quellenliste (Opcode 0x09, 9 Argumente) ---
+	// Bemerkenswert: der volle Pfad zur .msi steht hier NICHT drin, nur
+	// das Quellverzeichnis. Den Dateinamen holt der Client aus
+	// msiFileList am packageRegistration-Objekt in AD.
+	w.record(0x09, 9);
+	w.argNull();
+	w.argNull();
+	w.argNull();
+	w.argNull();
+	w.argInt32(1);
+	w.argInt32(1);
+	w.argNull();
+	w.argNull();
+	w.argAsciiString(dir);
+
+	w.record(0x12, 2);
+	w.argNull();
+	w.argNull();
+
+	// --- Ende (Opcode 0x03, 2 Argumente) ---
+	w.record(0x03, 2);
+	w.argInt32(0);
+	w.argInt32(0);
 
 	return w.buf;
 }

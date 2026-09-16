@@ -1370,6 +1370,50 @@ static std::map<std::string, std::string> extractMsiProperties(const std::string
 	return props;
 }
 
+// Liest die Feature-Tabelle der .msi. Ohne diese Eintraege enthaelt das
+// Advertise-Skript keine Features, und der Windows Installer weiss
+// nicht, was er installieren soll -- im Vergleich mit einem echten,
+// von Windows 2000 erzeugten Skript war genau das der Unterschied.
+// Spalte 0 ist "Feature", Spalte 1 "Feature_Parent"; die
+// Tabellenreihenfolge wird beibehalten.
+static std::vector<AasFeature> extractMsiFeatures(const std::string& msiPath) {
+	std::vector<AasFeature> features;
+	std::string out;
+	runAsRootCaptured({ FXString("msiinfo"), FXString("export"), FXString(msiPath.c_str()), FXString("Feature") }, out);
+	auto lines = splitLines(out);
+	for (size_t i = 3; i < lines.size(); i++) {   // Zeilen 0-2: Kopf/Typen/Schluessel
+		FXString l = lines[i].c_str();
+		if (trimStr(l.text()).empty()) continue;
+		int tab = l.find('\t');
+		AasFeature f;
+		if (tab < 0) {
+			f.name = trimStr(l.text());
+		} else {
+			f.name = trimStr(l.left(tab).text());
+			FXString rest = l.mid(tab + 1, l.length() - tab - 1);
+			int tab2 = rest.find('\t');
+			f.parent = trimStr((tab2 < 0 ? rest : rest.left(tab2)).text());
+		}
+		if (!f.name.empty()) features.push_back(f);
+	}
+	return features;
+}
+
+// Der Package Code steht nicht in der Property-Tabelle, sondern als
+// "Revision number" im Summary-Information-Stream.
+static std::string extractMsiPackageCode(const std::string& msiPath) {
+	std::string out;
+	runAsRootCaptured({ FXString("msiinfo"), FXString("suminfo"), FXString(msiPath.c_str()) }, out);
+	for (auto& line : splitLines(out)) {
+		FXString l = line.c_str();
+		FXString lower = l; lower.lower();
+		if (lower.find("revision") < 0) continue;
+		int b = l.find('{'), e = l.find('}');
+		if (b >= 0 && e > b) return std::string(l.mid(b, e - b + 1).text());
+	}
+	return "";
+}
+
 struct SoftwarePackageParams {
 	std::string localMsiPath;   // lokal lesbarer Pfad zur .msi (fuer msiinfo)
 	std::string msiUncPath;     // vollstaendiger UNC-Pfad, wie ein Client ihn erreicht
@@ -1392,11 +1436,24 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 	AasPackageInfo info;
 	info.productName = props.count("ProductName") ? props["ProductName"] : "Unbekanntes Produkt";
 	info.productCodeGuid = props["ProductCode"];
-	info.packageCodeGuid = generateNewGuidUpper(); // eigener Package Code fuer diese Bereitstellung
+	// Package Code aus der .msi selbst, nicht selbst erfunden -- ein
+	// echtes Windows-Skript traegt hier den Wert aus dem
+	// Summary-Information-Stream.
+	info.packageCodeGuid = extractMsiPackageCode(params.localMsiPath);
+	if (info.packageCodeGuid.empty()) info.packageCodeGuid = generateNewGuidUpper();
+	info.upgradeCodeGuid = props.count("UpgradeCode") ? props["UpgradeCode"] : "";
 	info.versionString = props.count("ProductVersion") ? props["ProductVersion"] : "1.0.0";
 	info.msiUncPath = params.msiUncPath;
 	info.assignedPerMachine = params.assignedPerMachine;
-	info.langId = 1031;
+	info.langId = props.count("ProductLanguage") ? (uint32_t)atoi(props["ProductLanguage"].c_str()) : 1031;
+	if (info.langId == 0) info.langId = 1031;
+	info.features = extractMsiFeatures(params.localMsiPath);
+	if (info.features.empty())
+		log += "Achtung: In der .msi wurde keine Feature-Tabelle gefunden.\n"
+		       "Das Advertise-Skript veröffentlicht dann keine Features und der\n"
+		       "Client kann nichts installieren.\n";
+	else
+		log += "Features aus der .msi: " + std::to_string(info.features.size()) + "\n";
 
 	std::string packageGuid = generateNewGuidUpper();
 	FXString realmLower = domain.realm; realmLower.lower();
