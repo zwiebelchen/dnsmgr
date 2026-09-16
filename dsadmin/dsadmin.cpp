@@ -5724,6 +5724,153 @@ FXDEFMAP(ServicePolicyDialog) ServicePolicyDialogMap[] = {
 FXIMPLEMENT(ServicePolicyDialog, FXDialogBox, ServicePolicyDialogMap, ARRAYNUMBER(ServicePolicyDialogMap))
 
 // ---------------------------------------------------------------------
+// Registrierung ([Registry Keys]) und Dateisystem ([File Security]):
+// je Objekt eine Zeile "\"Pfad\",Modus,\"SDDL\"".
+//
+// Modus -- hier widersprechen sich Microsofts Quellen: [MS-GPSB] 2.2.7
+// nennt 0 = weitergeben, 1 = ersetzen, 2 = nicht ersetzen. Die WMI-Klasse
+// RSOP_RegistryKey aus der tatsaechlichen Implementierung (SceRsop.mof)
+// ordnet dagegen 0 = Inherit, 1 = Ignore, 2 = Overwrite zu, und Windows'
+// eigene Vorlagen setzen kritische Eintraege (z.B. regedit.exe) auf 2.
+// Wir folgen der Implementierung.
+// ---------------------------------------------------------------------
+static const int OBJMODE_INHERIT = 0;   // vererbbare Berechtigungen weitergeben
+static const int OBJMODE_IGNORE = 1;    // Objekt nicht konfigurieren
+static const int OBJMODE_OVERWRITE = 2; // Berechtigungen der Unterobjekte ersetzen
+
+struct ObjectPolicy { std::string path; int mode = OBJMODE_INHERIT; std::string sddl; };
+
+static const char* objectSection(SecObjectKind kind) {
+	return kind == SECOBJ_REGISTRY ? "Registry Keys" : "File Security";
+}
+
+static std::vector<ObjectPolicy> listObjectPolicies(InfFile& inf, SecObjectKind kind) {
+	std::vector<ObjectPolicy> out;
+	auto* sec = inf.find(objectSection(kind));
+	if (!sec) return out;
+	for (auto& kv : *sec) {
+		auto f = splitQuotedCsv(kv.first);
+		if (f.size() < 2 || f[0].empty()) continue;
+		ObjectPolicy op;
+		op.path = f[0];
+		try { op.mode = std::stoi(f[1]); } catch (...) {}
+		op.sddl = f.size() > 2 ? f[2] : "";
+		out.push_back(op);
+	}
+	std::sort(out.begin(), out.end(), [](const ObjectPolicy& a, const ObjectPolicy& b) { return germanLess(a.path, b.path); });
+	return out;
+}
+
+// Ersetzt (oder mit remove=true: entfernt) den Eintrag fuer op.path.
+static void storeObjectPolicy(InfFile& inf, SecObjectKind kind, const ObjectPolicy& op, bool remove) {
+	const char* section = objectSection(kind);
+	auto matches = [&](const std::pair<std::string, std::string>& kv) {
+		auto f = splitQuotedCsv(kv.first);
+		return !f.empty() && lowerCopy(f[0]) == lowerCopy(op.path);
+	};
+	if (auto* sec = inf.find(section))
+		sec->erase(std::remove_if(sec->begin(), sec->end(), matches), sec->end());
+	if (remove) return;
+	std::string line = "\"" + op.path + "\"," + std::to_string(op.mode) + ",\"" + op.sddl + "\"";
+	if (!inf.find(section)) inf.set(section, line, INF_BARE_LINE);
+	else inf.find(section)->push_back({ line, INF_BARE_LINE });
+}
+
+// Vorgabe fuer ein neu hinzugefuegtes Objekt: Administratoren und SYSTEM
+// Vollzugriff, Benutzer lesend -- vererbbar.
+static std::string defaultObjectSddl(SecObjectKind kind) {
+	return kind == SECOBJ_REGISTRY ? "D:AR(A;CI;KA;;;BA)(A;CI;KA;;;SY)(A;CI;KR;;;BU)"
+	                               : "D:AR(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;BU)";
+}
+
+// Registrierungspfade in der Schreibweise der Vorlage: "MACHINE\...",
+// "USERS\...", "CLASSES_ROOT\..." -- HKLM/HKEY_LOCAL_MACHINE usw. werden
+// umgesetzt. Leerer Rueckgabewert = ungueltig.
+static std::string normalizeRegistryPath(std::string p) {
+	p = trimStr(p);
+	std::replace(p.begin(), p.end(), '/', '\\');
+	while (!p.empty() && p.back() == '\\') p.pop_back();
+	size_t bs = p.find('\\');
+	std::string root = lowerCopy(p.substr(0, bs));
+	std::string rest = bs == std::string::npos ? "" : p.substr(bs);
+	if (root == "hklm" || root == "hkey_local_machine" || root == "machine") root = "MACHINE";
+	else if (root == "hku" || root == "hkey_users" || root == "users") root = "USERS";
+	else if (root == "hkcr" || root == "hkey_classes_root" || root == "classes_root") root = "CLASSES_ROOT";
+	else return "";
+	if (p.find('"') != std::string::npos) return "";
+	return root + rest;
+}
+
+// Dialog "Sicherheitsrichtlinieneinstellung" fuer einen Schluessel bzw.
+// eine Datei/einen Ordner: Modus plus "Berechtigungen bearbeiten...".
+class ObjectPolicyDialog : public FXDialogBox {
+	FXDECLARE(ObjectPolicyDialog)
+private:
+	SecObjectKind kind;
+	FXString objectName;
+	std::string sddl;
+	const std::vector<GroupEntry>* principals = nullptr;
+	FXint configure = 1;    // 1 = konfigurieren, 0 = nicht konfigurieren
+	FXint propagate = OBJMODE_INHERIT;
+	FXDataTarget configureTarget, propagateTarget;
+	std::vector<FXWindow*> configControls;
+protected:
+	ObjectPolicyDialog() {}
+public:
+	enum { ID_CONFIGURE = FXDialogBox::ID_LAST, ID_PERMISSIONS };
+	ObjectPolicyDialog(FXWindow* owner, SecObjectKind kind_, const ObjectPolicy& op, const std::vector<GroupEntry>& principals_)
+		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,460,0),
+		  kind(kind_), objectName(op.path.c_str()), sddl(op.sddl.empty() ? defaultObjectSddl(kind_) : op.sddl), principals(&principals_),
+		  configure(op.mode == OBJMODE_IGNORE ? 0 : 1), propagate(op.mode == OBJMODE_OVERWRITE ? OBJMODE_OVERWRITE : OBJMODE_INHERIT),
+		  configureTarget(configure, this, ID_CONFIGURE), propagateTarget(propagate) {
+		bool reg = kind == SECOBJ_REGISTRY;
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
+		new FXLabel(head, "", sharedPngIcon(reg ? resico_key : resico_folder), LAYOUT_TOP);
+		new FXLabel(head, SecPolicyEditDialog::wrapLabel(op.path.c_str(), 55), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		new FXRadioButton(main, reg ? "Diesen Schlüssel &konfigurieren" : "Diese Datei bzw. diesen Ordner &konfigurieren",
+		                  &configureTarget, FXDataTarget::ID_OPTION + 1);
+		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
+		configControls.push_back(new FXRadioButton(body, reg ? "Vererbbare Berechtigungen an alle &Unterschlüssel weitergeben"
+		                                                     : "Vererbbare Berechtigungen an alle &Unterordner und Dateien weitergeben",
+		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_INHERIT));
+		configControls.push_back(new FXRadioButton(body, reg ? "Vorhandene Berechtigungen für alle Unterschlüssel durch\nvererbbare Berechtigungen &ersetzen"
+		                                                     : "Vorhandene Berechtigungen für alle Unterordner und Dateien\ndurch vererbbare Berechtigungen &ersetzen",
+		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_OVERWRITE));
+		new FXRadioButton(main, reg ? "Diesen Schlüssel &nicht konfigurieren" : "Diese Datei bzw. diesen Ordner &nicht konfigurieren",
+		                  &configureTarget, FXDataTarget::ID_OPTION + 0);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		configControls.push_back(new FXButton(btnf, "&Berechtigungen bearbeiten...", NULL, this, ID_PERMISSIONS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3));
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		updateEnabled();
+	}
+	void updateEnabled() {
+		for (auto* w : configControls) { if (configure) w->enable(); else w->disable(); }
+	}
+	long onConfigure(FXObject*, FXSelector, void*) { updateEnabled(); return 1; }
+	long onPermissions(FXObject*, FXSelector, void*) { editPermissions(); return 1; }
+	bool editPermissions() {
+		SecurityDialog dlg(this, objectName, kind, sddl, *principals);
+		if (!dlg.execute(PLACEMENT_OWNER)) return false;
+		sddl = dlg.getSddl();
+		return true;
+	}
+	int getMode() const { return configure ? propagate : OBJMODE_IGNORE; }
+	const std::string& getSddl() const { return sddl; }
+	virtual ~ObjectPolicyDialog() {}
+};
+FXDEFMAP(ObjectPolicyDialog) ObjectPolicyDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ObjectPolicyDialog::ID_CONFIGURE, ObjectPolicyDialog::onConfigure),
+	FXMAPFUNC(SEL_COMMAND, ObjectPolicyDialog::ID_PERMISSIONS, ObjectPolicyDialog::onPermissions),
+};
+FXIMPLEMENT(ObjectPolicyDialog, FXDialogBox, ObjectPolicyDialogMap, ARRAYNUMBER(ObjectPolicyDialogMap))
+
+// ---------------------------------------------------------------------
 // Fenster "Gruppenrichtlinie" -- Nachbau des Gruppenrichtlinienobjekt-
 // Editors: links der Baum mit Computer- und Benutzerkonfiguration,
 // rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
@@ -5731,7 +5878,7 @@ FXIMPLEMENT(ServicePolicyDialog, FXDialogBox, ServicePolicyDialogMap, ARRAYNUMBE
 class GpoEditorWindow : public FXDialogBox, public SvcPanelDelegate {
 	FXDECLARE(GpoEditorWindow)
 private:
-	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_SERVICES, GN_ADM, GN_ADMCAT, GN_FOLDERREDIR, GN_TODO };
+	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_SERVICES, GN_REGKEYS, GN_FILES, GN_ADM, GN_ADMCAT, GN_FOLDERREDIR, GN_TODO };
 	struct Node {
 		NodeKind kind = GN_FOLDER;
 		bool machine = true;
@@ -5754,6 +5901,7 @@ private:
 	std::vector<SoftwarePackageInfo> rowPackages;
 	std::vector<int> rowDefs;                 // GN_SECPOL/GN_RIGHTS: Zeile -> Tabellenindex
 	std::vector<std::string> rowGroups;       // GN_RESTRICTED: Zeile -> "*SID" der Gruppe
+	std::vector<ObjectPolicy> rowObjects;     // GN_REGKEYS/GN_FILES
 	std::vector<GroupEntry> principals;       // einmal geladen, fuer SID-Namen
 	std::vector<AdmPolicy*> rowPolicies;      // GN_ADMCAT: Zeilen nach den Unterkategorien
 	std::vector<std::string> rowPolicyKeys;
@@ -5769,7 +5917,7 @@ private:
 protected:
 	GpoEditorWindow() {}
 public:
-	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE, ID_ADD_RGROUP, ID_DELETE_RGROUP, ID_EDIT_RGROUP };
+	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE, ID_ADD_RGROUP, ID_DELETE_RGROUP, ID_EDIT_RGROUP, ID_ADD_OBJECT, ID_DELETE_OBJECT, ID_EDIT_OBJECT };
 
 	GpoEditorWindow(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const FXString& gpoName_)
 		: FXDialogBox(owner, "Gruppenrichtlinie", DECOR_ALL, 0,0,900,620),
@@ -5840,8 +5988,8 @@ public:
 		add(evt, "Einstellungen für Ereignisprotokolle", resico_key, GN_SECPOL, true, &SEC_EVENTLOG_POLICIES);
 		add(cSec, "Eingeschränkte Gruppen", resico_key, GN_RESTRICTED, true);
 		add(cSec, "Systemdienste", resico_key, GN_SERVICES, true);
-		add(cSec, "Registrierung", resico_key, GN_TODO, true);
-		add(cSec, "Dateisystem", resico_key, GN_TODO, true);
+		add(cSec, "Registrierung", resico_key, GN_REGKEYS, true);
+		add(cSec, "Dateisystem", resico_key, GN_FILES, true);
 		FXTreeItem* pk = add(cSec, "Richtlinien öffentlicher Schlüssel", resico_folder, GN_FOLDER, true);
 		add(pk, "Agenten für Wiederherstellung von verschlüsselten Daten", resico_folder, GN_TODO, true);
 		add(pk, "Einstellungen der automatischen Zertifikatsanforderung", resico_folder, GN_TODO, true);
@@ -5891,6 +6039,7 @@ public:
 		rowPackages.clear();
 		rowDefs.clear();
 		rowGroups.clear();
+		rowObjects.clear();
 		rowPolicies.clear();
 		rowPolicyKeys.clear();
 		status->setText(" ");
@@ -5946,6 +6095,22 @@ public:
 					}
 					list->appendItem(FXString(USER_RIGHTS[i].label) + "\t" + shown, ic, ic);
 				}
+				break;
+			}
+			case GN_REGKEYS:
+			case GN_FILES: {
+				setHeaders({ { "Objektname", 360 }, { "Berechtigung", 140 }, { "Überwachung", 140 } });
+				inf = loadGptTmpl(domain, guid);
+				SecObjectKind k = node.kind == GN_REGKEYS ? SECOBJ_REGISTRY : SECOBJ_FILE;
+				rowObjects = listObjectPolicies(inf, k);
+				FXIcon* ic = sharedPngIcon(k == SECOBJ_REGISTRY ? resico_key : resico_folder);
+				for (auto& op : rowObjects) {
+					const char* perm = op.mode == OBJMODE_IGNORE ? "Ignoriert" : op.mode == OBJMODE_OVERWRITE ? "Ersetzen" : "Vererben";
+					const char* audit = op.sddl.find("S:") != std::string::npos ? "Konfiguriert" : "Nicht konfiguriert";
+					list->appendItem(FXString(op.path.c_str()) + "\t" + perm + "\t" + audit, ic, ic);
+				}
+				status->setText(k == SECOBJ_REGISTRY ? " Rechtsklick in die Liste: Schlüssel hinzufügen, bearbeiten oder löschen."
+				                                     : " Rechtsklick in die Liste: Datei hinzufügen, bearbeiten oder löschen.");
 				break;
 			}
 			case GN_SERVICES: {
@@ -6139,6 +6304,10 @@ public:
 			case GN_RESTRICTED:
 				editRestrictedGroup(idx);
 				break;
+			case GN_REGKEYS:
+			case GN_FILES:
+				editObjectPolicy(idx);
+				break;
 			case GN_SCRIPTS: {
 				ScriptsDialog dlg(this, domain, guid.c_str());
 				dlg.execute(PLACEMENT_OWNER);
@@ -6178,6 +6347,98 @@ public:
 		setServicePolicy(inf, name, changed);
 		saveTemplate(false);
 		inf = loadGptTmpl(domain, guid);
+	}
+
+	SecObjectKind shownObjectKind() {
+		auto nit = nodes.find(shownItem);
+		return (nit != nodes.end() && nit->second.kind == GN_REGKEYS) ? SECOBJ_REGISTRY : SECOBJ_FILE;
+	}
+
+	void editObjectPolicy(int row) {
+		if (row < 0 || row >= (int)rowObjects.size() || !requireRoot()) return;
+		SecObjectKind k = shownObjectKind();
+		ensurePrincipals();
+		ObjectPolicy op = rowObjects[row];
+		ObjectPolicyDialog dlg(this, k, op, principals);
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		if (dlg.getMode() == op.mode && dlg.getSddl() == op.sddl) return;
+		inf = loadGptTmpl(domain, guid);
+		op.mode = dlg.getMode();
+		op.sddl = dlg.getSddl();
+		storeObjectPolicy(inf, k, op, false);
+		saveTemplate(false);
+		reselect(row);
+	}
+
+	long onAddObject(FXObject*, FXSelector, void*) {
+		if (!requireRoot()) return 1;
+		SecObjectKind k = shownObjectKind();
+		bool reg = k == SECOBJ_REGISTRY;
+		FXString path = reg ? "MACHINE\\SOFTWARE\\" : "%SystemRoot%\\";
+		// Eine Linux-Maschine hat weder Registrierung noch Windows-Pfade zum
+		// Durchsuchen -- der Pfad wird wie auf dem Client angegeben.
+		if (!FXInputDialog::getString(path, this, reg ? "Schlüssel hinzufügen" : "Datei hinzufügen",
+		        reg ? "Registrierungsschlüssel auf den Clients (MACHINE\\..., USERS\\... oder CLASSES_ROOT\\...):"
+		            : "Datei oder Ordner auf den Clients (z.B. %SystemRoot%\\system32 oder C:\\Daten):")) return 1;
+		std::string p = trimStr(path.text());
+		if (reg) {
+			p = normalizeRegistryPath(p);
+			if (p.empty()) {
+				FXMessageBox::error(this, MBOX_OK, "Schlüssel hinzufügen",
+					"Der Pfad muss mit MACHINE, USERS oder CLASSES_ROOT beginnen\n(HKLM, HKU und HKCR werden umgesetzt).");
+				return 1;
+			}
+		} else {
+			std::replace(p.begin(), p.end(), '/', '\\');
+			while (p.size() > 3 && p.back() == '\\') p.pop_back();
+			if (p.empty() || p.find('"') != std::string::npos) {
+				FXMessageBox::error(this, MBOX_OK, "Datei hinzufügen", "Bitte einen gültigen Pfad ohne Anführungszeichen angeben.");
+				return 1;
+			}
+		}
+		for (size_t i = 0; i < rowObjects.size(); i++) {
+			if (lowerCopy(rowObjects[i].path) != lowerCopy(p)) continue;
+			reselect((int)i);
+			editObjectPolicy((int)i);
+			return 1;
+		}
+		ensurePrincipals();
+		ObjectPolicy op;
+		op.path = p;
+		op.sddl = defaultObjectSddl(k);
+		// Wie im Original: erst die Berechtigungen, dann die Vererbung.
+		{
+			SecurityDialog sec(this, p.c_str(), k, op.sddl, principals);
+			if (!sec.execute(PLACEMENT_OWNER)) return 1;
+			op.sddl = sec.getSddl();
+		}
+		ObjectPolicyDialog dlg(this, k, op, principals);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		op.mode = dlg.getMode();
+		op.sddl = dlg.getSddl();
+		inf = loadGptTmpl(domain, guid);
+		storeObjectPolicy(inf, k, op, false);
+		saveTemplate(false);
+		showNode(shownItem);
+		for (size_t i = 0; i < rowObjects.size(); i++) if (rowObjects[i].path == p) reselect((int)i);
+		return 1;
+	}
+
+	long onDeleteObject(FXObject*, FXSelector, void*) {
+		int row = list->getCurrentItem();
+		if (row < 0 || row >= (int)rowObjects.size() || !requireRoot()) return 1;
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
+		        "Möchten Sie \"%s\" wirklich aus der Richtlinie löschen?", rowObjects[row].path.c_str()) != MBOX_CLICKED_YES) return 1;
+		inf = loadGptTmpl(domain, guid);
+		storeObjectPolicy(inf, shownObjectKind(), rowObjects[row], true);
+		saveTemplate(false);
+		reselect(row);
+		return 1;
+	}
+
+	long onEditObject(FXObject*, FXSelector, void*) {
+		editObjectPolicy(list->getCurrentItem());
+		return 1;
 	}
 
 	void ensurePrincipals() {
@@ -6337,6 +6598,20 @@ public:
 		FXEvent* ev = (FXEvent*)ptr;
 		FXint idx = list->getItemAt(ev->win_x, ev->win_y);
 		if (idx >= 0) { list->setCurrentItem(idx); list->selectItem(idx); }
+		if (nit->second.kind == GN_REGKEYS || nit->second.kind == GN_FILES) {
+			bool reg = nit->second.kind == GN_REGKEYS;
+			FXMenuPane menu(this);
+			new FXMenuCommand(&menu, reg ? "&Schlüssel hinzufügen..." : "&Datei hinzufügen...", NULL, this, ID_ADD_OBJECT);
+			if (idx >= 0 && idx < (int)rowObjects.size()) {
+				new FXMenuSeparator(&menu);
+				new FXMenuCommand(&menu, "&Sicherheit...", NULL, this, ID_EDIT_OBJECT);
+				new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_OBJECT);
+			}
+			menu.create();
+			menu.popup(NULL, ev->root_x, ev->root_y);
+			getApp()->runModalWhileShown(&menu);
+			return 1;
+		}
 		if (nit->second.kind == GN_RESTRICTED) {
 			FXMenuPane menu(this);
 			new FXMenuCommand(&menu, "&Gruppe hinzufügen...", NULL, this, ID_ADD_RGROUP);
@@ -6432,6 +6707,9 @@ FXDEFMAP(GpoEditorWindow) GpoEditorWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_ADD_RGROUP, GpoEditorWindow::onAddRestrictedGroup),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_DELETE_RGROUP, GpoEditorWindow::onDeleteRestrictedGroup),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_EDIT_RGROUP, GpoEditorWindow::onEditRestrictedGroup),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_ADD_OBJECT, GpoEditorWindow::onAddObject),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_DELETE_OBJECT, GpoEditorWindow::onDeleteObject),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_EDIT_OBJECT, GpoEditorWindow::onEditObject),
 };
 FXIMPLEMENT(GpoEditorWindow, FXDialogBox, GpoEditorWindowMap, ARRAYNUMBER(GpoEditorWindowMap))
 
