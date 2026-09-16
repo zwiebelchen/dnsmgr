@@ -537,43 +537,8 @@ static bool deleteOU(const FXString& ouDN, FXString& errorMsg) {
 // ---------------------------------------------------------------------
 // GPOs -- fuer den "Gruppenrichtlinie"-Reiter.
 // ---------------------------------------------------------------------
-struct GpoInfo {
-	FXString guid, displayName;
-};
 
-static std::vector<GpoInfo> listAllGpos() {
-	std::vector<GpoInfo> out;
-	std::string raw;
-	runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("listall") }, raw);
-	GpoInfo cur;
-	for (auto& l : splitLines(raw)) {
-		if (l.rfind("GPO", 0) == 0) {
-			size_t p = l.find(':');
-			if (p != std::string::npos) cur.guid = trimStr(l.substr(p + 1)).c_str();
-		} else if (l.rfind("display name", 0) == 0) {
-			size_t p = l.find(':');
-			if (p != std::string::npos) cur.displayName = trimStr(l.substr(p + 1)).c_str();
-			out.push_back(cur);
-			cur = GpoInfo();
-		}
-	}
-	return out;
-}
 
-// Verknuepfte GPOs (in Verknuepfungsreihenfolge) fuer eine Domaene/OU (volle DN).
-static std::vector<FXString> listLinkedGpoGuids(const FXString& fullDN) {
-	std::vector<FXString> out;
-	std::string raw;
-	runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("getlink"), fullDN }, raw);
-	for (auto& l : splitLines(raw)) {
-		size_t p = l.find('{');
-		size_t q = l.find('}');
-		if (p != std::string::npos && q != std::string::npos && q > p) {
-			out.push_back(FXString(l.substr(p, q - p + 1).c_str()));
-		}
-	}
-	return out;
-}
 
 // ---------------------------------------------------------------------
 // GPOs anlegen/verknuepfen/loesen sind LDAP-Schreibzugriffe auf einen
@@ -662,17 +627,6 @@ static bool createGpo(FXWindow* owner, const FXString& displayName, FXString& er
 	return true;
 }
 
-// Loescht das Gruppenrichtlinienobjekt selbst -- samt SYSVOL-Anteil und
-// allen Verknuepfungen. Nicht zu verwechseln mit unlinkGpo(), das nur
-// die Verknuepfung zu einem Container loest.
-static bool deleteGpo(FXWindow* owner, const FXString& guid, FXString& errorMsg) {
-	FXString cred = ensureAdminCreds(owner);
-	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann kein GPO gelöscht werden."; return false; }
-	std::string out;
-	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("del"), guid, cred }, out);
-	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
-	return true;
-}
 
 static bool linkGpo(FXWindow* owner, const FXString& guid, const FXString& containerFullDN, FXString& errorMsg) {
 	FXString cred = ensureAdminCreds(owner);
@@ -960,33 +914,6 @@ static std::vector<std::string> parseGpLinkBlocks(const std::string& raw) {
 	return out;
 }
 
-// delta: -1 = eine Position nach oben, +1 = eine nach unten. Steht die
-// Verknuepfung bereits am Rand, passiert nichts (kein Fehler).
-static bool moveGpoLink(FXWindow* owner, const FXString& realm, const FXString& containerFullDN,
-                        const FXString& guid, int delta, FXString& errorMsg) {
-	std::string raw = readLdapAttribute(owner, realm, containerFullDN.text(), "gPLink");
-	std::vector<std::string> blocks = parseGpLinkBlocks(raw);
-	if (blocks.size() < 2) return true;
-
-	std::string needle = lowerCopy(guid.text());
-	int idx = -1;
-	for (size_t i = 0; i < blocks.size(); i++)
-		if (lowerCopy(blocks[i]).find(needle) != std::string::npos) { idx = (int)i; break; }
-	if (idx < 0) { errorMsg = "Die Verknüpfung wurde im gPLink-Attribut nicht gefunden."; return false; }
-
-	int target = idx + delta;
-	if (target < 0 || target >= (int)blocks.size()) return true;
-	std::swap(blocks[idx], blocks[target]);
-
-	std::string joined;
-	for (auto& b : blocks) joined += b;
-	std::string ldif = "dn: " + std::string(containerFullDN.text()) + "\n"
-	                    "changetype: modify\n"
-	                    "replace: gPLink\n"
-	                    "gPLink: " + joined + "\n";
-	std::string log;
-	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
-}
 
 static std::string base64Encode(const std::vector<uint8_t>& data) {
 	static const char* tbl = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1078,19 +1005,6 @@ static std::string updateSequenceStamp() {
 // Erweiterungen) dieselbe Funktion nutzen koennen.
 static void writeGptIniVersion(const std::string& gptIniPath, uint32_t newVersion); // weiter unten definiert
 
-// Basis-DN aus dem Realm ableiten: LINUX.ZWIEBELCHEN.ORG ->
-// DC=linux,DC=zwiebelchen,DC=org
-static std::string baseDnFromRealm(const FXString& realm) {
-	FXString lower = realm; lower.lower();
-	std::string out;
-	for (FXint i = 0; i <= lower.contains('.'); i++) {
-		FXString part = lower.section('.', i);
-		if (part.empty()) continue;
-		if (!out.empty()) out += ",";
-		out += "DC=" + std::string(part.text());
-	}
-	return out;
-}
 
 static std::string guidFromGpoDn(const std::string& dn) {
 	if (dn.compare(0, 3, "CN=") != 0) return "";
@@ -2610,8 +2524,9 @@ protected:
 public:
 	enum { ID_GROUPLIST = FXDialogBox::ID_LAST, ID_ADD, ID_CHECK_NAMES, ID_NAMES, ID_OK };
 
-	GroupPickerDialog(FXWindow* owner, const FXString& realm, const std::vector<GroupEntry>& groups_)
-		: FXDialogBox(owner, "Gruppen auswählen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE | DECOR_RESIZE, 0,0,566,440),
+	GroupPickerDialog(FXWindow* owner, const FXString& realm, const std::vector<GroupEntry>& groups_,
+	                  const char* title = "Gruppen auswählen", const unsigned char* iconData = resico_users)
+		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE | DECOR_RESIZE, 0,0,566,440),
 		  groups(&groups_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,8,8, 0,6);
 
@@ -2628,7 +2543,7 @@ public:
 		                           ICONLIST_DETAILED | ICONLIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		groupList->appendHeader("Name", NULL, 256);
 		groupList->appendHeader("Ordner", NULL, 270);
-		FXIcon* ic = sharedPngIcon(resico_users);
+		FXIcon* ic = sharedPngIcon(iconData);
 		for (auto& g : *groups) groupList->appendItem(g.cn + "\t" + g.folder, ic, ic);
 
 		FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
@@ -2723,13 +2638,13 @@ public:
 			if (idx == -1) {
 				FXMessageBox::error(this, MBOX_OK, "Name nicht gefunden",
 					"Der Name \"%s\" wurde nicht gefunden.\n\n"
-					"Überprüfen Sie die Schreibweise, oder wählen Sie die Gruppe in der Liste aus.", n.text());
+					"Überprüfen Sie die Schreibweise, oder wählen Sie das Objekt in der Liste aus.", n.text());
 				return false;
 			}
 			if (idx == -2) {
 				FXMessageBox::error(this, MBOX_OK, "Mehrere Namen gefunden",
-					"Der Name \"%s\" passt auf mehrere Gruppen.\n\n"
-					"Geben Sie den Namen genauer ein, oder wählen Sie die Gruppe in der Liste aus.", n.text());
+					"Der Name \"%s\" passt auf mehrere Objekte.\n\n"
+					"Geben Sie den Namen genauer ein, oder wählen Sie das Objekt in der Liste aus.", n.text());
 				return false;
 			}
 			if (std::find(resolved.begin(), resolved.end(), idx) == resolved.end()) resolved.push_back(idx);
@@ -4333,375 +4248,1729 @@ public:
 };
 FXIMPLEMENT(FolderRedirectionDialog, FXDialogBox, NULL, 0)
 
-class PropertiesDialog : public FXDialogBox {
-	FXDECLARE(PropertiesDialog)
-private:
-	FXString containerFullDN;
-	FXString realm;
-	FXList* gpoList;
-	std::vector<FXString> linkedGuids;
-	std::map<FXString, FXString> guidToName;
-public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS, ID_FOLDER_REDIR, ID_LINK_UP, ID_LINK_DOWN, ID_DELETE_GPO };
-	long onNewGpo(FXObject*, FXSelector, void*);
-	long onAddGpo(FXObject*, FXSelector, void*);
-	long onRemoveGpo(FXObject*, FXSelector, void*);
-	long onEditGpo(FXObject*, FXSelector, void*);
-	long onInstallSoftware(FXObject*, FXSelector, void*);
-	long onSecuritySettings(FXObject*, FXSelector, void*);
-	long onScripts(FXObject*, FXSelector, void*);
-	long onFolderRedirection(FXObject*, FXSelector, void*);
-	long onDeleteGpo(FXObject*, FXSelector, void*);
-	long onLinkUp(FXObject*, FXSelector, void*);
-	long onLinkDown(FXObject*, FXSelector, void*);
-	long moveSelectedLink(int delta);
 
-	void reloadList() {
-		gpoList->clearItems();
-		linkedGuids = listLinkedGpoGuids(containerFullDN);
-		auto allGpos = listAllGpos();
-		guidToName.clear();
-		for (auto& g : allGpos) guidToName[g.guid] = g.displayName;
-		for (auto& guid : linkedGuids) {
-			FXString label = guidToName.count(guid) ? guidToName[guid] : guid;
-			gpoList->appendItem(label);
-		}
+// =====================================================================
+// Gruppenrichtlinienfenster, OU-Eigenschaften und alles, was beide
+// brauchen.
+// =====================================================================
+
+// ---------------------------------------------------------------------
+// Allgemeine LDAP-Suche ueber den privilegierten ldapi-Socket (nur
+// lesend, ohne Anmeldedaten -- siehe ldapListChildren).
+// ---------------------------------------------------------------------
+static std::vector<std::multimap<std::string, std::string>> ldapiSearch(const std::string& base, const char* scope,
+                                                                        const std::string& filter,
+                                                                        const std::vector<std::string>& attrs) {
+	std::vector<std::multimap<std::string, std::string>> out;
+	if (access("/usr/bin/ldapsearch", X_OK) != 0) return out;
+	std::vector<FXString> args = {
+		FXString("ldapsearch"), FXString("-x"), FXString("-LLL"), FXString("-o"), FXString("ldif-wrap=no"),
+		FXString("-H"), FXString(SAMBA_LDAPI_URL), FXString("-b"), FXString(base.c_str()),
+		FXString("-s"), FXString(scope), FXString(filter.c_str())
+	};
+	for (auto& a : attrs) args.push_back(FXString(a.c_str()));
+	std::string raw;
+	if (runAsRootCaptured(args, raw) != 0) return out;
+	std::string block;
+	auto flush = [&]() {
+		if (block.empty()) return;
+		auto rec = parseLdifRecord(block);
+		block.clear();
+		if (!ldifFirst(rec, "dn").empty()) out.push_back(rec);
+	};
+	for (auto& l : splitLines(raw)) {
+		if (l.empty()) flush();
+		else if (l[0] != '#') block += l + "\n";
 	}
-protected:
-	PropertiesDialog() {}
-public:
-	PropertiesDialog(FXWindow* owner, const FXString& title, const FXString& fullDN, const FXString& realm_)
-		: FXDialogBox(owner, FXString("Eigenschaften von ") + title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,580,420),
-		  containerFullDN(fullDN), realm(realm_) {
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
-
-		new FXTabItem(tabs, "Gruppenrichtlinie");
-		FXVerticalFrame* gpoPage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
-		new FXLabel(gpoPage, "Aktuelle Gruppenrichtlinienobjekt-Verknüpfungen für\n" + title + ":");
-		gpoList = new FXList(gpoPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
-		FXHorizontalFrame* gpoBtns = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,2);
-		new FXButton(gpoBtns, "&Neu", NULL, this, ID_NEW_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "&Löschen...", NULL, this, ID_DELETE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "Nach &oben", NULL, this, ID_LINK_UP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns, "Nach &unten", NULL, this, ID_LINK_DOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		FXHorizontalFrame* gpoBtns2 = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,4);
-		new FXButton(gpoBtns2, "&Software...", NULL, this, ID_INSTALL_SOFTWARE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns2, "S&icherheit...", NULL, this, ID_SECURITY_SETTINGS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns2, "S&kripte...", NULL, this, ID_SCRIPTS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(gpoBtns2, "Or&dnerumleitung...", NULL, this, ID_FOLDER_REDIR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-
-		reloadList();
-	}
-	virtual ~PropertiesDialog() {}
-};
-FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_NEW_GPO, PropertiesDialog::onNewGpo),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_ADD_GPO, PropertiesDialog::onAddGpo),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_REMOVE_GPO, PropertiesDialog::onRemoveGpo),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_EDIT_GPO, PropertiesDialog::onEditGpo),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_INSTALL_SOFTWARE, PropertiesDialog::onInstallSoftware),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SECURITY_SETTINGS, PropertiesDialog::onSecuritySettings),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SCRIPTS, PropertiesDialog::onScripts),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_FOLDER_REDIR, PropertiesDialog::onFolderRedirection),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_DELETE_GPO, PropertiesDialog::onDeleteGpo),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_LINK_UP, PropertiesDialog::onLinkUp),
-	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_LINK_DOWN, PropertiesDialog::onLinkDown),
-};
-FXIMPLEMENT(PropertiesDialog, FXDialogBox, PropertiesDialogMap, ARRAYNUMBER(PropertiesDialogMap))
-
-long PropertiesDialog::onNewGpo(FXObject*, FXSelector, void*) {
-	FXString name;
-	if (FXInputDialog::getString(name, this, "Neues Gruppenrichtlinienobjekt", "Name des neuen GPO:") ) {
-		if (name.trim().empty()) return 1;
-		FXString errorMsg;
-		if (!createGpo(this, name, errorMsg)) {
-			// Haeufigster Fall: unter dem Namen gibt es schon ein GPO.
-			// Das passiert regelmaessig, weil "Entfernen" im
-			// Gruppenrichtlinie-Reiter nur die Verknuepfung loest -- das
-			// GPO selbst bleibt bestehen. Statt der Rohmeldung anbieten,
-			// das vorhandene zu verknuepfen.
-			if (errorMsg.find("already existing with name") >= 0) {
-				FXString existingGuid;
-				for (auto& g : listAllGpos()) if (g.displayName == name) existingGuid = g.guid;
-				if (!existingGuid.empty()) {
-					if (FXMessageBox::question(this, MBOX_YES_NO, "Name bereits vergeben",
-						"Es gibt bereits ein Gruppenrichtlinienobjekt mit dem Namen\n\"%s\".\n\n"
-						"Beim Entfernen wird nur die Verknüpfung gelöst, das Objekt\nselbst bleibt bestehen.\n\n"
-						"Soll das vorhandene Objekt mit diesem Container verknüpft werden?",
-						name.text()) == MBOX_CLICKED_YES) {
-						if (!linkGpo(this, existingGuid, containerFullDN, errorMsg))
-							FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
-						reloadList();
-					}
-					return 1;
-				}
-			}
-			FXMessageBox::error(this, MBOX_OK, "Anlegen fehlgeschlagen", "%s", errorMsg.text());
-			return 1;
-		}
-		auto all = listAllGpos();
-		FXString guid;
-		for (auto& g : all) if (g.displayName == name) guid = g.guid;
-		if (!guid.empty() && !linkGpo(this, guid, containerFullDN, errorMsg))
-			FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
-		reloadList();
-	}
-	return 1;
+	flush();
+	return out;
 }
 
-long PropertiesDialog::onAddGpo(FXObject*, FXSelector, void*) {
-	auto all = listAllGpos();
-	FXString choices;
-	std::vector<FXString> guids;
-	for (auto& g : all) {
-		if (std::find(linkedGuids.begin(), linkedGuids.end(), g.guid) != linkedGuids.end()) continue;
-		if (!choices.empty()) choices += "\n";
-		choices += g.displayName;
-		guids.push_back(g.guid);
-	}
-	if (guids.empty()) {
-		FXMessageBox::information(this, MBOX_OK, "Hinzufügen", "Es gibt keine weiteren, noch nicht verknüpften Gruppenrichtlinienobjekte.");
-		return 1;
-	}
-	FXint sel = FXMessageBox::information(this, MBOX_YES_NO, "GPO verknüpfen", "%s\n\nDas erste in der Liste jetzt verknüpfen?", choices.text());
-	if (sel == MBOX_CLICKED_YES) {
-		FXString errorMsg;
-		linkGpo(this, guids[0], containerFullDN, errorMsg);
-		reloadList();
-	}
-	return 1;
+static std::string ldapiReadAttr(const std::string& dn, const std::string& attr) {
+	auto recs = ldapiSearch(dn, "base", "(objectClass=*)", { attr });
+	return recs.empty() ? std::string() : ldifFirst(recs[0], attr.c_str());
 }
 
-long PropertiesDialog::onRemoveGpo(FXObject*, FXSelector, void*) {
-	int idx = gpoList->getCurrentItem();
-	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
-	FXString guid = linkedGuids[idx];
-	FXString name = guidToName.count(guid) ? guidToName[guid] : guid;
-
-	// Wie im Original nachfragen, was gemeint ist. Ohne die Frage loest
-	// "Entfernen" nur die Verknuepfung, das Objekt bleibt bestehen --
-	// und beim naechsten Anlegen unter demselben Namen scheitert man an
-	// "A GPO already existing with name". Vorgabe ist, ebenfalls wie im
-	// Original, das blosse Loesen der Verknuepfung.
-	FXDialogBox dlg(this, "Gruppenrichtlinienobjekt entfernen",
-	                 DECOR_TITLE | DECOR_BORDER, 0,0,0,0, 10,10,10,10);
-	FXVerticalFrame* main = new FXVerticalFrame(&dlg, LAYOUT_FILL_X | LAYOUT_FILL_Y);
-	new FXLabel(main, FXString("Was soll mit \"") + name + "\" geschehen?", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
-	new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-
-	FXint choice = 0;
-	FXDataTarget target(choice);
-	new FXRadioButton(main, "Die &Verknüpfung aus der Liste entfernen",
-	                   &target, FXDataTarget::ID_OPTION + 0);
-	new FXRadioButton(main, "Die Verknüpfung entfernen und das Gruppenrichtlinienobjekt\n&dauerhaft löschen",
-	                   &target, FXDataTarget::ID_OPTION + 1);
-
-	FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-	new FXFrame(btns, LAYOUT_FILL_X);
-	new FXButton(btns, "OK", NULL, &dlg, FXDialogBox::ID_ACCEPT,
-	              BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-	new FXButton(btns, "Abbrechen", NULL, &dlg, FXDialogBox::ID_CANCEL,
-	              BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-
-	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-
-	FXString errorMsg;
-	if (!unlinkGpo(this, guid, containerFullDN, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Entfernen fehlgeschlagen", "%s", errorMsg.text());
-		return 1;
-	}
-
-	if (choice == 1) {
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Dauerhaft löschen",
-			"\"%s\" wird endgültig gelöscht -- mit allen Einstellungen und\n"
-			"allen Verknüpfungen zu anderen Containern.\n\nFortfahren?",
-			name.text()) != MBOX_CLICKED_YES) {
-			reloadList();
-			return 1;
-		}
-		if (!deleteGpo(this, guid, errorMsg))
-			FXMessageBox::error(this, MBOX_OK, "Löschen fehlgeschlagen", "%s", errorMsg.text());
-	}
-	reloadList();
-	return 1;
-}
-
-// Verschiebt die markierte Verknuepfung um eine Position und laesst sie
-// danach markiert, damit sich mehrere Schritte hintereinander klicken
-// lassen.
-long PropertiesDialog::moveSelectedLink(int delta) {
-	int idx = gpoList->getCurrentItem();
-	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
-	int target = idx + delta;
-	if (target < 0 || target >= (int)linkedGuids.size()) return 1;
-
-	FXString errorMsg;
-	if (!moveGpoLink(this, realm, containerFullDN, linkedGuids[idx], delta, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Reihenfolge ändern fehlgeschlagen", "%s", errorMsg.text());
-		return 1;
-	}
-	reloadList();
-	if (target < gpoList->getNumItems()) {
-		gpoList->setCurrentItem(target);
-		gpoList->selectItem(target);
-	}
-	return 1;
-}
-
-long PropertiesDialog::onDeleteGpo(FXObject*, FXSelector, void*) {
-	int idx = gpoList->getCurrentItem();
-	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
-	FXString guid = linkedGuids[idx];
-	FXString name = guidToName.count(guid) ? guidToName[guid] : guid;
-
-	// Deutlich vom blossen "Entfernen" abgrenzen: das hier ist endgueltig
-	// und betrifft auch alle anderen Container, die das GPO verknuepft
-	// haben.
-	if (FXMessageBox::warning(this, MBOX_YES_NO, "Gruppenrichtlinienobjekt löschen",
-		"\"%s\" wird vollständig gelöscht -- das Objekt in Active Directory\n"
-		"und sein Verzeichnis im SYSVOL, mit allen Einstellungen darin.\n\n"
-		"Das wirkt sich auch auf alle anderen Container aus, die dieses\n"
-		"Objekt verknüpft haben. Soll nur die Verknüpfung hier entfernt\n"
-		"werden, ist \"Entfernen\" die richtige Schaltfläche.\n\n"
-		"Endgültig löschen?", name.text()) != MBOX_CLICKED_YES) return 1;
-
-	// Erst die Verknuepfung hier loesen, dann loeschen -- sonst bleibt in
-	// gPLink ein Verweis auf ein Objekt stehen, das es nicht mehr gibt.
-	FXString errorMsg;
-	unlinkGpo(this, guid, containerFullDN, errorMsg);
-
-	if (!deleteGpoCompletely(this, guid, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Löschen fehlgeschlagen", "%s", errorMsg.text());
-		return 1;
-	}
-	reloadList();
-	return 1;
-}
-
-long PropertiesDialog::onLinkUp(FXObject*, FXSelector, void*) { return moveSelectedLink(-1); }
-long PropertiesDialog::onLinkDown(FXObject*, FXSelector, void*) { return moveSelectedLink(+1); }
-
-long PropertiesDialog::onEditGpo(FXObject*, FXSelector, void*) {
-	int idx = gpoList->getCurrentItem();
-	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
-	if (!haveAdmFiles()) {
-		FXMessageBox::error(this, MBOX_OK, "ADM-Vorlagen fehlen",
-			"Es sind keine administrativen Vorlagen (.adm-Dateien) eingerichtet.\n"
-			"Bitte starte das Programm neu und lade sie herunter.");
-		return 1;
-	}
-	FXString guid = linkedGuids[idx];
-	FXString realmLower = realm; realmLower.lower();
-	std::string sysvolBase = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + guid.text();
-	std::string machinePolPath = sysvolBase + "/" + SYSVOL_MACHINE_DIR + "/Registry.pol";
-	std::string userPolPath = sysvolBase + "/" + SYSVOL_USER_DIR + "/Registry.pol";
-	std::string gptIniPath = sysvolBase + "/GPT.INI";
-
-	std::vector<AdmCategory> machineCats = loadMergedAdmCategories("MACHINE");
-	std::vector<AdmCategory> userCats = loadMergedAdmCategories("USER");
-	if (machineCats.empty() && userCats.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "Keine Kategorien aus den ADM-Dateien geladen (Parserfehler oder leeres ADM-Verzeichnis?).");
-		return 1;
-	}
-	std::string gpoObjectDn = "CN=" + std::string(guid.text()) + ",CN=Policies,CN=System," + baseDnFromRealm(realm);
-	AdmEditorDialog dlg(this, std::move(machineCats), std::move(userCats), machinePolPath, userPolPath, gptIniPath,
-	                     gpoObjectDn, realm);
-	dlg.execute(PLACEMENT_OWNER);
-	return 1;
-}
-
-long PropertiesDialog::onInstallSoftware(FXObject*, FXSelector, void*) {
-	int idx = gpoList->getCurrentItem();
-	if (idx < 0 || idx >= (int)linkedGuids.size()) {
-		FXMessageBox::information(this, MBOX_OK, "Kein GPO ausgewählt", "Bitte zuerst ein Gruppenrichtlinienobjekt aus der Liste auswählen.");
-		return 1;
-	}
-	FXString guid = linkedGuids[idx];
-	DomainInfo domain = detectDomain();
-	if (domain.realm.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "Domäne konnte nicht ermittelt werden.");
-		return 1;
-	}
-	SoftwarePackageListDialog dlg(this, domain, guid);
-	dlg.execute(PLACEMENT_OWNER);
-	return 1;
-}
-
-long PropertiesDialog::onSecuritySettings(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können die Sicherheitseinstellungen nicht geändert werden.");
-		return 1;
-	}
-	PasswordPolicy current = getPasswordPolicy();
-	SecuritySettingsDialog dlg(this, current);
-	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-	FXString errorMsg;
-	if (!setPasswordPolicy(dlg.getPolicy(), errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
-		return 1;
-	}
-	FXMessageBox::information(this, MBOX_OK, "Fertig",
-		"Die Kennwort- und Kontosperrungsrichtlinie wurde aktualisiert.\n\n"
-		"Hinweis: Diese Einstellungen gelten domänenweit (wie unter\n"
-		"Windows 2000/2003) und werden über die Default Domain Policy\n"
-		"durchgesetzt, unabhängig davon, welches GPO gerade geöffnet ist.");
-	return 1;
-}
-
-long PropertiesDialog::onScripts(FXObject*, FXSelector, void*) {
-	int idx = gpoList->getCurrentItem();
-	if (idx < 0 || idx >= (int)linkedGuids.size()) {
-		FXMessageBox::information(this, MBOX_OK, "Kein GPO ausgewählt", "Bitte zuerst ein Gruppenrichtlinienobjekt aus der Liste auswählen.");
-		return 1;
-	}
-	FXString guid = linkedGuids[idx];
-	DomainInfo domain = detectDomain();
-	if (domain.realm.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "Domäne konnte nicht ermittelt werden.");
-		return 1;
-	}
-	ScriptsDialog dlg(this, domain, guid);
-	dlg.execute(PLACEMENT_OWNER);
-	return 1;
-}
-
-long PropertiesDialog::onFolderRedirection(FXObject*, FXSelector, void*) {
-	int idx = gpoList->getCurrentItem();
-	if (idx < 0 || idx >= (int)linkedGuids.size()) {
-		FXMessageBox::information(this, MBOX_OK, "Kein GPO ausgewählt", "Bitte zuerst ein Gruppenrichtlinienobjekt aus der Liste auswählen.");
-		return 1;
-	}
-	FXString guid = linkedGuids[idx];
-	DomainInfo domain = detectDomain();
-	if (domain.realm.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "Domäne konnte nicht ermittelt werden.");
-		return 1;
-	}
-	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann die Ordnerumleitung nicht geändert werden.");
-		return 1;
-	}
+// Vollstaendiger Rechnername des DCs fuer Titel wie
+// "Richtlinien für Software [win2k-server.zwiebelchen.org]".
+static FXString serverFqdn(const DomainInfo& domain) {
+	char host[256] = { 0 };
+	gethostname(host, sizeof(host) - 1);
+	std::string h = host;
+	size_t dot = h.find('.');
+	if (dot != std::string::npos) h = h.substr(0, dot);
 	FXString realmLower = domain.realm; realmLower.lower();
-	std::string userPolPath = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(guid.text()) + "/" + SYSVOL_USER_DIR + "/Registry.pol";
-	auto current = getFolderRedirectionPaths(userPolPath);
-	FolderRedirectionDialog dlg(this, current);
-	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	return FXString(lowerCopy(h).c_str()) + "." + realmLower;
+}
+
+// ---------------------------------------------------------------------
+// gPLink: Bloecke "[LDAP://cn={GUID},cn=policies,...;Optionen]".
+// Die HOECHSTE Prioritaet hat der LETZTE Block -- Samba verarbeitet die
+// Liste von vorn nach hinten, Spaeteres ueberschreibt Frueheres, und
+// "samba-tool gpo setlink" stellt neue Verknuepfungen vorne an (neue
+// Verknuepfung = niedrigste Prioritaet, wie im Original).
+// ---------------------------------------------------------------------
+static const int GPLINK_OPT_DISABLE = 1;
+static const int GPLINK_OPT_ENFORCE = 2;
+
+struct GpLinkEntry {
+	std::string dn;    // DN des GPO-Objekts, wie im Attribut
+	std::string guid;  // "{...}" in Grossbuchstaben
+	int options = 0;
+};
+
+static std::vector<GpLinkEntry> parseGpLink(const std::string& raw) {
+	std::vector<GpLinkEntry> out;
+	for (auto& block : parseGpLinkBlocks(raw)) {
+		std::string inner = block.substr(1, block.size() - 2);
+		size_t semi = inner.rfind(';');
+		GpLinkEntry e;
+		std::string url = semi == std::string::npos ? inner : inner.substr(0, semi);
+		if (semi != std::string::npos) { try { e.options = std::stoi(inner.substr(semi + 1)); } catch (...) {} }
+		if (lowerCopy(url.substr(0, 7)) == "ldap://") url = url.substr(7);
+		e.dn = url;
+		size_t a = url.find('{'), b = url.find('}');
+		if (a != std::string::npos && b != std::string::npos && b > a) {
+			e.guid = url.substr(a, b - a + 1);
+			std::transform(e.guid.begin(), e.guid.end(), e.guid.begin(), [](unsigned char c) { return std::toupper(c); });
+		}
+		out.push_back(e);
+	}
+	return out;
+}
+
+static std::string encodeGpLink(const std::vector<GpLinkEntry>& links) {
+	std::string out;
+	for (auto& l : links) out += "[LDAP://" + l.dn + ";" + std::to_string(l.options) + "]";
+	return out;
+}
+
+static bool writeGpLink(FXWindow* owner, const FXString& realm, const std::string& containerDn,
+                        const std::vector<GpLinkEntry>& links, FXString& errorMsg) {
+	std::string ldif = "dn: " + containerDn + "\nchangetype: modify\nreplace: gPLink\n";
+	if (!links.empty()) ldif += ldifAttrLine("gPLink", encodeGpLink(links));
+	ldif += "-\n";
+	std::string log;
+	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
+}
+
+struct GpoSummary {
+	std::string guid, displayName, dn;
+	std::string whenCreated, whenChanged;
+	uint32_t version = 0;
+	int flags = 0; // 1 = Benutzerkonfiguration deaktiviert, 2 = Computerkonfiguration deaktiviert
+};
+
+static std::vector<GpoSummary> listGposLdapi(const FXString& baseDN) {
+	std::vector<GpoSummary> out;
+	for (auto& rec : ldapiSearch("CN=Policies,CN=System," + std::string(baseDN.text()), "one",
+	                             "(objectClass=groupPolicyContainer)",
+	                             { "cn", "displayName", "versionNumber", "flags", "whenCreated", "whenChanged" })) {
+		GpoSummary g;
+		g.dn = ldifFirst(rec, "dn");
+		g.guid = ldifFirst(rec, "cn");
+		std::transform(g.guid.begin(), g.guid.end(), g.guid.begin(), [](unsigned char c) { return std::toupper(c); });
+		g.displayName = ldifFirst(rec, "displayName");
+		g.whenCreated = ldifFirst(rec, "whenCreated");
+		g.whenChanged = ldifFirst(rec, "whenChanged");
+		try { g.version = (uint32_t)std::stoul(ldifFirst(rec, "versionNumber")); } catch (...) {}
+		try { g.flags = std::stoi(ldifFirst(rec, "flags")); } catch (...) {}
+		out.push_back(g);
+	}
+	std::sort(out.begin(), out.end(), [](const GpoSummary& a, const GpoSummary& b) {
+		return strcasecmp(a.displayName.c_str(), b.displayName.c_str()) < 0;
+	});
+	return out;
+}
+
+// "20260916165113.0Z" -> "16.09.2026 16:51:13" (UTC, wie gespeichert)
+static FXString formatGeneralizedTime(const std::string& t) {
+	if (t.size() < 14) return FXString(t.c_str());
+	return FXString((t.substr(6, 2) + "." + t.substr(4, 2) + "." + t.substr(0, 4) + " " +
+	                 t.substr(8, 2) + ":" + t.substr(10, 2) + ":" + t.substr(12, 2)).c_str());
+}
+
+// ---------------------------------------------------------------------
+// SYSVOL-Pfade eines GPOs. Die bei der Provisionierung angelegten
+// Standard-GPOs haben die Zweige "MACHINE"/"USER", mit "samba-tool gpo
+// create" angelegte dagegen "Machine"/"User" -- genommen wird, was
+// tatsaechlich existiert, sonst die neue Schreibweise.
+// ---------------------------------------------------------------------
+static std::string gpoSysvolBase(const DomainInfo& domain, const std::string& guid) {
+	FXString realmLower = domain.realm; realmLower.lower();
+	return "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + guid;
+}
+
+static std::string gpoBranchDir(const DomainInfo& domain, const std::string& guid, bool machine) {
+	std::string base = gpoSysvolBase(domain, guid);
+	const char* preferred = machine ? SYSVOL_MACHINE_DIR : SYSVOL_USER_DIR;
+	const char* legacy = machine ? "MACHINE" : "USER";
+	if (runAsRoot({ FXString("test"), FXString("-d"), FXString((base + "/" + preferred).c_str()) }) == 0) return base + "/" + preferred;
+	if (runAsRoot({ FXString("test"), FXString("-d"), FXString((base + "/" + legacy).c_str()) }) == 0) return base + "/" + legacy;
+	return base + "/" + preferred;
+}
+
+// ---------------------------------------------------------------------
+// Laenderliste fuer "Land/Region" -- aus dem Debian-Paket iso-codes
+// (JSON), deutsche Namen direkt aus dessen .mo-Datei, unabhaengig von
+// der eingestellten Sprache des Prozesses.
+// ---------------------------------------------------------------------
+struct CountryEntry { std::string alpha2, name; int numeric = 0; };
+
+static std::map<std::string, std::string> readMoCatalog(const char* path) {
+	std::map<std::string, std::string> out;
+	std::string data = readFileUnprivileged(path);
+	if (data.size() < 28) return out;
+	auto u32 = [&](size_t off) -> uint32_t {
+		if (off + 4 > data.size()) return 0;
+		return (uint8_t)data[off] | ((uint8_t)data[off + 1] << 8) | ((uint8_t)data[off + 2] << 16) | ((uint32_t)(uint8_t)data[off + 3] << 24);
+	};
+	if (u32(0) != 0x950412de) return out; // nur Little-Endian-Kataloge
+	uint32_t n = u32(8), origTab = u32(12), transTab = u32(16);
+	for (uint32_t i = 0; i < n; i++) {
+		uint32_t ol = u32(origTab + i * 8), oo = u32(origTab + i * 8 + 4);
+		uint32_t tl = u32(transTab + i * 8), to = u32(transTab + i * 8 + 4);
+		if ((size_t)oo + ol > data.size() || (size_t)to + tl > data.size()) continue;
+		out[data.substr(oo, ol)] = data.substr(to, tl);
+	}
+	return out;
+}
+
+static const std::vector<CountryEntry>& countryList() {
+	static std::vector<CountryEntry> list;
+	static bool loaded = false;
+	if (loaded) return list;
+	loaded = true;
+	std::string json = readFileUnprivileged("/usr/share/iso-codes/json/iso_3166-1.json");
+	auto de = readMoCatalog("/usr/share/locale/de/LC_MESSAGES/iso_3166-1.mo");
+	auto field = [](const std::string& obj, const char* key) -> std::string {
+		std::string needle = std::string("\"") + key + "\"";
+		size_t p = obj.find(needle);
+		if (p == std::string::npos) return "";
+		p = obj.find('"', obj.find(':', p) + 1);
+		if (p == std::string::npos) return "";
+		std::string v;
+		for (size_t i = p + 1; i < obj.size() && obj[i] != '"'; i++) {
+			if (obj[i] == '\\' && i + 1 < obj.size()) i++;
+			v += obj[i];
+		}
+		return v;
+	};
+	size_t pos = 0;
+	while ((pos = json.find('{', pos + 1)) != std::string::npos) {
+		size_t end = json.find('}', pos);
+		if (end == std::string::npos) break;
+		std::string obj = json.substr(pos, end - pos);
+		CountryEntry c;
+		c.alpha2 = field(obj, "alpha_2");
+		c.name = field(obj, "name");
+		try { c.numeric = std::stoi(field(obj, "numeric")); } catch (...) {}
+		if (c.alpha2.empty() || c.name.empty()) continue;
+		auto t = de.find(c.name);
+		if (t != de.end() && !t->second.empty()) c.name = t->second;
+		list.push_back(c);
+		pos = end;
+	}
+	std::sort(list.begin(), list.end(), [](const CountryEntry& a, const CountryEntry& b) {
+		return strcoll(a.name.c_str(), b.name.c_str()) < 0;
+	});
+	return list;
+}
+
+// ---------------------------------------------------------------------
+// GptTmpl.inf -- die Sicherheitsvorlage eines GPOs
+// (Machine/Microsoft/Windows NT/SecEdit/GptTmpl.inf). UTF-16LE mit
+// BOM, Abschnitte wie [System Access], [Event Audit], [System Log].
+// Reihenfolge von Abschnitten und Schluesseln bleibt erhalten, damit
+// nichts verlorengeht, was hier (noch) nicht bearbeitet wird.
+// ---------------------------------------------------------------------
+struct InfFile {
+	std::vector<std::pair<std::string, std::vector<std::pair<std::string, std::string>>>> sections;
+
+	std::vector<std::pair<std::string, std::string>>* find(const std::string& section) {
+		for (auto& s : sections) if (lowerCopy(s.first) == lowerCopy(section)) return &s.second;
+		return nullptr;
+	}
+	bool get(const std::string& section, const std::string& key, std::string& value) {
+		auto* s = find(section);
+		if (!s) return false;
+		for (auto& kv : *s) if (lowerCopy(kv.first) == lowerCopy(key)) { value = kv.second; return true; }
+		return false;
+	}
+	void set(const std::string& section, const std::string& key, const std::string& value) {
+		auto* s = find(section);
+		if (!s) {
+			// [Version] steht ueblicherweise am Ende -- neue Abschnitte davor.
+			auto it = sections.end();
+			for (auto i = sections.begin(); i != sections.end(); ++i) if (lowerCopy(i->first) == "version") { it = i; break; }
+			it = sections.insert(it, { section, {} });
+			s = &it->second;
+		}
+		for (auto& kv : *s) if (lowerCopy(kv.first) == lowerCopy(key)) { kv.second = value; return; }
+		s->push_back({ key, value });
+	}
+	void erase(const std::string& section, const std::string& key) {
+		auto* s = find(section);
+		if (!s) return;
+		s->erase(std::remove_if(s->begin(), s->end(), [&](const std::pair<std::string, std::string>& kv) {
+			return lowerCopy(kv.first) == lowerCopy(key);
+		}), s->end());
+	}
+};
+
+static InfFile parseInf(const std::string& raw) {
+	InfFile inf;
+	std::string text = raw;
+	if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE) text = utf16leToUtf8(raw);
+	else if (raw.size() >= 3 && (unsigned char)raw[0] == 0xEF && (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF) text = raw.substr(3);
+	std::vector<std::pair<std::string, std::string>>* cur = nullptr;
+	for (auto& line : splitLines(text)) {
+		std::string l = trimStr(line);
+		if (l.empty() || l[0] == ';') continue;
+		if (l.front() == '[' && l.back() == ']') {
+			inf.sections.push_back({ l.substr(1, l.size() - 2), {} });
+			cur = &inf.sections.back().second;
+			continue;
+		}
+		if (!cur) continue;
+		size_t eq = l.find('=');
+		if (eq == std::string::npos) cur->push_back({ l, "" });
+		else cur->push_back({ trimStr(l.substr(0, eq)), trimStr(l.substr(eq + 1)) });
+	}
+	return inf;
+}
+
+static std::string serializeInf(InfFile inf) {
+	// Pflichtabschnitte, sonst verwirft der Client die Vorlage.
+	std::string dummy;
+	if (!inf.find("Unicode")) inf.sections.insert(inf.sections.begin(), { "Unicode", { { "Unicode", "yes" } } });
+	if (!inf.find("Version")) inf.sections.push_back({ "Version", { { "signature", "\"$CHICAGO$\"" }, { "Revision", "1" } } });
+	std::string out;
+	for (auto& s : inf.sections) {
+		out += "[" + s.first + "]\r\n";
+		for (auto& kv : s.second) {
+			bool unicodeSection = lowerCopy(s.first) == "unicode" || lowerCopy(s.first) == "version";
+			out += kv.first + (unicodeSection ? "=" : " = ") + kv.second + "\r\n";
+		}
+	}
+	return utf8ToUtf16leWithBom(out);
+}
+
+static const char* SECEDIT_CSE_GUID = "{827D319E-6EAC-11D2-A4EA-00C04F79F83A}";
+static const char* SECEDIT_TOOL_GUID = "{803E14A0-B4FB-11D0-A0D0-00A0C90F574B}";
+
+static std::string gptTmplPath(const DomainInfo& domain, const std::string& guid) {
+	return gpoBranchDir(domain, guid, true) + "/Microsoft/Windows NT/SecEdit/GptTmpl.inf";
+}
+
+static InfFile loadGptTmpl(const DomainInfo& domain, const std::string& guid) {
+	std::string raw;
+	if (runAsRootCaptured({ FXString("cat"), FXString(gptTmplPath(domain, guid).c_str()) }, raw) != 0) return InfFile();
+	return parseInf(raw);
+}
+
+// ---------------------------------------------------------------------
+// Sicherheitsrichtlinien, die direkt als Schluessel/Wert in der
+// GptTmpl.inf stehen -- Tabellen mit den Bezeichnungen des deutschen
+// Windows 2000.
+// ---------------------------------------------------------------------
+enum SecValueKind { SV_NUMBER, SV_BOOL, SV_AUDIT, SV_RETENTION };
+
+struct SecPolicyDef {
+	const char* section;
+	const char* key;
+	const char* label;
+	SecValueKind kind;
+	const char* unit;      // SV_NUMBER: Einheit hinter der Zahl ("Tage")
+	int minV, maxV, defV;  // SV_NUMBER: Bereich und Vorschlag beim Definieren
+};
+
+static const std::vector<SecPolicyDef> SEC_PASSWORD_POLICIES = {
+	{ "System Access", "PasswordHistorySize", "Kennwortchronik erzwingen", SV_NUMBER, "gespeicherte Kennwörter", 0, 24, 24 },
+	{ "System Access", "MaximumPasswordAge", "Maximales Kennwortalter", SV_NUMBER, "Tage", 0, 999, 42 },
+	{ "System Access", "MinimumPasswordAge", "Minimales Kennwortalter", SV_NUMBER, "Tage", 0, 998, 1 },
+	{ "System Access", "MinimumPasswordLength", "Minimale Kennwortlänge", SV_NUMBER, "Zeichen", 0, 14, 7 },
+	{ "System Access", "PasswordComplexity", "Kennwörter müssen den Komplexitätsvoraussetzungen entsprechen", SV_BOOL, "", 0, 1, 1 },
+	{ "System Access", "ClearTextPassword", "Kennwörter für alle Domänenbenutzer mit umkehrbarer Verschlüsselung speichern", SV_BOOL, "", 0, 1, 0 },
+};
+
+static const std::vector<SecPolicyDef> SEC_LOCKOUT_POLICIES = {
+	{ "System Access", "LockoutDuration", "Kontosperrdauer", SV_NUMBER, "Minuten", 0, 99999, 30 },
+	{ "System Access", "LockoutBadCount", "Kontosperrungsschwelle", SV_NUMBER, "ungültige Anmeldeversuche", 0, 999, 5 },
+	{ "System Access", "ResetLockoutCount", "Kontosperrungszähler zurücksetzen nach", SV_NUMBER, "Minuten", 1, 99999, 30 },
+};
+
+static const std::vector<SecPolicyDef> SEC_AUDIT_POLICIES = {
+	{ "Event Audit", "AuditAccountLogon", "Anmeldeversuche überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditLogonEvents", "Anmeldeereignisse überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditAccountManage", "Kontenverwaltung überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditObjectAccess", "Objektzugriffsversuche überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditProcessTracking", "Prozessverfolgung überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditPrivilegeUse", "Rechteverwendung überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditPolicyChange", "Richtlinienänderungen überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditSystemEvents", "Systemereignisse überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditDSAccess", "Verzeichnisdienstzugriff überwachen", SV_AUDIT, "", 0, 3, 0 },
+};
+
+static const std::vector<SecPolicyDef> SEC_EVENTLOG_POLICIES = {
+	{ "Application Log", "MaximumLogSize", "Maximale Anwendungsprotokollgröße", SV_NUMBER, "Kilobyte", 64, 4194240, 512 },
+	{ "Security Log", "MaximumLogSize", "Maximale Sicherheitsprotokollgröße", SV_NUMBER, "Kilobyte", 64, 4194240, 512 },
+	{ "System Log", "MaximumLogSize", "Maximale Systemprotokollgröße", SV_NUMBER, "Kilobyte", 64, 4194240, 512 },
+	{ "Application Log", "RestrictGuestAccess", "Lokalen Gastkontozugriff auf Anwendungsprotokoll verhindern", SV_BOOL, "", 0, 1, 1 },
+	{ "Security Log", "RestrictGuestAccess", "Lokalen Gastkontozugriff auf Sicherheitsprotokoll verhindern", SV_BOOL, "", 0, 1, 1 },
+	{ "System Log", "RestrictGuestAccess", "Lokalen Gastkontozugriff auf Systemprotokoll verhindern", SV_BOOL, "", 0, 1, 1 },
+	{ "Application Log", "RetentionDays", "Anwendungsprotokoll aufbewahren", SV_NUMBER, "Tage", 1, 365, 7 },
+	{ "Security Log", "RetentionDays", "Sicherheitsprotokoll aufbewahren", SV_NUMBER, "Tage", 1, 365, 7 },
+	{ "System Log", "RetentionDays", "Systemprotokoll aufbewahren", SV_NUMBER, "Tage", 1, 365, 7 },
+	{ "Application Log", "AuditLogRetentionPeriod", "Aufbewahrungsmethode des Anwendungsprotokolls", SV_RETENTION, "", 0, 2, 1 },
+	{ "Security Log", "AuditLogRetentionPeriod", "Aufbewahrungsmethode des Sicherheitsprotokolls", SV_RETENTION, "", 0, 2, 1 },
+	{ "System Log", "AuditLogRetentionPeriod", "Aufbewahrungsmethode des Systemprotokolls", SV_RETENTION, "", 0, 2, 1 },
+};
+
+static const char* RETENTION_LABELS[3] = {
+	"Ereignisse bei Bedarf überschreiben",
+	"Ereignisse nach Tagen überschreiben",
+	"Ereignisse nicht überschreiben (Protokoll manuell löschen)"
+};
+
+static FXString secValueText(const SecPolicyDef& def, bool defined, int v) {
+	if (!defined) return "Nicht definiert";
+	switch (def.kind) {
+		case SV_BOOL: return v ? "Aktiviert" : "Deaktiviert";
+		case SV_AUDIT:
+			return v == 3 ? "Erfolgreich, Fehlgeschlagen" : v == 1 ? "Erfolgreich" : v == 2 ? "Fehlgeschlagen" : "Keine Überwachung";
+		case SV_RETENTION: return (v >= 0 && v <= 2) ? RETENTION_LABELS[v] : "Nicht definiert";
+		default: {
+			char buf[128];
+			snprintf(buf, sizeof(buf), "%d %s", v, def.unit);
+			return buf;
+		}
+	}
+}
+
+// ---------------------------------------------------------------------
+// Dialog "Sicherheitsrichtlinieneinstellung" -- ein Doppelklick auf eine
+// Richtlinie im rechten Bereich.
+// ---------------------------------------------------------------------
+class SecPolicyEditDialog : public FXDialogBox {
+	FXDECLARE(SecPolicyEditDialog)
+private:
+	const SecPolicyDef* def = nullptr;
+	FXCheckButton* defineCheck = nullptr;
+	std::vector<FXWindow*> controls;
+	FXSpinner* spinner = nullptr;
+	FXint choice = 0;
+	FXDataTarget* choiceTarget = nullptr;
+	FXCheckButton* auditSuccess = nullptr, *auditFailure = nullptr;
+protected:
+	SecPolicyEditDialog() {}
+public:
+	enum { ID_DEFINE = FXDialogBox::ID_LAST };
+
+	SecPolicyEditDialog(FXWindow* owner, const SecPolicyDef& def_, bool defined, int value)
+		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0),
+		  def(&def_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
+		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
+		new FXLabel(head, "", sharedPngIcon(resico_key), LAYOUT_TOP);
+		new FXLabel(head, def->label, NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		defineCheck = new FXCheckButton(main, "Diese Richtlinieneinstellung &definieren:", this, ID_DEFINE);
+		defineCheck->setCheck(defined);
+		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
+
+		int initial = defined ? value : def->defV;
+		choice = initial;
+		switch (def->kind) {
+			case SV_NUMBER: {
+				FXHorizontalFrame* row = new FXHorizontalFrame(body, 0, 0,0,0,0, 0,0,0,0);
+				spinner = new FXSpinner(row, 8, NULL, 0, SPIN_NORMAL | FRAME_SUNKEN | FRAME_THICK);
+				spinner->setRange(def->minV, def->maxV);
+				spinner->setValue(std::max(def->minV, std::min(def->maxV, initial)));
+				if (def->minV == 64) spinner->setIncrement(64);
+				FXLabel* unit = new FXLabel(row, def->unit, NULL, LAYOUT_CENTER_Y);
+				controls = { spinner, unit };
+				break;
+			}
+			case SV_BOOL: {
+				choiceTarget = new FXDataTarget(choice);
+				controls.push_back(new FXRadioButton(body, "&Aktiviert", choiceTarget, FXDataTarget::ID_OPTION + 1));
+				controls.push_back(new FXRadioButton(body, "D&eaktiviert", choiceTarget, FXDataTarget::ID_OPTION + 0));
+				break;
+			}
+			case SV_AUDIT: {
+				controls.push_back(new FXLabel(body, "Diese Versuche überwachen:"));
+				auditSuccess = new FXCheckButton(body, "&Erfolgreich");
+				auditFailure = new FXCheckButton(body, "&Fehlgeschlagen");
+				auditSuccess->setCheck((initial & 1) != 0);
+				auditFailure->setCheck((initial & 2) != 0);
+				controls.push_back(auditSuccess);
+				controls.push_back(auditFailure);
+				break;
+			}
+			case SV_RETENTION: {
+				choiceTarget = new FXDataTarget(choice);
+				for (int i : { 1, 0, 2 })
+					controls.push_back(new FXRadioButton(body, RETENTION_LABELS[i], choiceTarget, FXDataTarget::ID_OPTION + i));
+				break;
+			}
+		}
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		updateEnabled();
+	}
+
+	void updateEnabled() {
+		for (auto* w : controls) {
+			if (defineCheck->getCheck()) w->enable(); else w->disable();
+		}
+	}
+	long onDefine(FXObject*, FXSelector, void*) { updateEnabled(); return 1; }
+
+	bool isDefined() const { return defineCheck->getCheck(); }
+	int getValue() const {
+		switch (def->kind) {
+			case SV_NUMBER: return spinner->getValue();
+			case SV_AUDIT: return (auditSuccess->getCheck() ? 1 : 0) | (auditFailure->getCheck() ? 2 : 0);
+			default: return choice;
+		}
+	}
+	virtual ~SecPolicyEditDialog() { delete choiceTarget; }
+};
+FXDEFMAP(SecPolicyEditDialog) SecPolicyEditDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, SecPolicyEditDialog::ID_DEFINE, SecPolicyEditDialog::onDefine),
+};
+FXIMPLEMENT(SecPolicyEditDialog, FXDialogBox, SecPolicyEditDialogMap, ARRAYNUMBER(SecPolicyEditDialogMap))
+
+// ---------------------------------------------------------------------
+// GptTmpl.inf speichern: Datei samt Zwischenverzeichnissen anlegen, die
+// SYSVOL-Rechte vom Zweig erben lassen, die Sicherheits-Erweiterung im
+// GPO registrieren und die Version erhoehen.
+//
+// Kontorichtlinien wirken in AD nur aus GPOs, die mit der Domaene selbst
+// verknuepft sind -- ein Windows-DC uebernimmt sie dann in das
+// Domaenenobjekt. Samba tut das nicht von sich aus, deshalb wird das
+// hier nachgebildet: ist das GPO mit der Domaenenwurzel verknuepft,
+// gehen die definierten Werte zusaetzlich an
+// "samba-tool domain passwordsettings".
+// ---------------------------------------------------------------------
+static bool gpoLinkedToDomainRoot(const DomainInfo& domain, const std::string& guid) {
+	for (auto& l : parseGpLink(ldapiReadAttr(domain.baseDN.text(), "gPLink")))
+		if (lowerCopy(l.guid) == lowerCopy(guid) && !(l.options & GPLINK_OPT_DISABLE)) return true;
+	return false;
+}
+
+static void syncDomainAccountPolicy(InfFile& inf, FXString& note) {
+	PasswordPolicy p = getPasswordPolicy();
+	auto num = [&](const char* key, int& target) {
+		std::string v;
+		if (!inf.get("System Access", key, v)) return;
+		try { target = std::stoi(v); } catch (...) {}
+	};
+	std::string cplx;
+	if (inf.get("System Access", "PasswordComplexity", cplx)) p.complexity = (cplx == "1");
+	num("PasswordHistorySize", p.historyLength);
+	num("MinimumPasswordLength", p.minPwdLength);
+	num("MinimumPasswordAge", p.minPwdAgeDays);
+	num("MaximumPasswordAge", p.maxPwdAgeDays);
+	num("LockoutDuration", p.lockoutDurationMins);
+	num("LockoutBadCount", p.lockoutThreshold);
+	num("ResetLockoutCount", p.lockoutWindowMins);
 	FXString errorMsg;
-	if (!setFolderRedirectionPaths(this, domain, guid, dlg.getPaths(), errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	if (!setPasswordPolicy(p, errorMsg))
+		note = "Die Kontorichtlinie der Domäne konnte nicht angepasst werden:\n\n" + errorMsg;
+}
+
+static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::string& guid, InfFile& inf,
+                        bool accountPolicyTouched, FXString& errorMsg) {
+	std::string branch = gpoBranchDir(domain, guid, true);
+	std::string path = gptTmplPath(domain, guid);
+	const std::string dirs[] = { branch + "/Microsoft", branch + "/Microsoft/Windows NT", branch + "/Microsoft/Windows NT/SecEdit" };
+	for (auto& d : dirs) {
+		bool existed = runAsRoot({ FXString("test"), FXString("-d"), FXString(d.c_str()) }) == 0;
+		if (existed) continue;
+		if (runAsRoot({ FXString("mkdir"), FXString(d.c_str()) }) != 0) {
+			errorMsg = FXString("Verzeichnis konnte nicht angelegt werden:\n") + d.c_str();
+			return false;
+		}
+		inheritSysvolPermissions(branch, d, true);
+	}
+
+	std::string encoded = serializeInf(inf);
+	FXString tmpPath = "/tmp/ice2k-gpttmpl.inf";
+	{
+		std::ofstream out(tmpPath.text(), std::ios::binary);
+		out.write(encoded.data(), (std::streamsize)encoded.size());
+	}
+	bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(path.c_str()) }) == 0;
+	int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(path.c_str()) });
+	runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
+	if (rc != 0) { errorMsg = FXString("GptTmpl.inf konnte nicht geschrieben werden:\n") + path.c_str(); return false; }
+	if (!existed) inheritSysvolPermissions(branch, path, false);
+
+	std::string gpoDn = "CN=" + guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
+	std::string log;
+	if (!ensureExtensionRegistered(owner, domain.realm, gpoDn, true, SECEDIT_CSE_GUID, SECEDIT_TOOL_GUID, log, errorMsg)) return false;
+
+	if (accountPolicyTouched && gpoLinkedToDomainRoot(domain, guid)) {
+		FXString note;
+		syncDomainAccountPolicy(inf, note);
+		if (!note.empty()) FXMessageBox::warning(owner, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// Fenster "Gruppenrichtlinie" -- Nachbau des Gruppenrichtlinienobjekt-
+// Editors: links der Baum mit Computer- und Benutzerkonfiguration,
+// rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
+// ---------------------------------------------------------------------
+class GpoEditorWindow : public FXDialogBox {
+	FXDECLARE(GpoEditorWindow)
+private:
+	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_ADM, GN_FOLDERREDIR, GN_TODO };
+	struct Node {
+		NodeKind kind = GN_FOLDER;
+		bool machine = true;
+		const std::vector<SecPolicyDef>* defs = nullptr;
+	};
+
+	DomainInfo domain;
+	std::string guid;
+	FXString gpoName;
+	FXTreeList* tree = nullptr;
+	FXIconList* list = nullptr;
+	FXLabel* status = nullptr;
+	std::map<FXTreeItem*, Node> nodes;
+	FXTreeItem* shownItem = nullptr;
+
+	// Zustand des rechten Bereichs
+	std::vector<FXTreeItem*> rowChildren;
+	std::vector<SoftwarePackageInfo> rowPackages;
+	InfFile inf;
+
+protected:
+	GpoEditorWindow() {}
+public:
+	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE };
+
+	GpoEditorWindow(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const FXString& gpoName_)
+		: FXDialogBox(owner, "Gruppenrichtlinie", DECOR_ALL, 0,0,900,620),
+		  domain(domain_), guid(guid_), gpoName(gpoName_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
+		FXSplitter* splitter = new FXSplitter(main, LAYOUT_FILL_X | LAYOUT_FILL_Y | SPLITTER_TRACKING);
+		FXPacker* treeframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_Y, 0,0,420,0, 0,0,0,0);
+		tree = new FXTreeList(treeframe, this, ID_TREE,
+		                      LAYOUT_FILL_X | LAYOUT_FILL_Y | TREELIST_SHOWS_BOXES | TREELIST_SHOWS_LINES | TREELIST_BROWSESELECT | TREELIST_ROOT_BOXES);
+		FXPacker* listframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXIconList(listframe, this, ID_LIST, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		status = new FXLabel(main, " ", NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 4,4,2,2);
+		buildTree();
+	}
+
+	FXTreeItem* add(FXTreeItem* parent, const char* label, const unsigned char* icon, NodeKind kind, bool machine,
+	                const std::vector<SecPolicyDef>* defs = nullptr) {
+		FXIcon* ic = sharedPngIcon(icon);
+		FXTreeItem* it = tree->appendItem(parent, label, ic, ic);
+		Node n;
+		n.kind = kind;
+		n.machine = machine;
+		n.defs = defs;
+		nodes[it] = n;
+		return it;
+	}
+
+	void buildTree() {
+		FXTreeItem* root = add(NULL, (gpoName + " [" + serverFqdn(domain) + "]").text(), resico_network, GN_FOLDER, true);
+
+		FXTreeItem* comp = add(root, "Computerkonfiguration", resico_server, GN_FOLDER, true);
+		FXTreeItem* cSw = add(comp, "Softwareeinstellungen", resico_folder, GN_FOLDER, true);
+		add(cSw, "Softwareinstallation", resico_folder, GN_SOFTWARE, true);
+		FXTreeItem* cWin = add(comp, "Windows-Einstellungen", resico_folder, GN_FOLDER, true);
+		add(cWin, "Skripts (Start/Herunterfahren)", resico_folder, GN_SCRIPTS, true);
+		FXTreeItem* cSec = add(cWin, "Sicherheitseinstellungen", resico_key, GN_FOLDER, true);
+		FXTreeItem* kto = add(cSec, "Kontorichtlinien", resico_key, GN_FOLDER, true);
+		add(kto, "Kennwortrichtlinien", resico_key, GN_SECPOL, true, &SEC_PASSWORD_POLICIES);
+		add(kto, "Kontosperrungsrichtlinien", resico_key, GN_SECPOL, true, &SEC_LOCKOUT_POLICIES);
+		FXTreeItem* lok = add(cSec, "Lokale Richtlinien", resico_key, GN_FOLDER, true);
+		add(lok, "Überwachungsrichtlinien", resico_key, GN_SECPOL, true, &SEC_AUDIT_POLICIES);
+		add(lok, "Zuweisen von Benutzerrechten", resico_key, GN_TODO, true);
+		add(lok, "Sicherheitsoptionen", resico_key, GN_TODO, true);
+		FXTreeItem* evt = add(cSec, "Ereignisprotokoll", resico_key, GN_FOLDER, true);
+		add(evt, "Einstellungen für Ereignisprotokolle", resico_key, GN_SECPOL, true, &SEC_EVENTLOG_POLICIES);
+		add(cSec, "Eingeschränkte Gruppen", resico_key, GN_TODO, true);
+		add(cSec, "Systemdienste", resico_key, GN_TODO, true);
+		add(cSec, "Registrierung", resico_key, GN_TODO, true);
+		add(cSec, "Dateisystem", resico_key, GN_TODO, true);
+		FXTreeItem* pk = add(cSec, "Richtlinien öffentlicher Schlüssel", resico_folder, GN_FOLDER, true);
+		add(pk, "Agenten für Wiederherstellung von verschlüsselten Daten", resico_folder, GN_TODO, true);
+		add(pk, "Einstellungen der automatischen Zertifikatsanforderung", resico_folder, GN_TODO, true);
+		add(pk, "Vertrauenswürdige Stammzertifizierungsstellen", resico_folder, GN_TODO, true);
+		add(pk, "Organisationsvertrauen", resico_folder, GN_TODO, true);
+		add(cSec, "IP-Sicherheitsrichtlinien auf Active Directory", resico_key, GN_TODO, true);
+		add(comp, "Administrative Vorlagen", resico_folder, GN_ADM, true);
+
+		FXTreeItem* usr = add(root, "Benutzerkonfiguration", resico_user, GN_FOLDER, false);
+		FXTreeItem* uSw = add(usr, "Softwareeinstellungen", resico_folder, GN_FOLDER, false);
+		add(uSw, "Softwareinstallation", resico_folder, GN_SOFTWARE, false);
+		FXTreeItem* uWin = add(usr, "Windows-Einstellungen", resico_folder, GN_FOLDER, false);
+		add(uWin, "Internet Explorer-Wartung", resico_folder, GN_TODO, false);
+		add(uWin, "Skripts (Anmelden/Abmelden)", resico_folder, GN_SCRIPTS, false);
+		FXTreeItem* uSec = add(uWin, "Sicherheitseinstellungen", resico_key, GN_FOLDER, false);
+		FXTreeItem* uPk = add(uSec, "Richtlinien öffentlicher Schlüssel", resico_folder, GN_FOLDER, false);
+		add(uPk, "Organisationsvertrauen", resico_folder, GN_TODO, false);
+		add(uWin, "Remoteinstallationsdienste", resico_folder, GN_TODO, false);
+		add(uWin, "Ordnerumleitung", resico_folder, GN_FOLDERREDIR, false);
+		add(usr, "Administrative Vorlagen", resico_folder, GN_ADM, false);
+
+		// Aufgeklappt wie im Original beim Oeffnen: die Computerkonfiguration
+		// bis in die Sicherheitseinstellungen, die Benutzerkonfiguration eine
+		// Ebene tiefer.
+		for (FXTreeItem* it : { root, comp, cSw, cWin, cSec, kto, lok, evt, pk, usr, uSw, uWin })
+			tree->expandTree(it);
+		tree->setCurrentItem(root);
+		tree->selectItem(root);
+		showNode(root);
+	}
+
+	void setHeaders(const std::vector<std::pair<const char*, int>>& headers) {
+		while (list->getNumHeaders() > 0) list->removeHeader(0);
+		for (auto& h : headers) list->appendHeader(h.first, NULL, h.second);
+	}
+
+	void showNode(FXTreeItem* item) {
+		shownItem = item;
+		list->clearItems();
+		rowChildren.clear();
+		rowPackages.clear();
+		status->setText(" ");
+		auto nit = nodes.find(item);
+		if (nit == nodes.end()) return;
+		const Node& node = nit->second;
+
+		switch (node.kind) {
+			case GN_FOLDER: {
+				setHeaders({ { "Name", 320 } });
+				for (FXTreeItem* c = item->getFirst(); c; c = c->getNext()) {
+					list->appendItem(c->getText(), c->getClosedIcon(), c->getClosedIcon());
+					rowChildren.push_back(c);
+				}
+				break;
+			}
+			case GN_SECPOL: {
+				setHeaders({ { "Richtlinie", 430 }, { "Computereinstellung", 260 } });
+				inf = loadGptTmpl(domain, guid);
+				FXIcon* ic = sharedPngIcon(resico_key);
+				for (auto& def : *node.defs) {
+					std::string v;
+					bool defined = inf.get(def.section, def.key, v);
+					int iv = 0;
+					try { iv = std::stoi(v); } catch (...) { defined = false; }
+					list->appendItem(FXString(def.label) + "\t" + secValueText(def, defined, iv), ic, ic);
+				}
+				break;
+			}
+			case GN_SOFTWARE: {
+				setHeaders({ { "Name", 320 }, { "Bereitstellungsstatus", 180 } });
+				getApp()->beginWaitCursor();
+				rowPackages = listSoftwarePackages(this, domain, guid.c_str(), node.machine);
+				getApp()->endWaitCursor();
+				FXIcon* ic = sharedPngIcon(resico_folder);
+				for (auto& p : rowPackages) {
+					const char* st = p.pendingRemoval ? "Wird deinstalliert" : p.published ? "Veröffentlicht" : "Zugewiesen";
+					list->appendItem(FXString(p.displayName.c_str()) + "\t" + st, ic, ic);
+				}
+				status->setText(" Rechtsklick in die Liste: Neues Paket hinzufügen oder ein Paket entfernen.");
+				break;
+			}
+			case GN_SCRIPTS: {
+				setHeaders({ { "Name", 320 } });
+				FXIcon* ic = sharedPngIcon(resico_folder);
+				if (node.machine) { list->appendItem("Starten", ic, ic); list->appendItem("Herunterfahren", ic, ic); }
+				else { list->appendItem("Anmelden", ic, ic); list->appendItem("Abmelden", ic, ic); }
+				break;
+			}
+			case GN_FOLDERREDIR: {
+				setHeaders({ { "Name", 320 } });
+				FXIcon* ic = sharedPngIcon(resico_folder);
+				for (auto& t : FOLDER_REDIR_TARGETS) {
+					FXString label = t.label;
+					if (label.right(1) == ":") label.trunc(label.length() - 1);
+					list->appendItem(label, ic, ic);
+				}
+				break;
+			}
+			case GN_ADM: {
+				setHeaders({ { "Name", 320 } });
+				status->setText(" Doppelklick öffnet die Administrativen Vorlagen.");
+				break;
+			}
+			case GN_TODO: {
+				setHeaders({ { "Name", 320 } });
+				status->setText(" Dieser Bereich ist in ice2k noch nicht umgesetzt.");
+				break;
+			}
+		}
+	}
+
+	long onTreeChanged(FXObject*, FXSelector, void*) {
+		FXTreeItem* cur = tree->getCurrentItem();
+		if (cur && cur != shownItem) showNode(cur);
 		return 1;
 	}
-	FXMessageBox::information(this, MBOX_OK, "Gespeichert", "Die Ordnerumleitung wurde gespeichert.");
-	return 1;
+
+	long onTreeDoubleClick(FXObject*, FXSelector, void*) {
+		FXTreeItem* cur = tree->getCurrentItem();
+		auto nit = nodes.find(cur);
+		if (nit != nodes.end() && nit->second.kind == GN_ADM) openAdmEditor();
+		return 0; // Auf-/Zuklappen per Doppelklick weiter zulassen
+	}
+
+	void openAdmEditor() {
+		if (!haveAdmFiles()) {
+			FXMessageBox::error(this, MBOX_OK, "ADM-Vorlagen fehlen",
+				"Es sind keine administrativen Vorlagen (.adm-Dateien) eingerichtet.\n"
+				"Bitte starte das Programm neu und lade sie herunter.");
+			return;
+		}
+		std::string base = gpoSysvolBase(domain, guid);
+		std::vector<AdmCategory> machineCats = loadMergedAdmCategories("MACHINE");
+		std::vector<AdmCategory> userCats = loadMergedAdmCategories("USER");
+		std::string gpoDn = "CN=" + guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
+		AdmEditorDialog dlg(this, std::move(machineCats), std::move(userCats),
+		                    gpoBranchDir(domain, guid, true) + "/Registry.pol",
+		                    gpoBranchDir(domain, guid, false) + "/Registry.pol",
+		                    base + "/GPT.INI", gpoDn, domain.realm);
+		dlg.execute(PLACEMENT_OWNER);
+	}
+
+	void selectTreeItem(FXTreeItem* it) {
+		if (it->getParent()) tree->expandTree(it->getParent());
+		tree->selectItem(it);
+		tree->setCurrentItem(it);
+		tree->makeItemVisible(it);
+		showNode(it);
+	}
+
+	long onListDoubleClick(FXObject*, FXSelector, void* ptr) {
+		FXint idx = (FXint)(FXival)ptr;
+		auto nit = nodes.find(shownItem);
+		if (nit == nodes.end() || idx < 0 || idx >= list->getNumItems()) return 1;
+		const Node node = nit->second;
+		switch (node.kind) {
+			case GN_FOLDER:
+				if (idx < (int)rowChildren.size()) selectTreeItem(rowChildren[idx]);
+				break;
+			case GN_SECPOL:
+				editSecurityPolicy(node, idx);
+				break;
+			case GN_SCRIPTS: {
+				ScriptsDialog dlg(this, domain, guid.c_str());
+				dlg.execute(PLACEMENT_OWNER);
+				break;
+			}
+			case GN_FOLDERREDIR:
+				editFolderRedirection();
+				break;
+			default:
+				break;
+		}
+		return 1;
+	}
+
+	void editSecurityPolicy(const Node& node, int idx) {
+		if (idx >= (int)node.defs->size()) return;
+		const SecPolicyDef& def = (*node.defs)[idx];
+		if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Richtlinien geändert werden."); return; }
+
+		inf = loadGptTmpl(domain, guid); // frisch lesen -- ein anderes Fenster koennte geschrieben haben
+		std::string v;
+		bool defined = inf.get(def.section, def.key, v);
+		int iv = 0;
+		try { iv = std::stoi(v); } catch (...) { defined = false; }
+
+		SecPolicyEditDialog dlg(this, def, defined, iv);
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		if (dlg.isDefined() == defined && (!defined || dlg.getValue() == iv)) return;
+
+		if (dlg.isDefined()) inf.set(def.section, def.key, std::to_string(dlg.getValue()));
+		else inf.erase(def.section, def.key);
+
+		FXString errorMsg;
+		bool accountPolicy = std::string(def.section) == "System Access";
+		getApp()->beginWaitCursor();
+		bool ok = saveGptTmpl(this, domain, guid, inf, accountPolicy, errorMsg);
+		getApp()->endWaitCursor();
+		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		showNode(shownItem);
+		if (idx < list->getNumItems()) { list->setCurrentItem(idx); list->selectItem(idx); }
+	}
+
+	void editFolderRedirection() {
+		if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann die Ordnerumleitung nicht geändert werden."); return; }
+		std::string userPolPath = gpoBranchDir(domain, guid, false) + "/Registry.pol";
+		FolderRedirectionDialog dlg(this, getFolderRedirectionPaths(userPolPath));
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		FXString errorMsg;
+		if (!setFolderRedirectionPaths(this, domain, guid.c_str(), dlg.getPaths(), errorMsg))
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	}
+
+	// ---- Softwareinstallation: Kontextmenue --------------------------
+	long onListRightClick(FXObject*, FXSelector, void* ptr) {
+		auto nit = nodes.find(shownItem);
+		if (nit == nodes.end() || nit->second.kind != GN_SOFTWARE) return 0;
+		FXEvent* ev = (FXEvent*)ptr;
+		FXint idx = list->getItemAt(ev->win_x, ev->win_y);
+		if (idx >= 0) { list->setCurrentItem(idx); list->selectItem(idx); }
+
+		FXMenuPane menu(this);
+		FXMenuPane neu(this);
+		new FXMenuCommand(&neu, "&Paket...", NULL, this, ID_NEW_PACKAGE);
+		new FXMenuCascade(&menu, "&Neu", NULL, &neu);
+		if (idx >= 0 && idx < (int)rowPackages.size()) {
+			new FXMenuSeparator(&menu);
+			new FXMenuCommand(&menu, "&Entfernen...", NULL, this, ID_REMOVE_PACKAGE);
+		}
+		menu.create();
+		menu.popup(NULL, ev->root_x, ev->root_y);
+		getApp()->runModalWhileShown(&menu);
+		return 1;
+	}
+
+	long onNewPackage(FXObject*, FXSelector, void*) {
+		auto nit = nodes.find(shownItem);
+		if (nit == nodes.end() || nit->second.kind != GN_SOFTWARE) return 1;
+		bool machine = nit->second.machine;
+		SoftwareInstallDialog dlg(this);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		SoftwarePackageParams params = dlg.getParams();
+		if (params.localMsiPath.empty() || params.msiUncPath.empty()) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
+			return 1;
+		}
+		// Der Knoten bestimmt den Zweig -- in der Computerkonfiguration
+		// gibt es nur "Zugewiesen".
+		params.assignedPerMachine = machine;
+		if (machine) params.published = false;
+		std::string log;
+		FXString errorMsg;
+		getApp()->beginWaitCursor();
+		bool ok = addSoftwarePackage(this, domain, guid.c_str(), params, log, errorMsg);
+		getApp()->endWaitCursor();
+		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
+		showNode(shownItem);
+		return 1;
+	}
+
+	long onRemovePackage(FXObject*, FXSelector, void*) {
+		auto nit = nodes.find(shownItem);
+		if (nit == nodes.end() || nit->second.kind != GN_SOFTWARE) return 1;
+		bool machine = nit->second.machine;
+		int idx = list->getCurrentItem();
+		if (idx < 0 || idx >= (int)rowPackages.size()) return 1;
+		SoftwarePackageInfo pkg = rowPackages[idx];
+
+		FXString errorMsg;
+		std::string log;
+		bool ok;
+		if (pkg.pendingRemoval) {
+			if (FXMessageBox::question(this, MBOX_YES_NO, "Eintrag löschen",
+				"\"%s\" ist bereits zur Deinstallation vorgemerkt.\n\n"
+				"Den Auftrag jetzt endgültig aus der Gruppenrichtlinie löschen?\n"
+				"Clients, die ihn noch nicht ausgeführt haben, behalten die\n"
+				"Anwendung dann.", pkg.displayName.c_str()) != MBOX_CLICKED_YES) return 1;
+			ok = deleteSoftwarePackage(this, domain, guid.c_str(), machine, pkg, errorMsg);
+		} else {
+			RemovePackageDialog dlg(this, pkg.displayName);
+			if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+			ok = dlg.uninstallFromClients()
+			     ? markSoftwarePackageForRemoval(this, domain, guid.c_str(), machine, pkg, log, errorMsg)
+			     : deleteSoftwarePackage(this, domain, guid.c_str(), machine, pkg, errorMsg);
+		}
+		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		showNode(shownItem);
+		return 1;
+	}
+
+	virtual ~GpoEditorWindow() {}
+};
+FXDEFMAP(GpoEditorWindow) GpoEditorWindowMap[] = {
+	FXMAPFUNC(SEL_CHANGED, GpoEditorWindow::ID_TREE, GpoEditorWindow::onTreeChanged),
+	FXMAPFUNC(SEL_DOUBLECLICKED, GpoEditorWindow::ID_TREE, GpoEditorWindow::onTreeDoubleClick),
+	FXMAPFUNC(SEL_DOUBLECLICKED, GpoEditorWindow::ID_LIST, GpoEditorWindow::onListDoubleClick),
+	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, GpoEditorWindow::ID_LIST, GpoEditorWindow::onListRightClick),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_NEW_PACKAGE, GpoEditorWindow::onNewPackage),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_REMOVE_PACKAGE, GpoEditorWindow::onRemovePackage),
+};
+FXIMPLEMENT(GpoEditorWindow, FXDialogBox, GpoEditorWindowMap, ARRAYNUMBER(GpoEditorWindowMap))
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" eines Gruppenrichtlinienobjekts (Knopf
+// "Eigenschaften" im Reiter Gruppenrichtlinie) -- Reiter Allgemein mit
+// den beiden Schaltern zum Deaktivieren der Konfigurationsteile.
+// ---------------------------------------------------------------------
+class GpoPropertiesDialog : public FXDialogBox {
+	FXDECLARE(GpoPropertiesDialog)
+private:
+	DomainInfo domain;
+	GpoSummary gpo;
+	FXCheckButton* disableMachine = nullptr, *disableUser = nullptr;
+protected:
+	GpoPropertiesDialog() {}
+public:
+	enum { ID_OK = FXDialogBox::ID_LAST, ID_APPLY };
+
+	GpoPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const GpoSummary& gpo_)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + gpo_.displayName.c_str(), DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0),
+		  domain(domain_), gpo(gpo_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXTabItem(tabs, "Allgemein", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,5);
+
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_network), LAYOUT_CENTER_Y);
+		new FXLabel(head, gpo.displayName.c_str(), NULL, LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		FXMatrix* m = new FXMatrix(page, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 12,6);
+		auto row = [&](const char* label, const FXString& value) {
+			new FXLabel(m, label, NULL, JUSTIFY_LEFT);
+			new FXLabel(m, value, NULL, JUSTIFY_LEFT);
+		};
+		row("Erstellt:", formatGeneralizedTime(gpo.whenCreated));
+		row("Geändert:", formatGeneralizedTime(gpo.whenChanged));
+		char rev[64];
+		snprintf(rev, sizeof(rev), "%u (Computer), %u (Benutzer)", gpo.version & 0xFFFF, (gpo.version >> 16) & 0xFFFF);
+		row("Revisionen:", rev);
+		FXString realmLower = domain.realm; realmLower.lower();
+		row("Domäne:", realmLower);
+		row("Eindeutiger Name:", gpo.guid.c_str());
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		FXGroupBox* g = new FXGroupBox(page, "Deaktivieren", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8);
+		disableMachine = new FXCheckButton(g, "Konfigurationseinstellungen des &Computers deaktivieren");
+		disableUser = new FXCheckButton(g, "Konfigurationseinstellungen des &Benutzers deaktivieren");
+		disableMachine->setCheck((gpo.flags & 2) != 0);
+		disableUser->setCheck((gpo.flags & 1) != 0);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
+		new FXButton(btnf, "OK", NULL, this, ID_OK, bs | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bs, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3);
+	}
+
+	int wantedFlags() const { return (disableUser->getCheck() ? 1 : 0) | (disableMachine->getCheck() ? 2 : 0); }
+
+	bool apply() {
+		if (wantedFlags() == gpo.flags) return true;
+		std::string ldif = "dn: " + gpo.dn + "\nchangetype: modify\nreplace: flags\nflags: " + std::to_string(wantedFlags()) + "\n-\n";
+		std::string log;
+		FXString errorMsg;
+		if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return false;
+		}
+		gpo.flags = wantedFlags();
+		return true;
+	}
+	long onUpdApply(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, wantedFlags() != gpo.flags ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+	long onApply(FXObject*, FXSelector, void*) { apply(); return 1; }
+	long onOk(FXObject*, FXSelector, void*) {
+		if (!apply()) return 1;
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	virtual ~GpoPropertiesDialog() {}
+};
+FXDEFMAP(GpoPropertiesDialog) GpoPropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, GpoPropertiesDialog::ID_OK, GpoPropertiesDialog::onOk),
+	FXMAPFUNC(SEL_COMMAND, GpoPropertiesDialog::ID_APPLY, GpoPropertiesDialog::onApply),
+	FXMAPFUNC(SEL_UPDATE, GpoPropertiesDialog::ID_APPLY, GpoPropertiesDialog::onUpdApply),
+};
+FXIMPLEMENT(GpoPropertiesDialog, FXDialogBox, GpoPropertiesDialogMap, ARRAYNUMBER(GpoPropertiesDialogMap))
+
+// ---------------------------------------------------------------------
+// Dialog "Gruppenrichtlinienobjekt-Verknüpfung hinzufügen" (Reiter
+// "Alle"): alle GPOs der Domaene, die hier noch nicht verknuepft sind.
+// ---------------------------------------------------------------------
+class AddGpoLinkDialog : public FXDialogBox {
+	FXDECLARE(AddGpoLinkDialog)
+private:
+	FXIconList* gpoList = nullptr;
+	std::vector<GpoSummary> choices;
+protected:
+	AddGpoLinkDialog() {}
+public:
+	enum { ID_LIST = FXDialogBox::ID_LAST };
+	AddGpoLinkDialog(FXWindow* owner, const DomainInfo& domain, const std::vector<GpoSummary>& all, const std::vector<GpLinkEntry>& linked)
+		: FXDialogBox(owner, "Gruppenrichtlinienobjekt-Verknüpfung hinzufügen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE | DECOR_RESIZE, 0,0,440,380) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXTabItem(tabs, "Alle", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,8,8, 0,4);
+		FXString realmLower = domain.realm; realmLower.lower();
+		new FXLabel(page, "Alle Gruppenrichtlinienobjekte, die in " + realmLower + " gespeichert sind:");
+		FXPacker* lf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		gpoList = new FXIconList(lf, this, ID_LIST, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		gpoList->appendHeader("Name", NULL, 380);
+		FXIcon* ic = sharedPngIcon(resico_network);
+		for (auto& g : all) {
+			bool isLinked = false;
+			for (auto& l : linked) if (lowerCopy(l.guid) == lowerCopy(g.guid)) isLinked = true;
+			if (isLinked) continue;
+			choices.push_back(g);
+			gpoList->appendItem(g.displayName.c_str(), ic, ic);
+		}
+		if (!choices.empty()) { gpoList->setCurrentItem(0); gpoList->selectItem(0); }
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	long onDoubleClick(FXObject*, FXSelector, void*) { return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL); }
+	const GpoSummary* selected() const {
+		int i = gpoList->getCurrentItem();
+		return (i >= 0 && i < (int)choices.size()) ? &choices[i] : nullptr;
+	}
+	virtual ~AddGpoLinkDialog() {}
+};
+FXDEFMAP(AddGpoLinkDialog) AddGpoLinkDialogMap[] = {
+	FXMAPFUNC(SEL_DOUBLECLICKED, AddGpoLinkDialog::ID_LIST, AddGpoLinkDialog::onDoubleClick),
+};
+FXIMPLEMENT(AddGpoLinkDialog, FXDialogBox, AddGpoLinkDialogMap, ARRAYNUMBER(AddGpoLinkDialogMap))
+
+// ---------------------------------------------------------------------
+// Alle Benutzer als Eintraege fuer die Objektauswahl ("Verwaltet von").
+// ---------------------------------------------------------------------
+static std::vector<GroupEntry> listAllUsersAsEntries() {
+	std::vector<FXString> plain = listNames({ FXString("samba-tool"), FXString("user"), FXString("list") });
+	std::vector<FXString> dns = listNames({ FXString("samba-tool"), FXString("user"), FXString("list"), FXString("--full-dn") });
+	std::vector<GroupEntry> out;
+	size_t n = std::min(plain.size(), dns.size());
+	for (size_t i = 0; i < n; i++) {
+		GroupEntry e;
+		e.sam = plain[i];
+		e.dn = dns[i].text();
+		e.cn = dnLeafName(e.dn);
+		e.folder = dnToFolder(e.dn);
+		out.push_back(e);
+	}
+	std::sort(out.begin(), out.end(), [](const GroupEntry& a, const GroupEntry& b) {
+		return strcasecmp(a.cn.text(), b.cn.text()) < 0;
+	});
+	return out;
 }
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" einer Organisationseinheit (bzw. der Domaene
+// selbst): Allgemein, Verwaltet von, Gruppenrichtlinie.
+// ---------------------------------------------------------------------
+class OUPropertiesDialog : public FXDialogBox {
+	FXDECLARE(OUPropertiesDialog)
+private:
+	DomainInfo domain;
+	std::string fullDN;
+	FXString displayName;
+	bool isDomainRoot = false;
+
+	// Allgemein
+	FXTextField* descField = nullptr, *cityField = nullptr, *stateField = nullptr, *zipField = nullptr;
+	FXText* streetText = nullptr;
+	FXListBox* countryBox = nullptr;
+	std::string origDesc, origStreet, origCity, origState, origZip, origCountry;
+
+	// Verwaltet von
+	FXTextField* mgrName = nullptr, *mgrOffice = nullptr, *mgrCity = nullptr, *mgrState = nullptr,
+	           *mgrCountry = nullptr, *mgrPhone = nullptr, *mgrFax = nullptr;
+	FXText* mgrStreet = nullptr;
+	std::string origManagerDn, managerDn;
+
+	// Gruppenrichtlinie
+	FXIconList* linkList = nullptr;
+	FXCheckButton* blockInheritance = nullptr;
+	bool origBlock = false;
+	std::vector<GpLinkEntry> links;      // Reihenfolge wie im Attribut
+	std::vector<GpoSummary> allGpos;
+
+protected:
+	OUPropertiesDialog() {}
+public:
+	enum {
+		ID_OK = FXDialogBox::ID_LAST, ID_APPLY,
+		ID_MGR_CHANGE, ID_MGR_PROPS, ID_MGR_CLEAR,
+		ID_LINKLIST, ID_GPO_NEW, ID_GPO_ADD, ID_GPO_EDIT, ID_GPO_UP, ID_GPO_OPTIONS, ID_GPO_DELETE, ID_GPO_PROPS, ID_GPO_DOWN
+	};
+
+	OUPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const FXString& relDN, const FXString& name)
+		: FXDialogBox(owner, "Eigenschaften von " + name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,520,540),
+		  domain(domain_), displayName(name) {
+		isDomainRoot = relDN.empty();
+		fullDN = isDomainRoot ? std::string(domain.baseDN.text()) : std::string((relDN + "," + domain.baseDN).text());
+
+		auto recs = ldapiSearch(fullDN, "base", "(objectClass=*)",
+		                        { "description", "street", "l", "st", "postalCode", "c", "managedBy", "gPLink", "gPOptions", "nTMixedDomain" });
+		std::multimap<std::string, std::string> rec;
+		if (!recs.empty()) rec = recs[0];
+		origDesc = ldifFirst(rec, "description");
+		origStreet = ldifFirst(rec, "street");
+		origCity = ldifFirst(rec, "l");
+		origState = ldifFirst(rec, "st");
+		origZip = ldifFirst(rec, "postalCode");
+		origCountry = ldifFirst(rec, "c");
+		origManagerDn = managerDn = ldifFirst(rec, "managedBy");
+		origBlock = ldifFirst(rec, "gPOptions") == "1";
+		links = parseGpLink(ldifFirst(rec, "gPLink"));
+		allGpos = listGposLdapi(domain.baseDN);
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		buildGeneralTab(tabs, rec);
+		buildManagedByTab(tabs);
+		buildGroupPolicyTab(tabs);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
+		new FXButton(btnf, "OK", NULL, this, ID_OK, bs | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bs, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3);
+
+		showManager();
+		reloadLinks();
+	}
+
+	// ---- Allgemein ---------------------------------------------------
+	FXTextField* labeledField(FXComposite* p, const char* label) {
+		FXHorizontalFrame* row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,140,0);
+		return new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+	}
+
+	FXText* labeledText(FXComposite* p, const char* label) {
+		FXHorizontalFrame* row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, label, NULL, LAYOUT_TOP | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,140,0);
+		FXPacker* f = new FXPacker(row, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,74, 0,0,0,0);
+		return new FXText(f, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+	}
+
+	static std::string crlfToLf(const std::string& s) {
+		std::string o;
+		for (char c : s) if (c != '\r') o += c;
+		return o;
+	}
+	static std::string lfToCrlf(const std::string& s) {
+		std::string o;
+		for (char c : s) { if (c == '\n') o += '\r'; o += c; }
+		return o;
+	}
+
+	void buildGeneralTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
+		new FXTabItem(tabs, "Allgemein", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(isDomainRoot ? resico_server : resico_folder), LAYOUT_CENTER_Y);
+		new FXLabel(head, displayName, NULL, LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		descField = labeledField(page, "&Beschreibung:");
+		descField->setText(origDesc.c_str());
+
+		if (isDomainRoot) {
+			std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
+			FXString nb = smbConfValue(conf, "workgroup"); nb.upper();
+			FXTextField* nbf = labeledField(page, "Domänenname (Prä-Windows 2000):");
+			nbf->setText(nb);
+			nbf->setEditable(FALSE);
+			new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+			FXString mode = ldifFirst(rec, "nTMixedDomain") == "0" ? "Einheitlicher Modus" : "Gemischter Modus";
+			FXHorizontalFrame* row = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+			new FXLabel(row, "Domänenmodus:", NULL, LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,140,0);
+			new FXLabel(row, mode, NULL, JUSTIFY_LEFT);
+			return;
+		}
+
+		streetText = labeledText(page, "&Straße:");
+		streetText->setText(crlfToLf(origStreet).c_str());
+		cityField = labeledField(page, "S&tadt:");
+		cityField->setText(origCity.c_str());
+		stateField = labeledField(page, "B&undesland/Kanton:");
+		stateField->setText(origState.c_str());
+		zipField = labeledField(page, "&PLZ:");
+		zipField->setText(origZip.c_str());
+
+		FXHorizontalFrame* row = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, "&Land/Region:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,140,0);
+		countryBox = new FXListBox(row, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		countryBox->appendItem("");
+		int sel = 0;
+		const auto& countries = countryList();
+		for (size_t i = 0; i < countries.size(); i++) {
+			countryBox->appendItem(countries[i].name.c_str());
+			if (!origCountry.empty() && lowerCopy(countries[i].alpha2) == lowerCopy(origCountry)) sel = (int)i + 1;
+		}
+		// Unbekannter Code (oder iso-codes fehlt): Wert trotzdem anzeigen,
+		// damit er beim Speichern nicht verlorengeht.
+		if (sel == 0 && !origCountry.empty()) sel = countryBox->appendItem(origCountry.c_str());
+		countryBox->setNumVisible(12);
+		countryBox->setCurrentItem(sel);
+	}
+
+	std::string selectedCountryCode(std::string& name, int& numeric) const {
+		int i = countryBox->getCurrentItem();
+		const auto& countries = countryList();
+		name.clear(); numeric = 0;
+		if (i <= 0) return "";
+		if (i - 1 < (int)countries.size()) {
+			name = countries[i - 1].name;
+			numeric = countries[i - 1].numeric;
+			return countries[i - 1].alpha2;
+		}
+		return origCountry; // unveraenderter unbekannter Code
+	}
+
+	// ---- Verwaltet von -----------------------------------------------
+	void buildManagedByTab(FXTabBook* tabs) {
+		new FXTabItem(tabs, "Verwaltet von", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		mgrName = labeledField(page, "&Name:");
+		mgrName->setEditable(FALSE);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 140,0,0,4);
+		new FXButton(btns, "Ä&ndern...", NULL, this, ID_MGR_CHANGE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Eigenschaften", NULL, this, ID_MGR_PROPS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Löschen", NULL, this, ID_MGR_CLEAR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		mgrOffice = labeledField(page, "Büro:");
+		mgrStreet = labeledText(page, "Straße:");
+		mgrCity = labeledField(page, "Stadt:");
+		mgrState = labeledField(page, "Bundesland/Kanton:");
+		mgrCountry = labeledField(page, "Land/Region:");
+		mgrPhone = labeledField(page, "Rufnummer:");
+		mgrFax = labeledField(page, "Faxnummer:");
+		for (FXTextField* f : { mgrOffice, mgrCity, mgrState, mgrCountry, mgrPhone, mgrFax }) f->setEditable(FALSE);
+		mgrStreet->setEditable(FALSE);
+	}
+
+	void showManager() {
+		std::multimap<std::string, std::string> rec;
+		if (!managerDn.empty()) {
+			auto recs = ldapiSearch(managerDn, "base", "(objectClass=*)",
+			                        { "physicalDeliveryOfficeName", "streetAddress", "l", "st", "co", "telephoneNumber", "facsimileTelephoneNumber" });
+			if (!recs.empty()) rec = recs[0];
+		}
+		mgrName->setText(managerDn.empty() ? FXString() : dnLeafName(managerDn) + " (" + dnToFolder(managerDn) + ")");
+		mgrOffice->setText(ldifFirst(rec, "physicalDeliveryOfficeName").c_str());
+		mgrStreet->setText(crlfToLf(ldifFirst(rec, "streetAddress")).c_str());
+		mgrCity->setText(ldifFirst(rec, "l").c_str());
+		mgrState->setText(ldifFirst(rec, "st").c_str());
+		mgrCountry->setText(ldifFirst(rec, "co").c_str());
+		mgrPhone->setText(ldifFirst(rec, "telephoneNumber").c_str());
+		mgrFax->setText(ldifFirst(rec, "facsimileTelephoneNumber").c_str());
+	}
+
+	long onManagerChange(FXObject*, FXSelector, void*) {
+		getApp()->beginWaitCursor();
+		std::vector<GroupEntry> users = listAllUsersAsEntries();
+		getApp()->endWaitCursor();
+		GroupPickerDialog dlg(this, domain.realm, users, "Benutzer auswählen", resico_user);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		if (dlg.getResult().empty()) return 1;
+		if (dlg.getResult().size() > 1) {
+			FXMessageBox::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden.");
+			return 1;
+		}
+		managerDn = users[dlg.getResult()[0]].dn;
+		showManager();
+		return 1;
+	}
+
+	long onManagerClear(FXObject*, FXSelector, void*) {
+		managerDn.clear();
+		showManager();
+		return 1;
+	}
+
+	long onManagerProps(FXObject*, FXSelector, void*) {
+		if (managerDn.empty()) return 1;
+		std::string sam = ldapiReadAttr(managerDn, "sAMAccountName");
+		if (sam.empty()) return 1;
+		DirObject obj;
+		obj.name = dnLeafName(managerDn);
+		obj.accountName = sam.c_str();
+		std::string suffix = "," + std::string(domain.baseDN.text());
+		std::string rel = managerDn;
+		if (lowerCopy(rel).size() > suffix.size() && lowerCopy(rel).compare(rel.size() - suffix.size(), suffix.size(), lowerCopy(suffix)) == 0)
+			rel = rel.substr(0, rel.size() - suffix.size());
+		obj.dn = rel.c_str();
+		obj.type = OBJ_USER;
+		UserPropertiesDialog dlg(this, domain, obj);
+		dlg.execute(PLACEMENT_OWNER);
+		showManager();
+		return 1;
+	}
+
+	long onUpdManagerButtons(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, managerDn.empty() ? ID_DISABLE : ID_ENABLE), NULL);
+		return 1;
+	}
+
+	// ---- Gruppenrichtlinie -------------------------------------------
+	void buildGroupPolicyTab(FXTabBook* tabs) {
+		new FXTabItem(tabs, "Gruppenrichtlinie", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_network), LAYOUT_CENTER_Y);
+		new FXLabel(head, "Aktuelle Gruppenrichtlinienobjekt-Verknüpfungen für " + displayName, NULL, LAYOUT_CENTER_Y | JUSTIFY_LEFT);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		FXPacker* lf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		linkList = new FXIconList(lf, this, ID_LINKLIST, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		linkList->appendHeader("Gruppenrichtlinienobjekt-Verknüpfungen", NULL, 260);
+		linkList->appendHeader("Kein Vorrang", NULL, 95);
+		linkList->appendHeader("Deaktiviert", NULL, 85);
+
+		new FXLabel(page, "Das Gruppenrichtlinienobjekt mit der höchsten Priorität steht an erster Stelle.\n"
+		                  "Die Liste wurde von " + serverFqdn(domain) + " erhalten.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+
+		FXMatrix* m = new FXMatrix(page, 4, MATRIX_BY_COLUMNS | LAYOUT_FILL_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,4,0, 6,6);
+		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X;
+		new FXButton(m, "&Neu", NULL, this, ID_GPO_NEW, bs, 0,0,0,0, 4,4,3,3);
+		new FXButton(m, "&Hinzufügen...", NULL, this, ID_GPO_ADD, bs, 0,0,0,0, 4,4,3,3);
+		new FXButton(m, "B&earbeiten", NULL, this, ID_GPO_EDIT, bs, 0,0,0,0, 4,4,3,3);
+		new FXButton(m, "Nach &oben", NULL, this, ID_GPO_UP, bs, 0,0,0,0, 4,4,3,3);
+		new FXButton(m, "O&ptionen...", NULL, this, ID_GPO_OPTIONS, bs, 0,0,0,0, 4,4,3,3);
+		new FXButton(m, "&Löschen...", NULL, this, ID_GPO_DELETE, bs, 0,0,0,0, 4,4,3,3);
+		new FXButton(m, "E&igenschaften", NULL, this, ID_GPO_PROPS, bs, 0,0,0,0, 4,4,3,3);
+		new FXButton(m, "Nach &unten", NULL, this, ID_GPO_DOWN, bs, 0,0,0,0, 4,4,3,3);
+
+		blockInheritance = new FXCheckButton(page, "&Richtlinienvererbung deaktivieren");
+		blockInheritance->setCheck(origBlock);
+	}
+
+	const GpoSummary* gpoByGuid(const std::string& g) const {
+		for (auto& x : allGpos) if (lowerCopy(x.guid) == lowerCopy(g)) return &x;
+		return nullptr;
+	}
+
+	// Anzeigeindex -> Index in "links" (Anzeige ist umgekehrt: hoechste
+	// Prioritaet = letzter Block = erste Zeile).
+	int linkIndexForRow(int row) const { return (int)links.size() - 1 - row; }
+
+	void reloadLinks(int selectRow = 0) {
+		linkList->clearItems();
+		FXIcon* ic = sharedPngIcon(resico_network);
+		for (int row = 0; row < (int)links.size(); row++) {
+			const GpLinkEntry& l = links[linkIndexForRow(row)];
+			const GpoSummary* g = gpoByGuid(l.guid);
+			FXString name = g ? FXString(g->displayName.c_str()) : FXString(l.guid.c_str());
+			linkList->appendItem(name + "\t" + ((l.options & GPLINK_OPT_ENFORCE) ? "\u2713" : "") +
+			                     "\t" + ((l.options & GPLINK_OPT_DISABLE) ? "\u2713" : ""), ic, ic);
+		}
+		if (!links.empty()) {
+			selectRow = std::max(0, std::min(selectRow, (int)links.size() - 1));
+			linkList->setCurrentItem(selectRow);
+			linkList->selectItem(selectRow);
+		}
+	}
+
+	void refreshLinksFromDirectory(int selectRow = 0) {
+		links = parseGpLink(ldapiReadAttr(fullDN, "gPLink"));
+		allGpos = listGposLdapi(domain.baseDN);
+		reloadLinks(selectRow);
+	}
+
+	int currentRow() const {
+		int r = linkList->getCurrentItem();
+		return (r >= 0 && r < (int)links.size()) ? r : -1;
+	}
+
+	long onUpdNeedsLink(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, currentRow() >= 0 ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+	long onUpdUp(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, currentRow() > 0 ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+	long onUpdDown(FXObject* sender, FXSelector, void*) {
+		int r = currentRow();
+		sender->handle(this, FXSEL(SEL_COMMAND, (r >= 0 && r + 1 < (int)links.size()) ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+
+	long onGpoNew(FXObject*, FXSelector, void*) {
+		FXString name = "Neues Gruppenrichtlinienobjekt";
+		if (!FXInputDialog::getString(name, this, "Neues Gruppenrichtlinienobjekt", "Name:")) return 1;
+		name.trim();
+		if (name.empty()) return 1;
+		for (auto& g : allGpos) {
+			if (strcasecmp(g.displayName.c_str(), name.text()) == 0) {
+				if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
+				        "Es gibt bereits ein Gruppenrichtlinienobjekt mit dem Namen \"%s\".\n\n"
+				        "Soll das vorhandene Objekt mit diesem Container verknüpft werden?", name.text()) != MBOX_CLICKED_YES) return 1;
+				FXString errorMsg;
+				if (!linkGpo(this, g.guid.c_str(), fullDN.c_str(), errorMsg))
+					FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
+				refreshLinksFromDirectory((int)links.size());
+				return 1;
+			}
+		}
+		FXString errorMsg;
+		getApp()->beginWaitCursor();
+		bool ok = createGpo(this, name, errorMsg);
+		getApp()->endWaitCursor();
+		if (!ok) { FXMessageBox::error(this, MBOX_OK, "Anlegen fehlgeschlagen", "%s", errorMsg.text()); return 1; }
+		allGpos = listGposLdapi(domain.baseDN);
+		for (auto& g : allGpos) {
+			if (g.displayName != name.text()) continue;
+			if (!linkGpo(this, g.guid.c_str(), fullDN.c_str(), errorMsg))
+				FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
+			break;
+		}
+		// Neue Verknuepfung hat die niedrigste Prioritaet -- letzte Zeile.
+		refreshLinksFromDirectory((int)links.size());
+		return 1;
+	}
+
+	long onGpoAdd(FXObject*, FXSelector, void*) {
+		allGpos = listGposLdapi(domain.baseDN);
+		AddGpoLinkDialog dlg(this, domain, allGpos, links);
+		if (!dlg.execute(PLACEMENT_OWNER) || !dlg.selected()) return 1;
+		FXString errorMsg;
+		if (!linkGpo(this, dlg.selected()->guid.c_str(), fullDN.c_str(), errorMsg))
+			FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
+		refreshLinksFromDirectory((int)links.size());
+		return 1;
+	}
+
+	long onGpoEdit(FXObject*, FXSelector, void*) {
+		int r = currentRow();
+		if (r < 0) return 1;
+		const GpLinkEntry& l = links[linkIndexForRow(r)];
+		const GpoSummary* g = gpoByGuid(l.guid);
+		GpoEditorWindow win(this, domain, l.guid, g ? FXString(g->displayName.c_str()) : FXString(l.guid.c_str()));
+		win.execute(PLACEMENT_SCREEN);
+		refreshLinksFromDirectory(r);
+		return 1;
+	}
+
+	long onLinkDoubleClick(FXObject*, FXSelector, void*) { return onGpoEdit(NULL, 0, NULL); }
+
+	long moveLink(int rowDelta) {
+		int r = currentRow();
+		if (r < 0) return 1;
+		int target = r + rowDelta;
+		if (target < 0 || target >= (int)links.size()) return 1;
+		std::vector<GpLinkEntry> changed = links;
+		std::swap(changed[linkIndexForRow(r)], changed[linkIndexForRow(target)]);
+		FXString errorMsg;
+		if (!writeGpLink(this, domain.realm, fullDN, changed, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Reihenfolge ändern fehlgeschlagen", "%s", errorMsg.text());
+			return 1;
+		}
+		refreshLinksFromDirectory(target);
+		return 1;
+	}
+	long onGpoUp(FXObject*, FXSelector, void*) { return moveLink(-1); }
+	long onGpoDown(FXObject*, FXSelector, void*) { return moveLink(+1); }
+
+	long onGpoOptions(FXObject*, FXSelector, void*) {
+		int r = currentRow();
+		if (r < 0) return 1;
+		int li = linkIndexForRow(r);
+		const GpoSummary* g = gpoByGuid(links[li].guid);
+		FXString name = g ? FXString(g->displayName.c_str()) : FXString(links[li].guid.c_str());
+
+		FXDialogBox dlg(this, name + " - Optionen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,0,0, 10,10,10,10);
+		FXVerticalFrame* main = new FXVerticalFrame(&dlg, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		new FXLabel(main, "Verknüpfungsoptionen:");
+		FXCheckButton* noOverride = new FXCheckButton(main, "&Kein Vorrang: Andere Gruppenrichtlinienobjekte können die hier\n"
+		                                                    "festgelegten Richtlinien nicht außer Kraft setzen");
+		FXCheckButton* disabled = new FXCheckButton(main, "&Deaktiviert: Das Gruppenrichtlinienobjekt wird nicht auf diesen\n"
+		                                                  "Container angewendet");
+		noOverride->setCheck((links[li].options & GPLINK_OPT_ENFORCE) != 0);
+		disabled->setCheck((links[li].options & GPLINK_OPT_DISABLE) != 0);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, &dlg, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, &dlg, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+		if (disabled->getCheck() && !(links[li].options & GPLINK_OPT_DISABLE)) {
+			if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
+			        "Möchten Sie diese Gruppenrichtlinienobjekt-Verknüpfung wirklich deaktivieren?\n"
+			        "Das Gruppenrichtlinienobjekt wird dann nicht mehr auf diesen Container angewendet.") != MBOX_CLICKED_YES) return 1;
+		}
+		std::vector<GpLinkEntry> changed = links;
+		changed[li].options = (noOverride->getCheck() ? GPLINK_OPT_ENFORCE : 0) | (disabled->getCheck() ? GPLINK_OPT_DISABLE : 0);
+		if (changed[li].options == links[li].options) return 1;
+		FXString errorMsg;
+		if (!writeGpLink(this, domain.realm, fullDN, changed, errorMsg))
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		refreshLinksFromDirectory(r);
+		return 1;
+	}
+
+	long onGpoDelete(FXObject*, FXSelector, void*) {
+		int r = currentRow();
+		if (r < 0) return 1;
+		std::string guid = links[linkIndexForRow(r)].guid;
+		const GpoSummary* g = gpoByGuid(guid);
+		FXString name = g ? FXString(g->displayName.c_str()) : FXString(guid.c_str());
+
+		FXDialogBox dlg(this, "Löschen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,0,0, 10,10,10,10);
+		FXVerticalFrame* main = new FXVerticalFrame(&dlg, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		new FXLabel(main, "Wie möchten Sie dieses Gruppenrichtlinienobjekt löschen?", NULL, JUSTIFY_LEFT);
+		FXint choice = 0;
+		FXDataTarget target(choice);
+		new FXRadioButton(main, "&Verknüpfung aus der Liste entfernen", &target, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(main, "Verknüpfung entfernen und das Gruppenrichtlinienobjekt &dauerhaft löschen", &target, FXDataTarget::ID_OPTION + 1);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, &dlg, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, &dlg, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+		FXString errorMsg;
+		if (choice == 1) {
+			if (FXMessageBox::warning(this, MBOX_YES_NO, "Gruppenrichtlinie",
+			        "\"%s\" wird endgültig gelöscht -- mit allen Einstellungen und allen\n"
+			        "Verknüpfungen zu anderen Containern.\n\nFortfahren?", name.text()) != MBOX_CLICKED_YES) return 1;
+			unlinkGpo(this, guid.c_str(), fullDN.c_str(), errorMsg);
+			if (!deleteGpoCompletely(this, guid.c_str(), errorMsg))
+				FXMessageBox::error(this, MBOX_OK, "Löschen fehlgeschlagen", "%s", errorMsg.text());
+		} else if (!unlinkGpo(this, guid.c_str(), fullDN.c_str(), errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Entfernen fehlgeschlagen", "%s", errorMsg.text());
+		}
+		refreshLinksFromDirectory(r);
+		return 1;
+	}
+
+	long onGpoProps(FXObject*, FXSelector, void*) {
+		int r = currentRow();
+		if (r < 0) return 1;
+		const GpoSummary* g = gpoByGuid(links[linkIndexForRow(r)].guid);
+		if (!g) return 1;
+		GpoPropertiesDialog dlg(this, domain, *g);
+		dlg.execute(PLACEMENT_OWNER);
+		refreshLinksFromDirectory(r);
+		return 1;
+	}
+
+	// ---- OK / Übernehmen ---------------------------------------------
+	void collectGeneralChanges(std::string& ldif) {
+		auto attr = [&](const char* name, const std::string& orig, std::string now) {
+			now = trimStr(now);
+			if (now == trimStr(orig)) return;
+			ldif += std::string("replace: ") + name + "\n";
+			if (!now.empty()) ldif += ldifAttrLine(name, now);
+			ldif += "-\n";
+		};
+		attr("description", origDesc, descField->getText().text());
+		if (isDomainRoot) return;
+		attr("street", crlfToLf(origStreet), streetText->getText().text());
+		attr("l", origCity, cityField->getText().text());
+		attr("st", origState, stateField->getText().text());
+		attr("postalCode", origZip, zipField->getText().text());
+		std::string cname;
+		int cnum;
+		std::string code = selectedCountryCode(cname, cnum);
+		if (lowerCopy(code) != lowerCopy(origCountry)) {
+			if (code.empty()) {
+				ldif += "replace: c\n-\nreplace: co\n-\nreplace: countryCode\ncountryCode: 0\n-\n";
+			} else {
+				ldif += "replace: c\n" + ldifAttrLine("c", code) + "-\n";
+				ldif += "replace: co\n" + ldifAttrLine("co", cname) + "-\n";
+				ldif += "replace: countryCode\ncountryCode: " + std::to_string(cnum) + "\n-\n";
+			}
+		}
+	}
+
+	bool isDirty() {
+		std::string ldif;
+		collectGeneralChanges(ldif);
+		return !ldif.empty() || lowerCopy(managerDn) != lowerCopy(origManagerDn) || blockInheritance->getCheck() != origBlock;
+	}
+
+	bool apply() {
+		std::string ldif;
+		collectGeneralChanges(ldif);
+		if (lowerCopy(managerDn) != lowerCopy(origManagerDn)) {
+			ldif += "replace: managedBy\n";
+			if (!managerDn.empty()) ldif += ldifAttrLine("managedBy", managerDn);
+			ldif += "-\n";
+		}
+		if (blockInheritance->getCheck() != origBlock)
+			ldif += std::string("replace: gPOptions\ngPOptions: ") + (blockInheritance->getCheck() ? "1" : "0") + "\n-\n";
+		if (ldif.empty()) return true;
+
+		ldif = "dn: " + fullDN + "\nchangetype: modify\n" + ldif;
+		std::string log;
+		FXString errorMsg;
+		if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return false;
+		}
+		origDesc = trimStr(descField->getText().text());
+		if (!isDomainRoot) {
+			origStreet = lfToCrlf(trimStr(streetText->getText().text()));
+			origCity = trimStr(cityField->getText().text());
+			origState = trimStr(stateField->getText().text());
+			origZip = trimStr(zipField->getText().text());
+			std::string cname; int cnum;
+			origCountry = selectedCountryCode(cname, cnum);
+		}
+		origManagerDn = managerDn;
+		origBlock = blockInheritance->getCheck();
+		return true;
+	}
+
+	long onUpdApply(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, isDirty() ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+	long onApply(FXObject*, FXSelector, void*) { apply(); return 1; }
+	long onOk(FXObject*, FXSelector, void*) {
+		if (!apply()) return 1;
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+
+	virtual ~OUPropertiesDialog() {}
+};
+FXDEFMAP(OUPropertiesDialog) OUPropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_OK, OUPropertiesDialog::onOk),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_APPLY, OUPropertiesDialog::onApply),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_APPLY, OUPropertiesDialog::onUpdApply),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_MGR_CHANGE, OUPropertiesDialog::onManagerChange),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_MGR_CLEAR, OUPropertiesDialog::onManagerClear),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_MGR_CLEAR, OUPropertiesDialog::onUpdManagerButtons),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_MGR_PROPS, OUPropertiesDialog::onManagerProps),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_MGR_PROPS, OUPropertiesDialog::onUpdManagerButtons),
+	FXMAPFUNC(SEL_DOUBLECLICKED, OUPropertiesDialog::ID_LINKLIST, OUPropertiesDialog::onLinkDoubleClick),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_NEW, OUPropertiesDialog::onGpoNew),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_ADD, OUPropertiesDialog::onGpoAdd),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_EDIT, OUPropertiesDialog::onGpoEdit),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_GPO_EDIT, OUPropertiesDialog::onUpdNeedsLink),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_UP, OUPropertiesDialog::onGpoUp),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_GPO_UP, OUPropertiesDialog::onUpdUp),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_DOWN, OUPropertiesDialog::onGpoDown),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_GPO_DOWN, OUPropertiesDialog::onUpdDown),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_OPTIONS, OUPropertiesDialog::onGpoOptions),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_GPO_OPTIONS, OUPropertiesDialog::onUpdNeedsLink),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_DELETE, OUPropertiesDialog::onGpoDelete),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_GPO_DELETE, OUPropertiesDialog::onUpdNeedsLink),
+	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_PROPS, OUPropertiesDialog::onGpoProps),
+	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_GPO_PROPS, OUPropertiesDialog::onUpdNeedsLink),
+};
+FXIMPLEMENT(OUPropertiesDialog, FXDialogBox, OUPropertiesDialogMap, ARRAYNUMBER(OUPropertiesDialogMap))
 
 // ---------------------------------------------------------------------
 // Hauptfenster
@@ -5250,21 +6519,23 @@ long DsAdminWindow::onProperties(FXObject*, FXSelector, void*) {
 	// ohne das wuerde hier faelschlich der zuletzt in der Liste
 	// ausgewaehlte Eintrag herangezogen, auch wenn der Baum die
 	// eigentliche Quelle war.
-	FXString title, fullDN;
+	FXString name, relDN;
 	if (propertiesFromList) {
 		int listIdx = list->getCurrentItem();
 		if (listIdx < 0 || listIdx >= (int)currentObjects.size()) return 1;
 		DirObject& obj = currentObjects[listIdx];
-		title = obj.name;
-		fullDN = relDNToFullDN(obj.dn, domain);
+		name = obj.name;
+		relDN = obj.dn;
 	} else {
 		FXTreeItem* cur = tree->getCurrentItem();
 		if (!cur || !itemToRelDN.count(cur)) return 1;
-		FXString relDN = itemToRelDN[cur];
-		title = relDN.empty() ? domain.realm : relDN;
-		fullDN = relDNToFullDN(relDN, domain);
+		relDN = itemToRelDN[cur];
+		FXString realmLower = domain.realm; realmLower.lower();
+		name = relDN.empty() ? realmLower : dnLeafLabel(relDN);
 	}
-	PropertiesDialog dlg(this, title, fullDN, domain.realm);
+	getApp()->beginWaitCursor();
+	OUPropertiesDialog dlg(this, domain, relDN, name);
+	getApp()->endWaitCursor();
 	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
