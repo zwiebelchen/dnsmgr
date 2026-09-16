@@ -1410,13 +1410,29 @@ static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, 
 
 // Aktualisiert den Zeitstempel von "CN=Class Store", damit andere
 // Clients/Werkzeuge den Container als gueltig ansehen.
+// Markiert den Class Store als geaendert. Achtung, hier standen zwei
+// falsche Werte, die die beim Anlegen gesetzten wieder ueberschrieben
+// haben:
+//   - lastUpdateSequence als Unix-Zeit statt im Format yyyymmddhhmmss,
+//     das ein echter Windows-2000-Server schreibt
+//   - displayName auf "Application Store" -- das gehoert in
+//     "description"; displayName traegt auf einem echten Server den
+//     LDAP-Verweis auf das GPO, zu dem der Store gehoert.
 static bool bumpClassStoreConfirmation(FXWindow* owner, const FXString& realm, const std::string& classStoreDn, std::string& log, FXString& errorMsg) {
+	// "CN=Class Store,CN=Machine,<GPO-DN>" -> "<GPO-DN>"
+	std::string gpoDn = classStoreDn;
+	for (int i = 0; i < 2; i++) {
+		size_t comma = gpoDn.find(',');
+		if (comma == std::string::npos) break;
+		gpoDn = gpoDn.substr(comma + 1);
+	}
+
 	std::string ldif = "dn: " + classStoreDn + "\n"
 	                    "changetype: modify\n"
 	                    "replace: lastUpdateSequence\n"
-	                    "lastUpdateSequence: " + std::to_string((long long)time(NULL)) + "\n-\n"
+	                    "lastUpdateSequence: " + updateSequenceStamp() + "\n-\n"
 	                    "replace: displayName\n"
-	                    "displayName: Application Store\n";
+	                    "displayName: LDAP://" + gpoDn + "\n";
 	return runLdapChange(owner, realm, ldif, false, log, errorMsg);
 }
 

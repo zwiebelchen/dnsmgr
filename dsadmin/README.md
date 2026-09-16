@@ -118,6 +118,13 @@ Die aus [MS-GPSI] abgeleitete Fassung wich deutlich ab:
 | Class Store: `extensionName` | fehlte | `Software` |
 | Class Store: `displayName` | fehlte | `LDAP://<GPO-DN>` |
 | Class Store: `appSchemaVersion` | fehlte | 1740 |
+| Class Store: `lastUpdateSequence` | Unix-Zeit | `yyyymmddhhmmss` |
+
+Beim `displayName` des Class Store gab es zusätzlich eine zweite
+Schreibstelle: die Bestätigungsfunktion nach dem Anlegen überschrieb
+ihn mit "Application Store" (das gehört in `description`) und
+`lastUpdateSequence` mit einer Unix-Zeit -- beide beim Anlegen korrekt
+gesetzten Werte waren damit sofort wieder falsch.
 
 `CN=Packages` ist auch auf dem echten Server ein `classStore`, nicht
 ein `container` -- das deckt sich mit dem Schema.
