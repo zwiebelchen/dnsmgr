@@ -54,6 +54,30 @@ nie angefasst. Die Datei wird bei jeder Änderung komplett neu
 geschrieben, "Lokales Systemkonto" heißt also schlicht: keine
 `User=`-Zeile, die Vorgabe der Unit gilt wieder.
 
+## Welche Dienste in der Liste stehen
+
+Die Liste zeigt **alle installierten** Dienste und wird bei jedem
+Öffnen bzw. Aktualisieren neu eingelesen. Früher kam sie aus
+`systemctl show '*.service'` -- ein solches Muster passt aber nur auf
+Units, die systemd gerade im Speicher hat. Maskierte oder nie gestartete
+Dienste fehlten dann, allen voran `samba-ad-dc`, das Debian bis zur
+Einrichtung eines Domänencontrollers maskiert ausliefert.
+
+Jetzt werden erst die Namen eingesammelt -- installierte Unit-Dateien
+(`systemctl list-unit-files --type=service`) plus geladene Units ohne
+eigene Datei, etwa aus Generatoren (`systemctl list-units --all
+--type=service --plain`) -- und dann gezielt genau diese Namen per
+`systemctl show` abgefragt (in Paketen von 150, damit die Befehlszeile
+nicht zu lang wird).
+
+## Wiederverwendung
+
+`SvcPanel` nimmt optional einen `SvcPanelDelegate` entgegen: eigene
+Spalten, eigener Zeileninhalt und eine eigene Aktion für Doppelklick
+bzw. "Eigenschaften"; Starten/Beenden entfällt dann. So benutzt der
+Knoten "Systemdienste" im Gruppenrichtlinienfenster von `dsadmin`
+dieselbe Liste -- mit den Spalten Dienstname/Starttyp/Berechtigung.
+
 ## Bewusste Abweichungen vom Original
 
 - **Anhalten/Fortsetzen** kennt systemd nicht. Die beiden Schaltflächen

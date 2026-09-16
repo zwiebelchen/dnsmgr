@@ -127,7 +127,17 @@ Doppelklick bearbeitet.
   Samba tut das nicht, deshalb gehen die definierten Kennwort- und
   Sperrwerte eines mit der Domäne verknüpften GPOs zusätzlich an
   `samba-tool domain passwordsettings`.
-- Noch ohne Funktion: Systemdienste, Registrierung, Dateisystem,
+- **Systemdienste** (`[Service General Setting]`, Zeilen
+  `"Name",Starttyp,"SDDL"` mit 2 = Automatisch, 3 = Manuell,
+  4 = Deaktiviert): dieselbe Dienstliste wie im Programm "Dienste"
+  (`common/svc/SvcPanel` mit Delegate), bei jedem Öffnen frisch aus
+  systemd gelesen. Wie im Original stammen die Dienste vom Rechner, auf
+  dem der Editor läuft -- hier also die Dienste dieses Servers; unter
+  Windows-Clients wirken nur Einträge, deren Name dort ein Dienst ist.
+  Beim ersten Definieren bekommt ein Dienst Standardberechtigungen
+  (Administratoren/SYSTEM Vollzugriff, interaktive Benutzer und Dienste
+  lesend); "Sicherheit bearbeiten..." folgt mit dem Berechtigungsdialog.
+- Noch ohne Funktion: Registrierung, Dateisystem,
   Richtlinien öffentlicher Schlüssel, IP-Sicherheit,
   Internet Explorer-Wartung, Remoteinstallationsdienste.
 
