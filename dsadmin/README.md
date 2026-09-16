@@ -231,6 +231,24 @@ make
 ./dsadmin
 ```
 
+## Fehlermeldungen von samba-tool
+
+`samba-tool` schreibt vor der eigentlichen Meldung seitenweise Rauschen
+-- registrierte GENSEC-Backends, lmhosts-Versuche, Schema-Hinweise, die
+Warnung über Kennwörter auf der Kommandozeile. Im Fehlerdialog
+erschlägt das die eine Zeile, auf die es ankommt, deshalb werden diese
+Zeilen herausgefiltert. Besteht die Ausgabe ausnahmsweise nur aus
+solchen Zeilen, wird sie ungefiltert angezeigt, damit nie etwas
+verlorengeht.
+
+Ein Fall wird eigens behandelt: "A GPO already existing with name".
+Das passiert regelmäßig, weil "Entfernen" im Gruppenrichtlinie-Reiter
+nur die **Verknüpfung** löst -- das Gruppenrichtlinienobjekt selbst
+bleibt bestehen, genau wie im echten Windows. Legt man danach eines mit
+demselben Namen an, scheitert das. Statt der Rohmeldung erklärt der
+Dialog das und bietet an, das vorhandene Objekt mit dem Container zu
+verknüpfen.
+
 ## Bekannte Grenzen
 - Objekte werden immer in dem Container angelegt, der im Baum markiert
   ist -- auch beim Rechtsklick auf einen anderen Knoten wird dieser

@@ -444,6 +444,33 @@ static std::vector<DirObject> listContainerObjects(const FXString& containerRelD
 // ---------------------------------------------------------------------
 // CRUD-Hüllen um samba-tool.
 // ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// samba-tool schreibt vor der eigentlichen Meldung seitenweise
+// Rauschen: registrierte GENSEC-Backends, lmhosts-Versuche,
+// Schema-Hinweise, dazu die Warnung ueber Kennwoerter auf der
+// Kommandozeile. In einem Fehlerdialog erschlaegt das die eine Zeile,
+// auf die es ankommt. Hier bleiben nur die aussagekraeftigen Zeilen
+// uebrig; findet sich keine, geben wir die Ausgabe ungefiltert zurueck,
+// damit nie etwas verlorengeht.
+// ---------------------------------------------------------------------
+static std::string condenseSambaToolError(const std::string& raw) {
+	static const char* noise[] = {
+		"GENSEC backend", "resolve_lmhosts:", "debug_lookup_classname",
+		"WARNING: Using passwords on command line", "Installing the setproctitle",
+		"registered", "Attempting lmhosts lookup"
+	};
+	std::string result;
+	for (auto& line : splitLines(raw)) {
+		std::string l = trimStr(line);
+		if (l.empty()) continue;
+		bool skip = false;
+		for (auto* n : noise) if (l.find(n) != std::string::npos) { skip = true; break; }
+		if (skip) continue;
+		result += l + "\n";
+	}
+	return result.empty() ? raw : result;
+}
+
 static bool createUser(const FXString& username, const FXString& password, const FXString& fullName,
                         const FXString& ouRelDN, FXString& errorMsg) {
 	std::vector<FXString> args = { FXString("samba-tool"), FXString("user"), FXString("create"), username, password };
@@ -451,14 +478,14 @@ static bool createUser(const FXString& username, const FXString& password, const
 	if (!ouRelDN.empty()) { args.push_back(FXString("--userou=") + ouRelDN); }
 	std::string out;
 	int rc = runAsRootCaptured(args, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
 static bool deleteUser(const FXString& username, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("delete"), username }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -467,14 +494,14 @@ static bool createGroup(const FXString& groupname, const FXString& ouRelDN, FXSt
 	if (!ouRelDN.empty()) args.push_back(FXString("--groupou=") + ouRelDN);
 	std::string out;
 	int rc = runAsRootCaptured(args, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
 static bool deleteGroup(const FXString& groupname, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("delete"), groupname }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -488,14 +515,14 @@ static std::vector<FXString> listGroupMembers(const FXString& groupname) {
 static bool createOU(const FXString& ouDN, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("add"), ouDN }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
 static bool deleteOU(const FXString& ouDN, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("delete"), ouDN }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -597,10 +624,10 @@ static bool addGroupMember(FXWindow* owner, const FXString& groupname, const FXS
 		// brauchen echte Administrator-Anmeldedaten, root/Maschinenkonto
 		// reichen nicht -- genau wie bei GPOs.
 		FXString cred = ensureAdminCreds(owner);
-		if (cred.empty()) { errorMsg = out.c_str(); return false; }
+		if (cred.empty()) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 		out.clear();
 		rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("addmembers"), groupname, member, cred }, out);
-		if (rc != 0) { errorMsg = out.c_str(); return false; }
+		if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	}
 	return true;
 }
@@ -610,10 +637,10 @@ static bool removeGroupMember(FXWindow* owner, const FXString& groupname, const 
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("removemembers"), groupname, member }, out);
 	if (rc != 0) {
 		FXString cred = ensureAdminCreds(owner);
-		if (cred.empty()) { errorMsg = out.c_str(); return false; }
+		if (cred.empty()) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 		out.clear();
 		rc = runAsRootCaptured({ FXString("samba-tool"), FXString("group"), FXString("removemembers"), groupname, member, cred }, out);
-		if (rc != 0) { errorMsg = out.c_str(); return false; }
+		if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	}
 	return true;
 }
@@ -623,7 +650,7 @@ static bool createGpo(FXWindow* owner, const FXString& displayName, FXString& er
 	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann kein GPO angelegt werden."; return false; }
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("create"), displayName, cred }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -632,7 +659,7 @@ static bool linkGpo(FXWindow* owner, const FXString& guid, const FXString& conta
 	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann kein GPO verknüpft werden."; return false; }
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("setlink"), containerFullDN, guid, cred }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -641,7 +668,7 @@ static bool unlinkGpo(FXWindow* owner, const FXString& guid, const FXString& con
 	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann die Verknüpfung nicht entfernt werden."; return false; }
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("dellink"), containerFullDN, guid, cred }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -1797,7 +1824,7 @@ static bool setUserAttributes(FXWindow* owner, const FXString& realm, const FXSt
 static bool setUserEnabled(const FXString& username, bool enabled, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString(enabled ? "enable" : "disable"), username }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -1805,7 +1832,7 @@ static bool setUserPassword(const FXString& username, const FXString& password, 
 	std::string input = std::string(password.text()) + "\n" + password.text() + "\n";
 	std::string out;
 	int rc = runAsRootCapturedWithStdin({ FXString("samba-tool"), FXString("user"), FXString("setpassword"), username }, input, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -1819,14 +1846,14 @@ static bool createComputer(const FXString& name, const FXString& ouRelDN, FXStri
 	if (!ouRelDN.empty()) args.push_back(FXString("--computerou=") + ouRelDN);
 	std::string out;
 	int rc = runAsRootCaptured(args, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
 static bool deleteComputer(const FXString& name, FXString& errorMsg) {
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("computer"), FXString("delete"), name }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -1846,7 +1873,7 @@ static bool moveObject(ObjType type, const FXString& accountNameOrFullDN, const 
 	}
 	std::string out;
 	int rc = runAsRootCaptured({ FXString("samba-tool"), sub, FXString("move"), accountNameOrFullDN, targetOuFullDN }, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -1864,7 +1891,7 @@ static bool renameObject(FXWindow* owner, const DomainInfo& domain, ObjType type
 			FXString sub = (type == OBJ_USER) ? "user" : "group";
 			std::string out;
 			int rc = runAsRootCaptured({ FXString("samba-tool"), sub, FXString("rename"), accountName, FXString("--force-new-cn=") + newName }, out);
-			if (rc != 0) { errorMsg = out.c_str(); return false; }
+			if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 			return true;
 		}
 		case OBJ_OU: {
@@ -1874,7 +1901,7 @@ static bool renameObject(FXWindow* owner, const DomainInfo& domain, ObjType type
 			FXString newFullDN = "OU=" + newName + "," + parentPart;
 			std::string out;
 			int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("ou"), FXString("rename"), currentFullDN, newFullDN }, out);
-			if (rc != 0) { errorMsg = out.c_str(); return false; }
+			if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 			return true;
 		}
 		case OBJ_COMPUTER: {
@@ -1951,7 +1978,7 @@ static bool setPasswordPolicy(const PasswordPolicy& p, FXString& errorMsg) {
 		FXString("--account-lockout-threshold=") + std::to_string(p.lockoutThreshold).c_str(),
 		FXString("--reset-account-lockout-after=") + std::to_string(p.lockoutWindowMins).c_str(),
 	}, out);
-	if (rc != 0) { errorMsg = out.c_str(); return false; }
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
 	return true;
 }
 
@@ -3230,13 +3257,35 @@ long PropertiesDialog::onNewGpo(FXObject*, FXSelector, void*) {
 		if (name.trim().empty()) return 1;
 		FXString errorMsg;
 		if (!createGpo(this, name, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			// Haeufigster Fall: unter dem Namen gibt es schon ein GPO.
+			// Das passiert regelmaessig, weil "Entfernen" im
+			// Gruppenrichtlinie-Reiter nur die Verknuepfung loest -- das
+			// GPO selbst bleibt bestehen. Statt der Rohmeldung anbieten,
+			// das vorhandene zu verknuepfen.
+			if (errorMsg.find("already existing with name") >= 0) {
+				FXString existingGuid;
+				for (auto& g : listAllGpos()) if (g.displayName == name) existingGuid = g.guid;
+				if (!existingGuid.empty()) {
+					if (FXMessageBox::question(this, MBOX_YES_NO, "Name bereits vergeben",
+						"Es gibt bereits ein Gruppenrichtlinienobjekt mit dem Namen\n\"%s\".\n\n"
+						"Beim Entfernen wird nur die Verknüpfung gelöst, das Objekt\nselbst bleibt bestehen.\n\n"
+						"Soll das vorhandene Objekt mit diesem Container verknüpft werden?",
+						name.text()) == MBOX_CLICKED_YES) {
+						if (!linkGpo(this, existingGuid, containerFullDN, errorMsg))
+							FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
+						reloadList();
+					}
+					return 1;
+				}
+			}
+			FXMessageBox::error(this, MBOX_OK, "Anlegen fehlgeschlagen", "%s", errorMsg.text());
 			return 1;
 		}
 		auto all = listAllGpos();
 		FXString guid;
 		for (auto& g : all) if (g.displayName == name) guid = g.guid;
-		if (!guid.empty()) linkGpo(this, guid, containerFullDN, errorMsg);
+		if (!guid.empty() && !linkGpo(this, guid, containerFullDN, errorMsg))
+			FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
 		reloadList();
 	}
 	return 1;
