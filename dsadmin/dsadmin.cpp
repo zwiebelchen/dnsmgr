@@ -2409,6 +2409,8 @@ struct GroupEntry {
 	FXString folder;  // "linux.zwiebelchen.org/Users"
 	bool security = true;
 	FXString scope;   // Builtin / Domain / Global / Universal
+	std::string sid;  // nur wo gebraucht (Sicherheitseinstellungen)
+	const unsigned char* icon = nullptr; // eigenes Symbol je Eintrag, sonst das des Dialogs
 };
 
 static std::vector<GroupEntry> listAllGroupsDetailed() {
@@ -2543,8 +2545,10 @@ public:
 		                           ICONLIST_DETAILED | ICONLIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		groupList->appendHeader("Name", NULL, 256);
 		groupList->appendHeader("Ordner", NULL, 270);
-		FXIcon* ic = sharedPngIcon(iconData);
-		for (auto& g : *groups) groupList->appendItem(g.cn + "\t" + g.folder, ic, ic);
+		for (auto& g : *groups) {
+			FXIcon* ic = sharedPngIcon(g.icon ? g.icon : iconData);
+			groupList->appendItem(g.cn + "\t" + g.folder, ic, ic);
+		}
 
 		FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXButton(btns, "Hin&zufügen", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
@@ -4549,7 +4553,10 @@ static std::string serializeInf(InfFile inf) {
 	for (auto& s : inf.sections) {
 		out += "[" + s.first + "]\r\n";
 		for (auto& kv : s.second) {
-			bool unicodeSection = lowerCopy(s.first) == "unicode" || lowerCopy(s.first) == "version";
+			// Wie secedit selbst: Registrierungswerte und die Pflichtabschnitte
+			// ohne Leerzeichen um das Gleichheitszeichen.
+			bool unicodeSection = lowerCopy(s.first) == "unicode" || lowerCopy(s.first) == "version" ||
+			                      lowerCopy(s.first) == "registry values";
 			out += kv.first + (unicodeSection ? "=" : " = ") + kv.second + "\r\n";
 		}
 	}
@@ -4570,19 +4577,30 @@ static InfFile loadGptTmpl(const DomainInfo& domain, const std::string& guid) {
 }
 
 // ---------------------------------------------------------------------
-// Sicherheitsrichtlinien, die direkt als Schluessel/Wert in der
-// GptTmpl.inf stehen -- Tabellen mit den Bezeichnungen des deutschen
-// Windows 2000.
+// Sicherheitsrichtlinien, die als einzelner Wert in der GptTmpl.inf
+// stehen -- Tabellen mit den Bezeichnungen des deutschen Windows 2000.
+//
+// Speicherformat (regType):
+//   REGT_PLAIN   [System Access]: "Schluessel = 5"
+//   REGT_QUOTED  [System Access]: "NewAdministratorName = "Admin""
+//   REGT_DWORD   [Registry Values]: "MACHINE\...\Wert=4,1"
+//   REGT_SZ      [Registry Values]: "MACHINE\...\Wert=1,"Text""
+//   REGT_BINARY  [Registry Values]: "MACHINE\...\Wert=3,0"
 // ---------------------------------------------------------------------
-enum SecValueKind { SV_NUMBER, SV_BOOL, SV_AUDIT, SV_RETENTION };
+enum SecValueKind { SV_NUMBER, SV_BOOL, SV_AUDIT, SV_RETENTION, SV_TEXT, SV_CHOICE };
+enum SecRegType { REGT_PLAIN, REGT_QUOTED, REGT_DWORD, REGT_SZ, REGT_BINARY };
+
+struct SecChoice { int value; const char* label; };
 
 struct SecPolicyDef {
 	const char* section;
 	const char* key;
 	const char* label;
 	SecValueKind kind;
-	const char* unit;      // SV_NUMBER: Einheit hinter der Zahl ("Tage")
-	int minV, maxV, defV;  // SV_NUMBER: Bereich und Vorschlag beim Definieren
+	const char* unit = "";      // SV_NUMBER: Einheit hinter der Zahl ("Tage")
+	int minV = 0, maxV = 0, defV = 0;
+	SecRegType regType = REGT_PLAIN;
+	std::vector<SecChoice> choices = {}; // SV_CHOICE
 };
 
 static const std::vector<SecPolicyDef> SEC_PASSWORD_POLICIES = {
@@ -4601,15 +4619,15 @@ static const std::vector<SecPolicyDef> SEC_LOCKOUT_POLICIES = {
 };
 
 static const std::vector<SecPolicyDef> SEC_AUDIT_POLICIES = {
-	{ "Event Audit", "AuditAccountLogon", "Anmeldeversuche überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditLogonEvents", "Anmeldeereignisse überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditAccountManage", "Kontenverwaltung überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditObjectAccess", "Objektzugriffsversuche überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditProcessTracking", "Prozessverfolgung überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditPrivilegeUse", "Rechteverwendung überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditPolicyChange", "Richtlinienänderungen überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditSystemEvents", "Systemereignisse überwachen", SV_AUDIT, "", 0, 3, 0 },
-	{ "Event Audit", "AuditDSAccess", "Verzeichnisdienstzugriff überwachen", SV_AUDIT, "", 0, 3, 0 },
+	{ "Event Audit", "AuditAccountLogon", "Anmeldeversuche überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditLogonEvents", "Anmeldeereignisse überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditAccountManage", "Kontenverwaltung überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditObjectAccess", "Objektzugriffsversuche überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditProcessTracking", "Prozessverfolgung überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditPrivilegeUse", "Rechteverwendung überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditPolicyChange", "Richtlinienänderungen überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditSystemEvents", "Systemereignisse überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditDSAccess", "Verzeichnisdienstzugriff überwachen", SV_AUDIT },
 };
 
 static const std::vector<SecPolicyDef> SEC_EVENTLOG_POLICIES = {
@@ -4627,19 +4645,120 @@ static const std::vector<SecPolicyDef> SEC_EVENTLOG_POLICIES = {
 	{ "System Log", "AuditLogRetentionPeriod", "Aufbewahrungsmethode des Systemprotokolls", SV_RETENTION, "", 0, 2, 1 },
 };
 
+// Registrierungspfade, auf die sich die Sicherheitsoptionen verteilen.
+#define REG_LSA        "MACHINE\\System\\CurrentControlSet\\Control\\Lsa\\"
+#define REG_POLSYS     "MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Policies\\System\\"
+#define REG_WINLOGON   "MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\"
+#define REG_LANMANSRV  "MACHINE\\System\\CurrentControlSet\\Services\\LanManServer\\Parameters\\"
+#define REG_LANMANWKS  "MACHINE\\System\\CurrentControlSet\\Services\\LanmanWorkstation\\Parameters\\"
+#define REG_NETLOGON   "MACHINE\\System\\CurrentControlSet\\Services\\Netlogon\\Parameters\\"
+#define REG_RECOVERY   "MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Setup\\RecoveryConsole\\"
+#define REG_SESSIONMGR "MACHINE\\System\\CurrentControlSet\\Control\\Session Manager\\"
+
+static const std::vector<SecChoice> SIGNING_CHOICES = {
+	{ 0, "Automatisch ohne Warnung durchführen" }, { 1, "Warnen, aber Installation zulassen" }, { 2, "Installation nicht zulassen" }
+};
+
+static const std::vector<SecPolicyDef> SEC_OPTIONS = {
+	{ "Registry Values", REG_LSA "RestrictAnonymous", "Zusätzliche Einschränkungen für anonyme Verbindungen", SV_CHOICE, "", 0, 0, 0, REGT_DWORD,
+	  { { 0, "Keine. Auf Standardberechtigungen zurückgreifen" }, { 1, "Aufzählung von SAM-Konten und -Namen nicht erlauben" },
+	    { 2, "Kein Zugriff ohne explizite anonyme Berechtigungen" } } },
+	{ "Registry Values", REG_LSA "SubmitControl", "Server-Operatoren das Zuweisen von Aufgaben ermöglichen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_LSA "AuditBaseObjects", "Zugriff auf globale Systemobjekte prüfen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_LSA "FullPrivilegeAuditing", "Zugriff auf Sicherungs- und Wiederherstellungsrechte prüfen", SV_BOOL, "", 0, 1, 0, REGT_BINARY },
+	{ "System Access", "ForceLogoffWhenHourExpire", "Clientverbindungen automatisch trennen, wenn die Anmeldezeit überschritten wird", SV_BOOL, "", 0, 1, 1, REGT_PLAIN },
+	{ "Registry Values", REG_POLSYS "ShutdownWithoutLogon", "Herunterfahren des Systems ohne Anmeldung zulassen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_WINLOGON "AllocateDASD", "Formatieren und Auswerfen von Wechselmedien zulassen", SV_CHOICE, "", 0, 0, 0, REGT_SZ,
+	  { { 0, "Administratoren" }, { 1, "Administratoren und Hauptbenutzer" }, { 2, "Administratoren und interaktive Benutzer" } } },
+	{ "Registry Values", REG_LANMANSRV "AutoDisconnect", "Leerlaufzeit vor Trennung der Sitzung", SV_NUMBER, "Minuten", 0, 99999, 15, REGT_DWORD },
+	{ "Registry Values", REG_LANMANSRV "RequireSecuritySignature", "Serverkommunikation digital signieren (immer)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_LANMANSRV "EnableSecuritySignature", "Serverkommunikation digital signieren (wenn möglich)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_LANMANWKS "RequireSecuritySignature", "Clientkommunikation digital signieren (immer)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_LANMANWKS "EnableSecuritySignature", "Clientkommunikation digital signieren (wenn möglich)", SV_BOOL, "", 0, 1, 1, REGT_DWORD },
+	{ "Registry Values", REG_LANMANWKS "EnablePlainTextPassword", "Unverschlüsseltes Kennwort senden, um Verbindung mit SMB-Servern von Drittanbietern herzustellen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_POLSYS "DisableCAD", "Strg+Alt+Entf-Anforderung zur Anmeldung deaktivieren", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_POLSYS "DontDisplayLastUserName", "Letzten Benutzernamen nicht im Anmeldedialog anzeigen", SV_BOOL, "", 0, 1, 1, REGT_DWORD },
+	{ "Registry Values", REG_LSA "LmCompatibilityLevel", "LAN Manager-Authentifizierungsebene", SV_CHOICE, "", 0, 0, 0, REGT_DWORD,
+	  { { 0, "LM- und NTLM-Antworten senden" }, { 1, "LM- und NTLM-Antworten senden (NTLMv2 verwenden, wenn ausgehandelt)" },
+	    { 2, "Nur NTLM-Antworten senden" }, { 3, "Nur NTLMv2-Antworten senden" } } },
+	{ "Registry Values", REG_POLSYS "LegalNoticeText", "Nachricht für Benutzer, die sich anmelden wollen", SV_TEXT, "", 0, 0, 0, REGT_SZ },
+	{ "Registry Values", REG_POLSYS "LegalNoticeCaption", "Nachrichtentitel für Benutzer, die sich anmelden wollen", SV_TEXT, "", 0, 0, 0, REGT_SZ },
+	{ "Registry Values", REG_WINLOGON "CachedLogonsCount", "Anzahl zwischenzuspeichernder vorheriger Anmeldungen (für den Fall, dass der Domänencontroller nicht verfügbar ist)", SV_NUMBER, "Anmeldungen", 0, 50, 10, REGT_SZ },
+	{ "Registry Values", "MACHINE\\System\\CurrentControlSet\\Control\\Print\\Providers\\LanMan Print Services\\Servers\\AddPrinterDrivers", "Installation von Druckertreibern durch Benutzer verhindern", SV_BOOL, "", 0, 1, 1, REGT_DWORD },
+	{ "Registry Values", REG_WINLOGON "PasswordExpiryWarning", "Benutzer auffordern, das Kennwort vor Ablauf zu ändern", SV_NUMBER, "Tage", 0, 999, 14, REGT_DWORD },
+	{ "Registry Values", REG_RECOVERY "SecurityLevel", "Wiederherstellungskonsole: Automatische administrative Anmeldung zulassen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_RECOVERY "SetCommand", "Wiederherstellungskonsole: Kopieren von Disketten und Zugriff auf alle Laufwerke und Ordner zulassen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "System Access", "NewAdministratorName", "Administratorkonto umbenennen", SV_TEXT, "", 0, 0, 0, REGT_QUOTED },
+	{ "System Access", "NewGuestName", "Gastkonto umbenennen", SV_TEXT, "", 0, 0, 0, REGT_QUOTED },
+	{ "Registry Values", REG_WINLOGON "AllocateCDRoms", "Zugriff auf CD-ROM-Laufwerke auf lokal angemeldete Benutzer beschränken", SV_BOOL, "", 0, 1, 0, REGT_SZ },
+	{ "Registry Values", REG_WINLOGON "AllocateFloppies", "Zugriff auf Diskettenlaufwerke auf lokal angemeldete Benutzer beschränken", SV_BOOL, "", 0, 1, 0, REGT_SZ },
+	{ "Registry Values", REG_NETLOGON "RequireSignOrSeal", "Daten des sicheren Kanals digital verschlüsseln oder signieren (immer)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_NETLOGON "SealSecureChannel", "Daten des sicheren Kanals digital verschlüsseln (wenn möglich)", SV_BOOL, "", 0, 1, 1, REGT_DWORD },
+	{ "Registry Values", REG_NETLOGON "SignSecureChannel", "Daten des sicheren Kanals digital signieren (wenn möglich)", SV_BOOL, "", 0, 1, 1, REGT_DWORD },
+	{ "Registry Values", REG_NETLOGON "RequireStrongKey", "Sicherer Kanal: Starker Sitzungsschlüssel erforderlich (Windows 2000 oder höher)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_NETLOGON "DisablePasswordChange", "Änderungen des Computerkontokennworts verhindern", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_LSA "CrashOnAuditFail", "System sofort herunterfahren, wenn Sicherheitsüberwachungen nicht protokolliert werden können", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_WINLOGON "ScRemoveOption", "Verhalten beim Entfernen von Smartcards", SV_CHOICE, "", 0, 0, 0, REGT_SZ,
+	  { { 0, "Keine Aktion" }, { 1, "Arbeitsstation sperren" }, { 2, "Abmeldung erzwingen" } } },
+	{ "Registry Values", "MACHINE\\Software\\Microsoft\\Driver Signing\\Policy", "Verhalten bei der Installation von nicht signierten Treibern", SV_CHOICE, "", 0, 0, 1, REGT_BINARY, SIGNING_CHOICES },
+	{ "Registry Values", "MACHINE\\Software\\Microsoft\\Non-Driver Signing\\Policy", "Verhalten bei der Installation von nicht signierten Nicht-Treibern", SV_CHOICE, "", 0, 0, 0, REGT_BINARY, SIGNING_CHOICES },
+	{ "Registry Values", REG_SESSIONMGR "Memory Management\\ClearPageFileAtShutdown", "Auslagerungsdatei des virtuellen Arbeitsspeichers löschen, wenn das System heruntergefahren wird", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+	{ "Registry Values", REG_SESSIONMGR "ProtectionMode", "Standardberechtigungen der internen Systemobjekte (z.B. symbolische Verknüpfungen) verstärken", SV_BOOL, "", 0, 1, 1, REGT_DWORD },
+	{ "Registry Values", REG_WINLOGON "ForceUnlockLogon", "Domänencontroller-Authentifizierung zum Aufheben der Sperrung erforderlich", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
+};
+
 static const char* RETENTION_LABELS[3] = {
 	"Ereignisse bei Bedarf überschreiben",
 	"Ereignisse nach Tagen überschreiben",
 	"Ereignisse nicht überschreiben (Protokoll manuell löschen)"
 };
 
-static FXString secValueText(const SecPolicyDef& def, bool defined, int v) {
+// Liest den Wert einer Richtlinie aus der Vorlage -- Zahlen als
+// Dezimaltext, Texte ohne Anfuehrungszeichen. false = nicht definiert.
+static bool readSecValue(InfFile& inf, const SecPolicyDef& def, std::string& value) {
+	std::string raw;
+	if (!inf.get(def.section, def.key, raw)) return false;
+	raw = trimStr(raw);
+	if (def.regType == REGT_DWORD || def.regType == REGT_SZ || def.regType == REGT_BINARY) {
+		size_t comma = raw.find(',');
+		if (comma == std::string::npos) return false;
+		raw = trimStr(raw.substr(comma + 1));
+	}
+	if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') raw = raw.substr(1, raw.size() - 2);
+	if (def.kind != SV_TEXT) {
+		try { value = std::to_string(std::stol(raw)); } catch (...) { return false; }
+	} else {
+		value = raw;
+	}
+	return true;
+}
+
+static void writeSecValue(InfFile& inf, const SecPolicyDef& def, bool defined, const std::string& value) {
+	if (!defined) { inf.erase(def.section, def.key); return; }
+	std::string v;
+	switch (def.regType) {
+		case REGT_PLAIN: v = value; break;
+		case REGT_QUOTED: v = "\"" + value + "\""; break;
+		case REGT_DWORD: v = "4," + value; break;
+		case REGT_SZ: v = "1,\"" + value + "\""; break;
+		case REGT_BINARY: v = "3," + value; break;
+	}
+	inf.set(def.section, def.key, v);
+}
+
+static FXString secValueText(const SecPolicyDef& def, bool defined, const std::string& value) {
 	if (!defined) return "Nicht definiert";
+	int v = 0;
+	try { v = std::stoi(value); } catch (...) {}
 	switch (def.kind) {
 		case SV_BOOL: return v ? "Aktiviert" : "Deaktiviert";
 		case SV_AUDIT:
 			return v == 3 ? "Erfolgreich, Fehlgeschlagen" : v == 1 ? "Erfolgreich" : v == 2 ? "Fehlgeschlagen" : "Keine Überwachung";
 		case SV_RETENTION: return (v >= 0 && v <= 2) ? RETENTION_LABELS[v] : "Nicht definiert";
+		case SV_TEXT: return value.c_str();
+		case SV_CHOICE:
+			for (auto& c : def.choices) if (c.value == v) return c.label;
+			return value.c_str();
 		default: {
 			char buf[128];
 			snprintf(buf, sizeof(buf), "%d %s", v, def.unit);
@@ -4649,8 +4768,7 @@ static FXString secValueText(const SecPolicyDef& def, bool defined, int v) {
 }
 
 // ---------------------------------------------------------------------
-// Dialog "Sicherheitsrichtlinieneinstellung" -- ein Doppelklick auf eine
-// Richtlinie im rechten Bereich.
+// Dialog "Sicherheitsrichtlinieneinstellung" fuer Einzelwerte.
 // ---------------------------------------------------------------------
 class SecPolicyEditDialog : public FXDialogBox {
 	FXDECLARE(SecPolicyEditDialog)
@@ -4659,6 +4777,8 @@ private:
 	FXCheckButton* defineCheck = nullptr;
 	std::vector<FXWindow*> controls;
 	FXSpinner* spinner = nullptr;
+	FXTextField* textField = nullptr;
+	FXListBox* choiceBox = nullptr;
 	FXint choice = 0;
 	FXDataTarget* choiceTarget = nullptr;
 	FXCheckButton* auditSuccess = nullptr, *auditFailure = nullptr;
@@ -4667,20 +4787,21 @@ protected:
 public:
 	enum { ID_DEFINE = FXDialogBox::ID_LAST };
 
-	SecPolicyEditDialog(FXWindow* owner, const SecPolicyDef& def_, bool defined, int value)
-		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0),
+	SecPolicyEditDialog(FXWindow* owner, const SecPolicyDef& def_, bool defined, const std::string& value)
+		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0),
 		  def(&def_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
 		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
 		new FXLabel(head, "", sharedPngIcon(resico_key), LAYOUT_TOP);
-		new FXLabel(head, def->label, NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXLabel(head, wrapLabel(def->label, 50), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
 		defineCheck = new FXCheckButton(main, "Diese Richtlinieneinstellung &definieren:", this, ID_DEFINE);
 		defineCheck->setCheck(defined);
 		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
 
-		int initial = defined ? value : def->defV;
+		int initial = def->defV;
+		if (defined && def->kind != SV_TEXT) { try { initial = std::stoi(value); } catch (...) {} }
 		choice = initial;
 		switch (def->kind) {
 			case SV_NUMBER: {
@@ -4715,6 +4836,24 @@ public:
 					controls.push_back(new FXRadioButton(body, RETENTION_LABELS[i], choiceTarget, FXDataTarget::ID_OPTION + i));
 				break;
 			}
+			case SV_TEXT: {
+				textField = new FXTextField(body, 40, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+				textField->setText(defined ? value.c_str() : "");
+				controls.push_back(textField);
+				break;
+			}
+			case SV_CHOICE: {
+				choiceBox = new FXListBox(body, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+				int sel = 0;
+				for (size_t i = 0; i < def->choices.size(); i++) {
+					choiceBox->appendItem(def->choices[i].label);
+					if (def->choices[i].value == initial) sel = (int)i;
+				}
+				choiceBox->setNumVisible((int)def->choices.size());
+				choiceBox->setCurrentItem(sel);
+				controls.push_back(choiceBox);
+				break;
+			}
 		}
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
@@ -4722,6 +4861,20 @@ public:
 		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 		updateEnabled();
+	}
+
+	// Lange Richtliniennamen umbrechen, statt den Dialog zu sprengen.
+	static FXString wrapLabel(const char* text, int width) {
+		std::string in = text, out, line;
+		std::istringstream iss(in);
+		std::string word;
+		while (iss >> word) {
+			if (!line.empty() && (int)(line.size() + 1 + word.size()) > width) { out += line + "\n"; line.clear(); }
+			if (!line.empty()) line += " ";
+			line += word;
+		}
+		out += line;
+		return out.c_str();
 	}
 
 	void updateEnabled() {
@@ -4732,11 +4885,16 @@ public:
 	long onDefine(FXObject*, FXSelector, void*) { updateEnabled(); return 1; }
 
 	bool isDefined() const { return defineCheck->getCheck(); }
-	int getValue() const {
+	std::string getValue() const {
 		switch (def->kind) {
-			case SV_NUMBER: return spinner->getValue();
-			case SV_AUDIT: return (auditSuccess->getCheck() ? 1 : 0) | (auditFailure->getCheck() ? 2 : 0);
-			default: return choice;
+			case SV_NUMBER: return std::to_string(spinner->getValue());
+			case SV_AUDIT: return std::to_string((auditSuccess->getCheck() ? 1 : 0) | (auditFailure->getCheck() ? 2 : 0));
+			case SV_TEXT: return trimStr(textField->getText().text());
+			case SV_CHOICE: {
+				int i = choiceBox->getCurrentItem();
+				return std::to_string(i >= 0 && i < (int)def->choices.size() ? def->choices[i].value : 0);
+			}
+			default: return std::to_string(choice);
 		}
 	}
 	virtual ~SecPolicyEditDialog() { delete choiceTarget; }
@@ -4745,6 +4903,294 @@ FXDEFMAP(SecPolicyEditDialog) SecPolicyEditDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, SecPolicyEditDialog::ID_DEFINE, SecPolicyEditDialog::onDefine),
 };
 FXIMPLEMENT(SecPolicyEditDialog, FXDialogBox, SecPolicyEditDialogMap, ARRAYNUMBER(SecPolicyEditDialogMap))
+
+// ---------------------------------------------------------------------
+// Konten als SIDs: GptTmpl.inf fuehrt Benutzerrechte und eingeschraenkte
+// Gruppen als "*S-1-5-32-544". Aufloesung gegen AD (objectSid ueber
+// ldapi) plus die festen SIDs, die es in keinem Verzeichnis gibt.
+// ---------------------------------------------------------------------
+static std::string sidFromBinary(const std::string& b) {
+	if (b.size() < 8) return "";
+	uint8_t rev = (uint8_t)b[0], count = (uint8_t)b[1];
+	if (b.size() < 8 + 4u * count) return "";
+	uint64_t auth = 0;
+	for (int i = 2; i < 8; i++) auth = (auth << 8) | (uint8_t)b[i];
+	std::string out = "S-" + std::to_string(rev) + "-" + std::to_string(auth);
+	for (int i = 0; i < count; i++) {
+		size_t o = 8 + 4 * i;
+		uint32_t v = (uint8_t)b[o] | ((uint8_t)b[o + 1] << 8) | ((uint8_t)b[o + 2] << 16) | ((uint32_t)(uint8_t)b[o + 3] << 24);
+		out += "-" + std::to_string(v);
+	}
+	return out;
+}
+
+struct WellKnownSid { const char* sid; const char* name; };
+static const WellKnownSid WELL_KNOWN_SIDS[] = {
+	{ "S-1-1-0", "Jeder" },
+	{ "S-1-3-0", "ERSTELLER-BESITZER" },
+	{ "S-1-5-2", "NETZWERK" },
+	{ "S-1-5-3", "BATCH" },
+	{ "S-1-5-4", "INTERAKTIV" },
+	{ "S-1-5-6", "DIENST" },
+	{ "S-1-5-7", "ANONYMOUS-ANMELDUNG" },
+	{ "S-1-5-9", "DOMÄNENCONTROLLER DER ORGANISATION" },
+	{ "S-1-5-11", "Authentifizierte Benutzer" },
+	{ "S-1-5-18", "SYSTEM" },
+	{ "S-1-5-19", "LOKALER DIENST" },
+	{ "S-1-5-20", "NETZWERKDIENST" },
+};
+
+// Alle Benutzer und Gruppen (ohne Computerkonten) mit SID, fuer die
+// Objektauswahl; groupsOnly fuer "Eingeschränkte Gruppen".
+static std::vector<GroupEntry> listSecurityPrincipals(bool groupsOnly) {
+	std::vector<GroupEntry> out;
+	DomainInfo domain = detectDomain();
+	std::string filter = groupsOnly ? "(objectClass=group)"
+	                                : "(&(|(objectClass=user)(objectClass=group))(!(objectClass=computer)))";
+	for (auto& rec : ldapiSearch(domain.baseDN.text(), "sub", filter, { "objectSid", "cn", "sAMAccountName", "objectClass" })) {
+		GroupEntry e;
+		e.dn = ldifFirst(rec, "dn");
+		e.cn = ldifFirst(rec, "cn").c_str();
+		e.sam = ldifFirst(rec, "sAMAccountName").c_str();
+		e.folder = dnToFolder(e.dn);
+		e.sid = sidFromBinary(ldifFirst(rec, "objectSid"));
+		bool isGroup = false;
+		auto range = rec.equal_range("objectclass");
+		for (auto it = range.first; it != range.second; ++it) if (lowerCopy(it->second) == "group") isGroup = true;
+		e.icon = isGroup ? resico_users : resico_user;
+		if (e.sid.empty()) continue;
+		out.push_back(e);
+	}
+	if (!groupsOnly) {
+		for (auto& w : WELL_KNOWN_SIDS) {
+			GroupEntry e;
+			e.cn = w.name;
+			e.sam = w.name;
+			e.sid = w.sid;
+			e.icon = resico_users;
+			out.push_back(e);
+		}
+	}
+	std::sort(out.begin(), out.end(), [](const GroupEntry& a, const GroupEntry& b) {
+		return strcasecmp(a.cn.text(), b.cn.text()) < 0;
+	});
+	return out;
+}
+
+// "*S-1-5-32-544" -> "VORDEFINIERT\Administrators", "*S-1-5-21-...-512"
+// -> "LINUX\Domain Admins". Unbekanntes bleibt, wie es ist.
+static FXString accountTokenDisplay(const std::string& token, const std::vector<GroupEntry>& principals) {
+	std::string t = trimStr(token);
+	if (t.empty() || t[0] != '*') return t.c_str();
+	std::string sid = t.substr(1);
+	for (auto& w : WELL_KNOWN_SIDS) if (sid == w.sid) return w.name;
+	for (auto& p : principals) {
+		if (p.sid != sid) continue;
+		if (sid.compare(0, 9, "S-1-5-32-") == 0) return "VORDEFINIERT\\" + p.sam;
+		std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
+		FXString nb = smbConfValue(conf, "workgroup"); nb.upper();
+		return nb + "\\" + p.sam;
+	}
+	return t.c_str();
+}
+
+static std::vector<std::string> splitAccountList(const std::string& value) {
+	std::vector<std::string> out;
+	std::string cur;
+	for (char c : value) {
+		if (c == ',') { if (!trimStr(cur).empty()) out.push_back(trimStr(cur)); cur.clear(); }
+		else cur += c;
+	}
+	if (!trimStr(cur).empty()) out.push_back(trimStr(cur));
+	return out;
+}
+
+static std::string joinAccountList(const std::vector<std::string>& list) {
+	std::string out;
+	for (auto& s : list) { if (!out.empty()) out += ","; out += s; }
+	return out;
+}
+
+// ---------------------------------------------------------------------
+// Benutzerrechte ([Privilege Rights]) -- Bezeichnungen wie im deutschen
+// Windows 2000.
+// ---------------------------------------------------------------------
+struct UserRightDef { const char* key; const char* label; };
+static const std::vector<UserRightDef> USER_RIGHTS = {
+	{ "SeTcbPrivilege", "Als Teil des Betriebssystems handeln" },
+	{ "SeSystemtimePrivilege", "Ändern der Systemzeit" },
+	{ "SeIncreaseBasePriorityPrivilege", "Anheben der Zeitplanungspriorität" },
+	{ "SeBatchLogonRight", "Anmelden als Batchauftrag" },
+	{ "SeDenyBatchLogonRight", "Anmelden als Batchauftrag verweigern" },
+	{ "SeServiceLogonRight", "Anmelden als Dienst" },
+	{ "SeDenyServiceLogonRight", "Anmelden als Dienst verweigern" },
+	{ "SeMachineAccountPrivilege", "Arbeitsstationen zur Domäne hinzufügen" },
+	{ "SeNetworkLogonRight", "Auf diesen Computer vom Netzwerk aus zugreifen" },
+	{ "SeChangeNotifyPrivilege", "Auslassen der durchsuchenden Überprüfung" },
+	{ "SeDebugPrivilege", "Debuggen von Programmen" },
+	{ "SeUndockPrivilege", "Entfernen des Computers von der Dockingstation" },
+	{ "SeIncreaseQuotaPrivilege", "Erhöhen von Kontingenten" },
+	{ "SeEnableDelegationPrivilege", "Ermöglichen, dass Computer- und Benutzerkonten für Delegierungszwecke vertraut wird" },
+	{ "SeCreatePagefilePrivilege", "Erstellen einer Auslagerungsdatei" },
+	{ "SeProfileSingleProcessPrivilege", "Erstellen eines Profils für einen Einzelprozess" },
+	{ "SeSystemProfilePrivilege", "Erstellen eines Profils der Systemleistung" },
+	{ "SeCreateTokenPrivilege", "Erstellen eines Tokenobjekts" },
+	{ "SeCreatePermanentPrivilege", "Erstellen von dauerhaft freigegebenen Objekten" },
+	{ "SeAssignPrimaryTokenPrivilege", "Ersetzen eines Tokens auf Prozessebene" },
+	{ "SeRemoteShutdownPrivilege", "Erzwingen des Herunterfahrens von einem Remotesystem aus" },
+	{ "SeAuditPrivilege", "Generieren von Sicherheitsüberwachungen" },
+	{ "SeShutdownPrivilege", "Herunterfahren des Systems" },
+	{ "SeLoadDriverPrivilege", "Laden und Entfernen von Gerätetreibern" },
+	{ "SeInteractiveLogonRight", "Lokal anmelden" },
+	{ "SeDenyInteractiveLogonRight", "Lokal anmelden verweigern" },
+	{ "SeLockMemoryPrivilege", "Sperren von Seiten im Speicher" },
+	{ "SeSyncAgentPrivilege", "Synchronisieren von Verzeichnisdienstdaten" },
+	{ "SeTakeOwnershipPrivilege", "Übernehmen des Besitzes von Dateien und Objekten" },
+	{ "SeSystemEnvironmentPrivilege", "Verändern der Firmwareumgebungsvariablen" },
+	{ "SeSecurityPrivilege", "Verwalten von Überwachungs- und Sicherheitsprotokollen" },
+	{ "SeBackupPrivilege", "Sichern von Dateien und Verzeichnissen" },
+	{ "SeRestorePrivilege", "Wiederherstellen von Dateien und Verzeichnissen" },
+	{ "SeDenyNetworkLogonRight", "Zugriff vom Netzwerk auf diesen Computer verweigern" },
+};
+
+// ---------------------------------------------------------------------
+// Kontenliste mit Hinzufuegen/Entfernen -- Grundbaustein fuer die
+// Benutzerrechte-Dialog und die beiden Listen bei eingeschraenkten
+// Gruppen.
+// ---------------------------------------------------------------------
+class AccountListPanel : public FXVerticalFrame {
+	FXDECLARE(AccountListPanel)
+private:
+	FXList* list = nullptr;
+	std::vector<std::string> tokens;
+	const std::vector<GroupEntry>* principals = nullptr;
+	FXString pickerTitle;
+protected:
+	AccountListPanel() {}
+public:
+	enum { ID_ADD = FXVerticalFrame::ID_LAST, ID_REMOVE };
+	AccountListPanel(FXComposite* p, const std::vector<GroupEntry>& principals_, const std::vector<std::string>& initial,
+	                 const FXString& pickerTitle_)
+		: FXVerticalFrame(p, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,4),
+		  tokens(initial), principals(&principals_), pickerTitle(pickerTitle_) {
+		FXPacker* lf = new FXPacker(this, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXList(lf, NULL, 0, LIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(this, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btns, "&Hinzufügen...", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		reload();
+	}
+	void reload() {
+		list->clearItems();
+		for (auto& t : tokens) list->appendItem(accountTokenDisplay(t, *principals));
+	}
+	long onAdd(FXObject*, FXSelector, void*) {
+		DomainInfo domain = detectDomain();
+		GroupPickerDialog dlg(this, domain.realm, *principals, pickerTitle.text(), resico_users);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		for (int idx : dlg.getResult()) {
+			std::string tok = "*" + (*principals)[idx].sid;
+			if (std::find(tokens.begin(), tokens.end(), tok) == tokens.end()) tokens.push_back(tok);
+		}
+		reload();
+		return 1;
+	}
+	long onRemove(FXObject*, FXSelector, void*) {
+		for (FXint i = list->getNumItems() - 1; i >= 0; i--)
+			if (list->isItemSelected(i) && i < (FXint)tokens.size()) tokens.erase(tokens.begin() + i);
+		reload();
+		return 1;
+	}
+	long onUpdRemove(FXObject* sender, FXSelector, void*) {
+		bool any = false;
+		for (FXint i = 0; i < list->getNumItems() && !any; i++) any = list->isItemSelected(i);
+		sender->handle(this, FXSEL(SEL_COMMAND, any ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+	const std::vector<std::string>& getTokens() const { return tokens; }
+	virtual ~AccountListPanel() {}
+};
+FXDEFMAP(AccountListPanel) AccountListPanelMap[] = {
+	FXMAPFUNC(SEL_COMMAND, AccountListPanel::ID_ADD, AccountListPanel::onAdd),
+	FXMAPFUNC(SEL_COMMAND, AccountListPanel::ID_REMOVE, AccountListPanel::onRemove),
+	FXMAPFUNC(SEL_UPDATE, AccountListPanel::ID_REMOVE, AccountListPanel::onUpdRemove),
+};
+FXIMPLEMENT(AccountListPanel, FXVerticalFrame, AccountListPanelMap, ARRAYNUMBER(AccountListPanelMap))
+
+// Dialog "Sicherheitsrichtlinieneinstellung" fuer ein Benutzerrecht.
+class UserRightDialog : public FXDialogBox {
+	FXDECLARE(UserRightDialog)
+private:
+	FXCheckButton* defineCheck = nullptr;
+	AccountListPanel* panel = nullptr;
+protected:
+	UserRightDialog() {}
+public:
+	enum { ID_DEFINE = FXDialogBox::ID_LAST };
+	UserRightDialog(FXWindow* owner, const UserRightDef& def, bool defined, const std::vector<std::string>& tokens,
+	                const std::vector<GroupEntry>& principals)
+		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,400) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
+		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
+		new FXLabel(head, "", sharedPngIcon(resico_key), LAYOUT_TOP);
+		new FXLabel(head, SecPolicyEditDialog::wrapLabel(def.label, 50), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		defineCheck = new FXCheckButton(main, "Diese Richtlinieneinstellungen &definieren:", this, ID_DEFINE);
+		defineCheck->setCheck(defined);
+		panel = new AccountListPanel(main, principals, tokens, "Benutzer oder Gruppen auswählen");
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		updateEnabled();
+	}
+	void updateEnabled() {
+		std::vector<FXWindow*> stack = { panel };
+		while (!stack.empty()) {
+			FXWindow* w = stack.back(); stack.pop_back();
+			if (defineCheck->getCheck()) w->enable(); else w->disable();
+			for (FXWindow* c = w->getFirst(); c; c = c->getNext()) stack.push_back(c);
+		}
+	}
+	long onDefine(FXObject*, FXSelector, void*) { updateEnabled(); return 1; }
+	bool isDefined() const { return defineCheck->getCheck(); }
+	const std::vector<std::string>& getTokens() const { return panel->getTokens(); }
+	virtual ~UserRightDialog() {}
+};
+FXDEFMAP(UserRightDialog) UserRightDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, UserRightDialog::ID_DEFINE, UserRightDialog::onDefine),
+};
+FXIMPLEMENT(UserRightDialog, FXDialogBox, UserRightDialogMap, ARRAYNUMBER(UserRightDialogMap))
+
+// Dialog "Konfigurieren der Mitgliedschaft für ..." bei eingeschraenkten
+// Gruppen: wer Mitglied der Gruppe ist, und wovon die Gruppe Mitglied ist.
+class RestrictedGroupDialog : public FXDialogBox {
+	FXDECLARE(RestrictedGroupDialog)
+private:
+	AccountListPanel* members = nullptr, *memberOf = nullptr;
+protected:
+	RestrictedGroupDialog() {}
+public:
+	RestrictedGroupDialog(FXWindow* owner, const FXString& groupDisplay, const std::vector<std::string>& membersInit,
+	                      const std::vector<std::string>& memberOfInit, const std::vector<GroupEntry>& principals,
+	                      const std::vector<GroupEntry>& groups)
+		: FXDialogBox(owner, "Konfigurieren der Mitgliedschaft für " + groupDisplay, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,480) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		new FXLabel(main, "Mitglieder dieser Gruppe:");
+		members = new AccountListPanel(main, principals, membersInit, "Benutzer oder Gruppen auswählen");
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		new FXLabel(main, "Diese Gruppe ist Mitglied von:");
+		memberOf = new AccountListPanel(main, groups, memberOfInit, "Gruppen auswählen");
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	const std::vector<std::string>& getMembers() const { return members->getTokens(); }
+	const std::vector<std::string>& getMemberOf() const { return memberOf->getTokens(); }
+	virtual ~RestrictedGroupDialog() {}
+};
+FXIMPLEMENT(RestrictedGroupDialog, FXDialogBox, NULL, 0)
 
 // ---------------------------------------------------------------------
 // GptTmpl.inf speichern: Datei samt Zwischenverzeichnissen anlegen, die
@@ -4832,7 +5278,7 @@ static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::st
 class GpoEditorWindow : public FXDialogBox {
 	FXDECLARE(GpoEditorWindow)
 private:
-	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_ADM, GN_FOLDERREDIR, GN_TODO };
+	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_ADM, GN_FOLDERREDIR, GN_TODO };
 	struct Node {
 		NodeKind kind = GN_FOLDER;
 		bool machine = true;
@@ -4851,12 +5297,16 @@ private:
 	// Zustand des rechten Bereichs
 	std::vector<FXTreeItem*> rowChildren;
 	std::vector<SoftwarePackageInfo> rowPackages;
+	std::vector<int> rowDefs;                 // GN_SECPOL/GN_RIGHTS: Zeile -> Tabellenindex
+	std::vector<std::string> rowGroups;       // GN_RESTRICTED: Zeile -> "*SID" der Gruppe
+	std::vector<GroupEntry> principals;       // einmal geladen, fuer SID-Namen
+	bool principalsLoaded = false;
 	InfFile inf;
 
 protected:
 	GpoEditorWindow() {}
 public:
-	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE };
+	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE, ID_ADD_RGROUP, ID_DELETE_RGROUP, ID_EDIT_RGROUP };
 
 	GpoEditorWindow(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const FXString& gpoName_)
 		: FXDialogBox(owner, "Gruppenrichtlinie", DECOR_ALL, 0,0,900,620),
@@ -4898,11 +5348,11 @@ public:
 		add(kto, "Kontosperrungsrichtlinien", resico_key, GN_SECPOL, true, &SEC_LOCKOUT_POLICIES);
 		FXTreeItem* lok = add(cSec, "Lokale Richtlinien", resico_key, GN_FOLDER, true);
 		add(lok, "Überwachungsrichtlinien", resico_key, GN_SECPOL, true, &SEC_AUDIT_POLICIES);
-		add(lok, "Zuweisen von Benutzerrechten", resico_key, GN_TODO, true);
-		add(lok, "Sicherheitsoptionen", resico_key, GN_TODO, true);
+		add(lok, "Zuweisen von Benutzerrechten", resico_key, GN_RIGHTS, true);
+		add(lok, "Sicherheitsoptionen", resico_key, GN_SECPOL, true, &SEC_OPTIONS);
 		FXTreeItem* evt = add(cSec, "Ereignisprotokoll", resico_key, GN_FOLDER, true);
 		add(evt, "Einstellungen für Ereignisprotokolle", resico_key, GN_SECPOL, true, &SEC_EVENTLOG_POLICIES);
-		add(cSec, "Eingeschränkte Gruppen", resico_key, GN_TODO, true);
+		add(cSec, "Eingeschränkte Gruppen", resico_key, GN_RESTRICTED, true);
 		add(cSec, "Systemdienste", resico_key, GN_TODO, true);
 		add(cSec, "Registrierung", resico_key, GN_TODO, true);
 		add(cSec, "Dateisystem", resico_key, GN_TODO, true);
@@ -4947,6 +5397,8 @@ public:
 		list->clearItems();
 		rowChildren.clear();
 		rowPackages.clear();
+		rowDefs.clear();
+		rowGroups.clear();
 		status->setText(" ");
 		auto nit = nodes.find(item);
 		if (nit == nodes.end()) return;
@@ -4965,13 +5417,61 @@ public:
 				setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 200 } });
 				inf = loadGptTmpl(domain, guid);
 				FXIcon* ic = sharedPngIcon(resico_key);
-				for (auto& def : *node.defs) {
+				// Wie im Original alphabetisch nach Bezeichnung.
+				for (size_t i = 0; i < node.defs->size(); i++) rowDefs.push_back((int)i);
+				std::sort(rowDefs.begin(), rowDefs.end(), [&](int a, int b) {
+					return strcoll((*node.defs)[a].label, (*node.defs)[b].label) < 0;
+				});
+				for (int i : rowDefs) {
+					const SecPolicyDef& def = (*node.defs)[i];
 					std::string v;
-					bool defined = inf.get(def.section, def.key, v);
-					int iv = 0;
-					try { iv = std::stoi(v); } catch (...) { defined = false; }
-					list->appendItem(FXString(def.label) + "\t" + secValueText(def, defined, iv), ic, ic);
+					bool defined = readSecValue(inf, def, v);
+					list->appendItem(FXString(def.label) + "\t" + secValueText(def, defined, v), ic, ic);
 				}
+				break;
+			}
+			case GN_RIGHTS: {
+				setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 260 } });
+				inf = loadGptTmpl(domain, guid);
+				ensurePrincipals();
+				FXIcon* ic = sharedPngIcon(resico_key);
+				for (size_t i = 0; i < USER_RIGHTS.size(); i++) rowDefs.push_back((int)i);
+				std::sort(rowDefs.begin(), rowDefs.end(), [&](int a, int b) {
+					return strcoll(USER_RIGHTS[a].label, USER_RIGHTS[b].label) < 0;
+				});
+				for (int i : rowDefs) {
+					std::string v;
+					FXString shown = "Nicht definiert";
+					if (inf.get("Privilege Rights", USER_RIGHTS[i].key, v)) {
+						shown = "";
+						for (auto& t : splitAccountList(v)) {
+							if (!shown.empty()) shown += ", ";
+							shown += accountTokenDisplay(t, principals);
+						}
+					}
+					list->appendItem(FXString(USER_RIGHTS[i].label) + "\t" + shown, ic, ic);
+				}
+				break;
+			}
+			case GN_RESTRICTED: {
+				setHeaders({ { "Gruppenname", 220 }, { "Mitglieder", 200 }, { "Mitglied von", 200 } });
+				inf = loadGptTmpl(domain, guid);
+				ensurePrincipals();
+				FXIcon* ic = sharedPngIcon(resico_users);
+				if (auto* sec = inf.find("Group Membership")) {
+					for (auto& kv : *sec) {
+						std::string k = kv.first;
+						size_t p = lowerCopy(k).find("__member");
+						if (p == std::string::npos) continue;
+						std::string g = k.substr(0, p);
+						if (std::find(rowGroups.begin(), rowGroups.end(), g) == rowGroups.end()) rowGroups.push_back(g);
+					}
+				}
+				for (auto& g : rowGroups) {
+					list->appendItem(accountTokenDisplay(g, principals) + "\t" + restrictedListText(g, "__Members") +
+					                 "\t" + restrictedListText(g, "__Memberof"), ic, ic);
+				}
+				status->setText(" Rechtsklick in die Liste: Gruppe hinzufügen oder löschen.");
 				break;
 			}
 			case GN_SOFTWARE: {
@@ -5068,6 +5568,12 @@ public:
 			case GN_SECPOL:
 				editSecurityPolicy(node, idx);
 				break;
+			case GN_RIGHTS:
+				editUserRight(idx);
+				break;
+			case GN_RESTRICTED:
+				editRestrictedGroup(idx);
+				break;
 			case GN_SCRIPTS: {
 				ScriptsDialog dlg(this, domain, guid.c_str());
 				dlg.execute(PLACEMENT_OWNER);
@@ -5082,32 +5588,144 @@ public:
 		return 1;
 	}
 
-	void editSecurityPolicy(const Node& node, int idx) {
-		if (idx >= (int)node.defs->size()) return;
-		const SecPolicyDef& def = (*node.defs)[idx];
-		if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Richtlinien geändert werden."); return; }
+	void ensurePrincipals() {
+		if (principalsLoaded) return;
+		getApp()->beginWaitCursor();
+		principals = listSecurityPrincipals(false);
+		getApp()->endWaitCursor();
+		principalsLoaded = true;
+	}
 
-		inf = loadGptTmpl(domain, guid); // frisch lesen -- ein anderes Fenster koennte geschrieben haben
+	FXString restrictedListText(const std::string& group, const char* suffix) {
 		std::string v;
-		bool defined = inf.get(def.section, def.key, v);
-		int iv = 0;
-		try { iv = std::stoi(v); } catch (...) { defined = false; }
+		if (!inf.get("Group Membership", group + suffix, v)) return "Nicht definiert";
+		FXString out;
+		for (auto& t : splitAccountList(v)) {
+			if (!out.empty()) out += ", ";
+			out += accountTokenDisplay(t, principals);
+		}
+		return out;
+	}
 
-		SecPolicyEditDialog dlg(this, def, defined, iv);
-		if (!dlg.execute(PLACEMENT_OWNER)) return;
-		if (dlg.isDefined() == defined && (!defined || dlg.getValue() == iv)) return;
-
-		if (dlg.isDefined()) inf.set(def.section, def.key, std::to_string(dlg.getValue()));
-		else inf.erase(def.section, def.key);
-
+	bool saveTemplate(bool accountPolicy) {
 		FXString errorMsg;
-		bool accountPolicy = std::string(def.section) == "System Access";
 		getApp()->beginWaitCursor();
 		bool ok = saveGptTmpl(this, domain, guid, inf, accountPolicy, errorMsg);
 		getApp()->endWaitCursor();
 		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		return ok;
+	}
+
+	void reselect(int row) {
 		showNode(shownItem);
-		if (idx < list->getNumItems()) { list->setCurrentItem(idx); list->selectItem(idx); }
+		if (row >= 0 && row < list->getNumItems()) { list->setCurrentItem(row); list->selectItem(row); list->makeItemVisible(row); }
+	}
+
+	bool requireRoot() {
+		if (g_haveRoot) return true;
+		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Richtlinien geändert werden.");
+		return false;
+	}
+
+	void editSecurityPolicy(const Node& node, int row) {
+		if (row >= (int)rowDefs.size() || !requireRoot()) return;
+		const SecPolicyDef& def = (*node.defs)[rowDefs[row]];
+		inf = loadGptTmpl(domain, guid); // frisch lesen -- ein anderes Fenster koennte geschrieben haben
+		std::string v;
+		bool defined = readSecValue(inf, def, v);
+
+		SecPolicyEditDialog dlg(this, def, defined, v);
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		if (dlg.isDefined() == defined && (!defined || dlg.getValue() == v)) return;
+
+		writeSecValue(inf, def, dlg.isDefined(), dlg.getValue());
+		bool accountPolicy = std::string(def.section) == "System Access" && node.defs != &SEC_OPTIONS;
+		saveTemplate(accountPolicy);
+		reselect(row);
+	}
+
+	void editUserRight(int row) {
+		if (row >= (int)rowDefs.size() || !requireRoot()) return;
+		const UserRightDef& def = USER_RIGHTS[rowDefs[row]];
+		inf = loadGptTmpl(domain, guid);
+		ensurePrincipals();
+		std::string v;
+		bool defined = inf.get("Privilege Rights", def.key, v);
+		std::vector<std::string> tokens = splitAccountList(v);
+
+		UserRightDialog dlg(this, def, defined, tokens, principals);
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		if (dlg.isDefined() == defined && (!defined || dlg.getTokens() == tokens)) return;
+
+		if (dlg.isDefined()) inf.set("Privilege Rights", def.key, joinAccountList(dlg.getTokens()));
+		else inf.erase("Privilege Rights", def.key);
+		saveTemplate(false);
+		reselect(row);
+	}
+
+	void editRestrictedGroup(int row) {
+		if (row < 0 || row >= (int)rowGroups.size() || !requireRoot()) return;
+		std::string g = rowGroups[row];
+		inf = loadGptTmpl(domain, guid);
+		ensurePrincipals();
+		std::string members, memberOf;
+		inf.get("Group Membership", g + "__Members", members);
+		inf.get("Group Membership", g + "__Memberof", memberOf);
+		std::vector<GroupEntry> groups;
+		for (auto& p : principals) if (p.icon == resico_users && !p.dn.empty()) groups.push_back(p);
+
+		RestrictedGroupDialog dlg(this, accountTokenDisplay(g, principals), splitAccountList(members), splitAccountList(memberOf),
+		                          principals, groups);
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		inf.set("Group Membership", g + "__Memberof", joinAccountList(dlg.getMemberOf()));
+		inf.set("Group Membership", g + "__Members", joinAccountList(dlg.getMembers()));
+		saveTemplate(false);
+		reselect(row);
+	}
+
+	long onAddRestrictedGroup(FXObject*, FXSelector, void*) {
+		if (!requireRoot()) return 1;
+		getApp()->beginWaitCursor();
+		std::vector<GroupEntry> groups = listSecurityPrincipals(true);
+		getApp()->endWaitCursor();
+		GroupPickerDialog dlg(this, domain.realm, groups, "Gruppen auswählen", resico_users);
+		if (!dlg.execute(PLACEMENT_OWNER) || dlg.getResult().empty()) return 1;
+		inf = loadGptTmpl(domain, guid);
+		std::string added;
+		for (int idx : dlg.getResult()) {
+			std::string tok = "*" + groups[idx].sid;
+			std::string dummy;
+			if (inf.get("Group Membership", tok + "__Members", dummy) || inf.get("Group Membership", tok + "__Memberof", dummy)) continue;
+			// Wie das Original: beide Listen werden angelegt, zunaechst leer.
+			inf.set("Group Membership", tok + "__Memberof", "");
+			inf.set("Group Membership", tok + "__Members", "");
+			added = tok;
+		}
+		if (added.empty()) return 1;
+		saveTemplate(false);
+		showNode(shownItem);
+		for (size_t i = 0; i < rowGroups.size(); i++) if (rowGroups[i] == added) { reselect((int)i); editRestrictedGroup((int)i); break; }
+		return 1;
+	}
+
+	long onDeleteRestrictedGroup(FXObject*, FXSelector, void*) {
+		int row = list->getCurrentItem();
+		if (row < 0 || row >= (int)rowGroups.size() || !requireRoot()) return 1;
+		std::string g = rowGroups[row];
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
+		        "Möchten Sie die Gruppe \"%s\" wirklich aus den eingeschränkten Gruppen löschen?",
+		        accountTokenDisplay(g, principals).text()) != MBOX_CLICKED_YES) return 1;
+		inf = loadGptTmpl(domain, guid);
+		inf.erase("Group Membership", g + "__Members");
+		inf.erase("Group Membership", g + "__Memberof");
+		saveTemplate(false);
+		reselect(row);
+		return 1;
+	}
+
+	long onEditRestrictedGroup(FXObject*, FXSelector, void*) {
+		editRestrictedGroup(list->getCurrentItem());
+		return 1;
 	}
 
 	void editFolderRedirection() {
@@ -5123,10 +5741,24 @@ public:
 	// ---- Softwareinstallation: Kontextmenue --------------------------
 	long onListRightClick(FXObject*, FXSelector, void* ptr) {
 		auto nit = nodes.find(shownItem);
-		if (nit == nodes.end() || nit->second.kind != GN_SOFTWARE) return 0;
+		if (nit == nodes.end()) return 0;
 		FXEvent* ev = (FXEvent*)ptr;
 		FXint idx = list->getItemAt(ev->win_x, ev->win_y);
 		if (idx >= 0) { list->setCurrentItem(idx); list->selectItem(idx); }
+		if (nit->second.kind == GN_RESTRICTED) {
+			FXMenuPane menu(this);
+			new FXMenuCommand(&menu, "&Gruppe hinzufügen...", NULL, this, ID_ADD_RGROUP);
+			if (idx >= 0 && idx < (int)rowGroups.size()) {
+				new FXMenuSeparator(&menu);
+				new FXMenuCommand(&menu, "&Sicherheit...", NULL, this, ID_EDIT_RGROUP);
+				new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_RGROUP);
+			}
+			menu.create();
+			menu.popup(NULL, ev->root_x, ev->root_y);
+			getApp()->runModalWhileShown(&menu);
+			return 1;
+		}
+		if (nit->second.kind != GN_SOFTWARE) return 0;
 
 		FXMenuPane menu(this);
 		FXMenuPane neu(this);
@@ -5206,6 +5838,9 @@ FXDEFMAP(GpoEditorWindow) GpoEditorWindowMap[] = {
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, GpoEditorWindow::ID_LIST, GpoEditorWindow::onListRightClick),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_NEW_PACKAGE, GpoEditorWindow::onNewPackage),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_REMOVE_PACKAGE, GpoEditorWindow::onRemovePackage),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_ADD_RGROUP, GpoEditorWindow::onAddRestrictedGroup),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_DELETE_RGROUP, GpoEditorWindow::onDeleteRestrictedGroup),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_EDIT_RGROUP, GpoEditorWindow::onEditRestrictedGroup),
 };
 FXIMPLEMENT(GpoEditorWindow, FXDialogBox, GpoEditorWindowMap, ARRAYNUMBER(GpoEditorWindowMap))
 
