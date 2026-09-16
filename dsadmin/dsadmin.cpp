@@ -543,12 +543,6 @@ static bool deleteGroup(const FXString& groupname, FXString& errorMsg) {
 	return true;
 }
 
-// ---------------------------------------------------------------------
-// Gruppenmitgliedschaft.
-// ---------------------------------------------------------------------
-static std::vector<FXString> listGroupMembers(const FXString& groupname) {
-	return listNames({ FXString("samba-tool"), FXString("group"), FXString("listmembers"), groupname });
-}
 
 static bool createOU(const FXString& ouDN, FXString& errorMsg) {
 	std::string out;
@@ -1945,75 +1939,6 @@ public:
 };
 FXIMPLEMENT(NewOUDialog, FXDialogBox, NULL, 0)
 
-// ---------------------------------------------------------------------
-// Dialog "Eigenschaften" einer Gruppe -- Mitgliederliste mit
-// Hinzufuegen/Entfernen (analog zu compmgmt, aber gegen die
-// AD-Domaene statt gegen lokale Linux-Gruppen).
-// ---------------------------------------------------------------------
-class GroupMembersDialog : public FXDialogBox {
-	FXDECLARE(GroupMembersDialog)
-private:
-	FXString groupname;
-	FXList* memberList;
-	FXTextField* addField;
-public:
-	enum { ID_ADDMEMBER = FXDialogBox::ID_LAST, ID_REMOVEMEMBER };
-	void reloadList() {
-		memberList->clearItems();
-		for (auto& m : listGroupMembers(groupname)) memberList->appendItem(m);
-	}
-	long onAddMember(FXObject*, FXSelector, void*) {
-		FXString name = addField->getText().trim();
-		if (name.empty()) return 1;
-		FXString errorMsg;
-		if (!addGroupMember(this, groupname, name, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
-			return 1;
-		}
-		addField->setText("");
-		reloadList();
-		return 1;
-	}
-	long onRemoveMember(FXObject*, FXSelector, void*) {
-		int sel = memberList->getCurrentItem();
-		if (sel < 0) return 1;
-		FXString name = memberList->getItemText(sel);
-		FXString errorMsg;
-		if (!removeGroupMember(this, groupname, name, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
-			return 1;
-		}
-		reloadList();
-		return 1;
-	}
-protected:
-	GroupMembersDialog() {}
-public:
-	GroupMembersDialog(FXWindow* owner, const FXString& groupName_)
-		: FXDialogBox(owner, "Eigenschaften von " + groupName_, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,360,420),
-		  groupname(groupName_) {
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		new FXLabel(main, "Mitglieder:");
-		memberList = new FXList(main, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | LAYOUT_FILL_Y);
-
-		FXHorizontalFrame* addf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-		addField = new FXTextField(addf, 20, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-		new FXButton(addf, "&Hinzufügen", NULL, this, ID_ADDMEMBER, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(addf, "&Entfernen", NULL, this, ID_REMOVEMEMBER, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-
-		reloadList();
-	}
-	virtual ~GroupMembersDialog() {}
-};
-FXDEFMAP(GroupMembersDialog) GroupMembersDialogMap[] = {
-	FXMAPFUNC(SEL_COMMAND, GroupMembersDialog::ID_ADDMEMBER, GroupMembersDialog::onAddMember),
-	FXMAPFUNC(SEL_COMMAND, GroupMembersDialog::ID_REMOVEMEMBER, GroupMembersDialog::onRemoveMember),
-};
-FXIMPLEMENT(GroupMembersDialog, FXDialogBox, GroupMembersDialogMap, ARRAYNUMBER(GroupMembersDialogMap))
 
 static bool setUserEnabled(const FXString& username, bool enabled, FXString& errorMsg) {
 	std::string out;
@@ -6894,6 +6819,493 @@ static std::vector<GroupEntry> listAllUsersAsEntries() {
 }
 
 // ---------------------------------------------------------------------
+// Beschriftete Eingabezeilen fuer Eigenschaftenseiten.
+// ---------------------------------------------------------------------
+static FXTextField* propLabeledField(FXComposite* p, const char* label, FXint labelWidth = 140) {
+	FXHorizontalFrame* row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+	new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,labelWidth,0);
+	return new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+}
+
+static FXText* propLabeledText(FXComposite* p, const char* label, FXint height = 74, FXint labelWidth = 140) {
+	FXHorizontalFrame* row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+	new FXLabel(row, label, NULL, LAYOUT_TOP | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,labelWidth,0);
+	FXPacker* f = new FXPacker(row, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,height, 0,0,0,0);
+	return new FXText(f, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+}
+
+static std::string crlfToLf(const std::string& s) {
+	std::string o;
+	for (char c : s) if (c != '\r') o += c;
+	return o;
+}
+
+// ---------------------------------------------------------------------
+// Reiter "Verwaltet von" -- gemeinsam fuer Organisationseinheiten,
+// Domaene und Gruppen. Haelt nur die Auswahl; geschrieben wird von der
+// jeweiligen Eigenschaftenseite (managedBy).
+// ---------------------------------------------------------------------
+class ManagedByPanel : public FXVerticalFrame {
+	FXDECLARE(ManagedByPanel)
+private:
+	DomainInfo domain;
+	std::string managerDn;
+	FXTextField* mgrName = nullptr, *mgrOffice = nullptr, *mgrCity = nullptr, *mgrState = nullptr,
+	           *mgrCountry = nullptr, *mgrPhone = nullptr, *mgrFax = nullptr;
+	FXText* mgrStreet = nullptr;
+protected:
+	ManagedByPanel() {}
+public:
+	enum { ID_MGR_CHANGE = FXVerticalFrame::ID_LAST, ID_MGR_PROPS, ID_MGR_CLEAR };
+
+	ManagedByPanel(FXComposite* parent, const DomainInfo& domain_, const std::string& initialDn)
+		: FXVerticalFrame(parent, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6),
+		  domain(domain_), managerDn(initialDn) {
+		mgrName = propLabeledField(this, "&Name:");
+		mgrName->setEditable(FALSE);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(this, LAYOUT_FILL_X, 0,0,0,0, 140,0,0,4);
+		new FXButton(btns, "Ä&ndern...", NULL, this, ID_MGR_CHANGE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Eigenschaften", NULL, this, ID_MGR_PROPS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Löschen", NULL, this, ID_MGR_CLEAR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		mgrOffice = propLabeledField(this, "Büro:");
+		mgrStreet = propLabeledText(this, "Straße:");
+		mgrCity = propLabeledField(this, "Stadt:");
+		mgrState = propLabeledField(this, "Bundesland/Kanton:");
+		mgrCountry = propLabeledField(this, "Land/Region:");
+		mgrPhone = propLabeledField(this, "Rufnummer:");
+		mgrFax = propLabeledField(this, "Faxnummer:");
+		for (FXTextField* f : { mgrOffice, mgrCity, mgrState, mgrCountry, mgrPhone, mgrFax }) f->setEditable(FALSE);
+		mgrStreet->setEditable(FALSE);
+		showManager();
+	}
+
+	const std::string& getManagerDn() const { return managerDn; }
+
+	void showManager() {
+		std::multimap<std::string, std::string> rec;
+		if (!managerDn.empty()) {
+			auto recs = ldapiSearch(managerDn, "base", "(objectClass=*)",
+			                        { "physicalDeliveryOfficeName", "streetAddress", "l", "st", "co", "telephoneNumber", "facsimileTelephoneNumber" });
+			if (!recs.empty()) rec = recs[0];
+		}
+		mgrName->setText(managerDn.empty() ? FXString() : dnLeafName(managerDn) + " (" + dnToFolder(managerDn) + ")");
+		mgrOffice->setText(ldifFirst(rec, "physicalDeliveryOfficeName").c_str());
+		mgrStreet->setText(crlfToLf(ldifFirst(rec, "streetAddress")).c_str());
+		mgrCity->setText(ldifFirst(rec, "l").c_str());
+		mgrState->setText(ldifFirst(rec, "st").c_str());
+		mgrCountry->setText(ldifFirst(rec, "co").c_str());
+		mgrPhone->setText(ldifFirst(rec, "telephoneNumber").c_str());
+		mgrFax->setText(ldifFirst(rec, "facsimileTelephoneNumber").c_str());
+	}
+
+	long onManagerChange(FXObject*, FXSelector, void*) {
+		getApp()->beginWaitCursor();
+		std::vector<GroupEntry> users = listAllUsersAsEntries();
+		getApp()->endWaitCursor();
+		GroupPickerDialog dlg(this, domain.realm, users, "Benutzer auswählen", resico_user);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		if (dlg.getResult().empty()) return 1;
+		if (dlg.getResult().size() > 1) {
+			FXMessageBox::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden.");
+			return 1;
+		}
+		managerDn = users[dlg.getResult()[0]].dn;
+		showManager();
+		return 1;
+	}
+
+	long onManagerClear(FXObject*, FXSelector, void*) {
+		managerDn.clear();
+		showManager();
+		return 1;
+	}
+
+	long onManagerProps(FXObject*, FXSelector, void*) {
+		if (managerDn.empty()) return 1;
+		std::string sam = ldapiReadAttr(managerDn, "sAMAccountName");
+		if (sam.empty()) return 1;
+		DirObject obj;
+		obj.name = dnLeafName(managerDn);
+		obj.accountName = sam.c_str();
+		std::string suffix = "," + std::string(domain.baseDN.text());
+		std::string rel = managerDn;
+		if (rel.size() > suffix.size() && lowerCopy(rel).compare(rel.size() - suffix.size(), suffix.size(), lowerCopy(suffix)) == 0)
+			rel = rel.substr(0, rel.size() - suffix.size());
+		obj.dn = rel.c_str();
+		obj.type = OBJ_USER;
+		UserPropertiesDialog dlg(this, domain, obj);
+		dlg.execute(PLACEMENT_OWNER);
+		showManager();
+		return 1;
+	}
+
+	long onUpdManagerButtons(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, managerDn.empty() ? ID_DISABLE : ID_ENABLE), NULL);
+		return 1;
+	}
+	virtual ~ManagedByPanel() {}
+};
+FXDEFMAP(ManagedByPanel) ManagedByPanelMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ManagedByPanel::ID_MGR_CHANGE, ManagedByPanel::onManagerChange),
+	FXMAPFUNC(SEL_COMMAND, ManagedByPanel::ID_MGR_CLEAR, ManagedByPanel::onManagerClear),
+	FXMAPFUNC(SEL_UPDATE, ManagedByPanel::ID_MGR_CLEAR, ManagedByPanel::onUpdManagerButtons),
+	FXMAPFUNC(SEL_COMMAND, ManagedByPanel::ID_MGR_PROPS, ManagedByPanel::onManagerProps),
+	FXMAPFUNC(SEL_UPDATE, ManagedByPanel::ID_MGR_PROPS, ManagedByPanel::onUpdManagerButtons),
+};
+FXIMPLEMENT(ManagedByPanel, FXVerticalFrame, ManagedByPanelMap, ARRAYNUMBER(ManagedByPanelMap))
+
+// ---------------------------------------------------------------------
+// Verzeichnisobjekte, die Mitglied einer Gruppe sein koennen (Benutzer,
+// Computer, Gruppen), mit passendem Symbol -- eine ldapi-Abfrage.
+// ---------------------------------------------------------------------
+static std::vector<GroupEntry> listMemberCandidates(const DomainInfo& domain) {
+	std::vector<GroupEntry> out;
+	for (auto& rec : ldapiSearch(domain.baseDN.text(), "sub", "(|(objectClass=user)(objectClass=group))",
+	                             { "cn", "sAMAccountName", "objectClass", "groupType" })) {
+		GroupEntry e;
+		e.dn = ldifFirst(rec, "dn");
+		e.cn = ldifFirst(rec, "cn").c_str();
+		e.sam = ldifFirst(rec, "sAMAccountName").c_str();
+		e.folder = dnToFolder(e.dn);
+		std::string cls;
+		auto range = rec.equal_range("objectclass");
+		for (auto it = range.first; it != range.second; ++it) cls = lowerCopy(it->second);
+		e.icon = cls == "group" ? resico_users : cls == "computer" ? resico_server : resico_user;
+		if (e.cn.empty() || e.sam.empty()) continue;
+		out.push_back(e);
+	}
+	std::sort(out.begin(), out.end(), [](const GroupEntry& a, const GroupEntry& b) {
+		return germanLess(a.cn.text(), b.cn.text());
+	});
+	return out;
+}
+
+// Liste "Name | Active Directory-Ordner" mit Hinzufuegen/Entfernen -- fuer
+// die Reiter Mitglieder und Mitglied von. Haelt nur DNs; geschrieben wird
+// vom Dialog.
+class DnListPanel : public FXVerticalFrame {
+	FXDECLARE(DnListPanel)
+private:
+	FXIconList* list = nullptr;
+	std::vector<std::string> dns;
+	const std::vector<GroupEntry>* candidates = nullptr;
+	FXString pickerTitle;
+	bool groupsOnly = false;
+	std::string excludeDn;
+	FXString realm;
+protected:
+	DnListPanel() {}
+public:
+	enum { ID_ADD = FXVerticalFrame::ID_LAST, ID_REMOVE };
+	DnListPanel(FXComposite* parent, const char* heading, const std::vector<std::string>& initial,
+	            const std::vector<GroupEntry>& candidates_, const FXString& pickerTitle_, bool groupsOnly_,
+	            const std::string& excludeDn_, const FXString& realm_)
+		: FXVerticalFrame(parent, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6),
+		  dns(initial), candidates(&candidates_), pickerTitle(pickerTitle_), groupsOnly(groupsOnly_), excludeDn(excludeDn_), realm(realm_) {
+		new FXLabel(this, heading);
+		FXPacker* lf = new FXPacker(this, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXIconList(lf, NULL, 0, ICONLIST_DETAILED | ICONLIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		list->appendHeader("Name", NULL, 160);
+		list->appendHeader("Active Directory-Ordner", NULL, 220);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(this, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0);
+		new FXButton(btns, "Hin&zufügen...", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "En&tfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		reload();
+	}
+	const unsigned char* iconFor(const std::string& dn) const {
+		for (auto& c : *candidates) if (lowerCopy(c.dn) == lowerCopy(dn)) return c.icon;
+		return resico_folder;
+	}
+	void reload() {
+		std::sort(dns.begin(), dns.end(), [](const std::string& a, const std::string& b) {
+			return germanLess(dnLeafName(a).text(), dnLeafName(b).text());
+		});
+		list->clearItems();
+		for (auto& dn : dns) {
+			FXIcon* ic = sharedPngIcon(iconFor(dn));
+			list->appendItem(dnLeafName(dn) + "\t" + dnToFolder(dn), ic, ic);
+		}
+	}
+	long onAdd(FXObject*, FXSelector, void*) {
+		std::vector<GroupEntry> choices;
+		for (auto& c : *candidates) {
+			if (groupsOnly && c.icon != resico_users) continue;
+			if (lowerCopy(c.dn) == lowerCopy(excludeDn)) continue;
+			choices.push_back(c);
+		}
+		GroupPickerDialog dlg(this, realm, choices, pickerTitle.text(), resico_users);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		for (int idx : dlg.getResult()) {
+			bool present = false;
+			for (auto& d : dns) if (lowerCopy(d) == lowerCopy(choices[idx].dn)) present = true;
+			if (!present) dns.push_back(choices[idx].dn);
+		}
+		reload();
+		return 1;
+	}
+	long onRemove(FXObject*, FXSelector, void*) {
+		std::vector<std::string> keep;
+		for (FXint i = 0; i < list->getNumItems(); i++) if (!list->isItemSelected(i)) keep.push_back(dns[i]);
+		if (keep.size() == dns.size()) return 1;
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Active Directory",
+		        "Möchten Sie die ausgewählten Objekte wirklich entfernen?") != MBOX_CLICKED_YES) return 1;
+		dns = keep;
+		reload();
+		return 1;
+	}
+	long onUpdRemove(FXObject* sender, FXSelector, void*) {
+		bool any = false;
+		for (FXint i = 0; i < list->getNumItems() && !any; i++) any = list->isItemSelected(i);
+		sender->handle(this, FXSEL(SEL_COMMAND, any ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+	const std::vector<std::string>& getDns() const { return dns; }
+	void setDns(const std::vector<std::string>& d) { dns = d; reload(); }
+	virtual ~DnListPanel() {}
+};
+FXDEFMAP(DnListPanel) DnListPanelMap[] = {
+	FXMAPFUNC(SEL_COMMAND, DnListPanel::ID_ADD, DnListPanel::onAdd),
+	FXMAPFUNC(SEL_COMMAND, DnListPanel::ID_REMOVE, DnListPanel::onRemove),
+	FXMAPFUNC(SEL_UPDATE, DnListPanel::ID_REMOVE, DnListPanel::onUpdRemove),
+};
+FXIMPLEMENT(DnListPanel, FXVerticalFrame, DnListPanelMap, ARRAYNUMBER(DnListPanelMap))
+
+// Unterschiede zweier DN-Listen (ohne Gross-/Kleinschreibung).
+static std::vector<std::string> dnsMissingIn(const std::vector<std::string>& from, const std::vector<std::string>& in) {
+	std::vector<std::string> out;
+	for (auto& a : from) {
+		bool found = false;
+		for (auto& b : in) if (lowerCopy(a) == lowerCopy(b)) { found = true; break; }
+		if (!found) out.push_back(a);
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------
+// Dialog "Eigenschaften" einer Gruppe: Allgemein, Mitglieder, Mitglied
+// von, Verwaltet von. Alles wird erst mit OK/Übernehmen geschrieben.
+// ---------------------------------------------------------------------
+class GroupPropertiesDialog : public FXDialogBox {
+	FXDECLARE(GroupPropertiesDialog)
+private:
+	DomainInfo domain;
+	std::string groupDn;
+	FXString cn;
+	std::vector<GroupEntry> candidates;
+
+	FXTextField* samField = nullptr, *descField = nullptr, *mailField = nullptr;
+	FXText* infoText = nullptr;
+	std::string origSam, origDesc, origMail, origInfo;
+	FXint scope = 2, secType = 1;          // 2/4/8, 1 = Sicherheit
+	FXint origScope = 2, origSecType = 1;
+	bool builtin = false;
+	FXDataTarget scopeTarget, typeTarget;
+
+	DnListPanel* members = nullptr, *memberOf = nullptr;
+	std::vector<std::string> origMembers, origMemberOf;
+	ManagedByPanel* managedBy = nullptr;
+	std::string origManager;
+
+protected:
+	GroupPropertiesDialog() {}
+public:
+	enum { ID_OK = FXDialogBox::ID_LAST, ID_APPLY };
+
+	GroupPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const DirObject& obj)
+		: FXDialogBox(owner, "Eigenschaften von " + obj.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,480,520),
+		  domain(domain_), cn(obj.name), scopeTarget(scope), typeTarget(secType) {
+		groupDn = std::string((obj.dn + "," + domain.baseDN).text());
+		candidates = listMemberCandidates(domain);
+
+		auto recs = ldapiSearch(groupDn, "base", "(objectClass=*)",
+		                        { "sAMAccountName", "description", "mail", "info", "groupType", "member", "memberOf", "managedBy" });
+		std::multimap<std::string, std::string> rec;
+		if (!recs.empty()) rec = recs[0];
+		origSam = ldifFirst(rec, "sAMAccountName");
+		origDesc = ldifFirst(rec, "description");
+		origMail = ldifFirst(rec, "mail");
+		origInfo = crlfToLf(ldifFirst(rec, "info"));
+		origManager = ldifFirst(rec, "managedBy");
+		long gt = 0;
+		try { gt = std::stol(ldifFirst(rec, "groupType")); } catch (...) {}
+		uint32_t g = (uint32_t)gt;
+		builtin = (g & 0x1) != 0;
+		origScope = scope = (g & 0x8) ? 8 : (g & 0x4) ? 4 : 2;
+		origSecType = secType = (g & 0x80000000u) ? 1 : 0;
+		auto collect = [&](const char* attr, std::vector<std::string>& into) {
+			auto range = rec.equal_range(attr);
+			for (auto it = range.first; it != range.second; ++it) into.push_back(it->second);
+		};
+		collect("member", origMembers);
+		collect("memberof", origMemberOf);
+
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(main, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		buildGeneralTab(tabs);
+		new FXTabItem(tabs, "Mitglieder", NULL);
+		members = new DnListPanel(tabs, "&Mitglieder:", origMembers, candidates,
+		                          "Benutzer, Kontakte, Computer oder Gruppen auswählen", false, groupDn, domain.realm);
+		new FXTabItem(tabs, "Mitglied von", NULL);
+		memberOf = new DnListPanel(tabs, "&Mitglied von:", origMemberOf, candidates, "Gruppen auswählen", true, groupDn, domain.realm);
+		new FXTabItem(tabs, "Verwaltet von", NULL);
+		managedBy = new ManagedByPanel(tabs, domain, origManager);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
+		new FXButton(btnf, "OK", NULL, this, ID_OK, bs | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bs, 0,0,88,0, 4,4,3,3);
+		(new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3))->disable();
+	}
+
+	void buildGeneralTab(FXTabBook* tabs) {
+		new FXTabItem(tabs, "Allgemein", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_users), LAYOUT_CENTER_Y);
+		new FXLabel(head, cn, NULL, LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		samField = propLabeledField(page, "Gruppenname (&Prä-Windows 2000):", 200);
+		samField->setText(origSam.c_str());
+		descField = propLabeledField(page, "&Beschreibung:", 200);
+		descField->setText(origDesc.c_str());
+		mailField = propLabeledField(page, "&E-Mail:", 200);
+		mailField->setText(origMail.c_str());
+
+		FXHorizontalFrame* boxes = new FXHorizontalFrame(page, LAYOUT_FILL_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,4,4, 10,0);
+		FXGroupBox* scopeBox = new FXGroupBox(boxes, "Gruppenbereich", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8);
+		FXRadioButton* r1 = new FXRadioButton(scopeBox, "Lokal (in &Domäne)", &scopeTarget, FXDataTarget::ID_OPTION + 4);
+		FXRadioButton* r2 = new FXRadioButton(scopeBox, "&Global", &scopeTarget, FXDataTarget::ID_OPTION + 2);
+		FXRadioButton* r3 = new FXRadioButton(scopeBox, "&Universal", &scopeTarget, FXDataTarget::ID_OPTION + 8);
+		FXGroupBox* typeBox = new FXGroupBox(boxes, "Gruppentyp", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8);
+		FXRadioButton* t1 = new FXRadioButton(typeBox, "&Sicherheit", &typeTarget, FXDataTarget::ID_OPTION + 1);
+		FXRadioButton* t2 = new FXRadioButton(typeBox, "&Verteilung", &typeTarget, FXDataTarget::ID_OPTION + 0);
+		// Vordefinierte Gruppen (Builtin) haben einen festen Bereich und Typ.
+		if (builtin) for (FXWindow* w : { (FXWindow*)r1, (FXWindow*)r2, (FXWindow*)r3, (FXWindow*)t1, (FXWindow*)t2 }) w->disable();
+
+		infoText = propLabeledText(page, "&Anmerkungen:", 90, 200);
+		infoText->setText(origInfo.c_str());
+	}
+
+	std::string generalLdif() {
+		std::string ldif;
+		auto attr = [&](const char* name, const std::string& orig, std::string now) {
+			now = trimStr(now);
+			if (now == trimStr(orig)) return;
+			ldif += std::string("replace: ") + name + "\n";
+			if (!now.empty()) ldif += ldifAttrLine(name, now);
+			ldif += "-\n";
+		};
+		attr("sAMAccountName", origSam, samField->getText().text());
+		attr("description", origDesc, descField->getText().text());
+		attr("mail", origMail, mailField->getText().text());
+		std::string info = trimStr(infoText->getText().text());
+		if (info != trimStr(origInfo)) {
+			std::string crlf;
+			for (char c : info) { if (c == '\n') crlf += '\r'; crlf += c; }
+			ldif += "replace: info\n";
+			if (!info.empty()) ldif += ldifAttrLine("info", crlf);
+			ldif += "-\n";
+		}
+		if (!builtin && (scope != origScope || secType != origSecType)) {
+			int32_t gt = (int32_t)((secType ? 0x80000000u : 0u) | (uint32_t)scope);
+			ldif += "replace: groupType\ngroupType: " + std::to_string(gt) + "\n-\n";
+		}
+		if (lowerCopy(managedBy->getManagerDn()) != lowerCopy(origManager)) {
+			ldif += "replace: managedBy\n";
+			if (!managedBy->getManagerDn().empty()) ldif += ldifAttrLine("managedBy", managedBy->getManagerDn());
+			ldif += "-\n";
+		}
+		return ldif;
+	}
+
+	bool isDirty() {
+		return !generalLdif().empty() ||
+		       !dnsMissingIn(members->getDns(), origMembers).empty() || !dnsMissingIn(origMembers, members->getDns()).empty() ||
+		       !dnsMissingIn(memberOf->getDns(), origMemberOf).empty() || !dnsMissingIn(origMemberOf, memberOf->getDns()).empty();
+	}
+
+	bool runChange(const std::string& ldif) {
+		std::string log;
+		FXString errorMsg;
+		if (runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) return true;
+		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		return false;
+	}
+
+	bool apply() {
+		// Bereich/Typ zuerst: AD erlaubt manche Umwandlungen nur bei passenden
+		// Mitgliedern -- ein Fehler soll erscheinen, bevor Mitglieder
+		// geaendert werden.
+		std::string ldif = generalLdif();
+		if (!ldif.empty() && !runChange("dn: " + groupDn + "\nchangetype: modify\n" + ldif)) return false;
+		origSam = trimStr(samField->getText().text());
+		origDesc = trimStr(descField->getText().text());
+		origMail = trimStr(mailField->getText().text());
+		origInfo = trimStr(infoText->getText().text());
+		origScope = scope;
+		origSecType = secType;
+		origManager = managedBy->getManagerDn();
+
+		std::vector<std::string> addM = dnsMissingIn(members->getDns(), origMembers);
+		std::vector<std::string> delM = dnsMissingIn(origMembers, members->getDns());
+		if (!addM.empty() || !delM.empty()) {
+			std::string m = "dn: " + groupDn + "\nchangetype: modify\n";
+			if (!addM.empty()) { m += "add: member\n"; for (auto& d : addM) m += ldifAttrLine("member", d); m += "-\n"; }
+			if (!delM.empty()) { m += "delete: member\n"; for (auto& d : delM) m += ldifAttrLine("member", d); m += "-\n"; }
+			if (!runChange(m)) { resync(); return false; }
+			origMembers = members->getDns();
+		}
+
+		// "Mitglied von" aendert das member-Attribut der jeweils anderen Gruppe.
+		std::vector<std::string> addO = dnsMissingIn(memberOf->getDns(), origMemberOf);
+		std::vector<std::string> delO = dnsMissingIn(origMemberOf, memberOf->getDns());
+		std::string o;
+		for (auto& g : addO) o += "dn: " + g + "\nchangetype: modify\nadd: member\n" + ldifAttrLine("member", groupDn) + "-\n\n";
+		for (auto& g : delO) o += "dn: " + g + "\nchangetype: modify\ndelete: member\n" + ldifAttrLine("member", groupDn) + "-\n\n";
+		if (!o.empty()) {
+			if (!runChange(o)) { resync(); return false; }
+			origMemberOf = memberOf->getDns();
+		}
+		return true;
+	}
+
+	// Nach einem Teilfehler den echten Stand aus AD holen.
+	void resync() {
+		auto recs = ldapiSearch(groupDn, "base", "(objectClass=*)", { "member", "memberOf" });
+		std::vector<std::string> m, o;
+		if (!recs.empty()) {
+			auto r1 = recs[0].equal_range("member");
+			for (auto it = r1.first; it != r1.second; ++it) m.push_back(it->second);
+			auto r2 = recs[0].equal_range("memberof");
+			for (auto it = r2.first; it != r2.second; ++it) o.push_back(it->second);
+		}
+		origMembers = m;
+		origMemberOf = o;
+		members->setDns(m);
+		memberOf->setDns(o);
+	}
+
+	long onUpdApply(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, isDirty() ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+	long onApply(FXObject*, FXSelector, void*) { apply(); return 1; }
+	long onOk(FXObject*, FXSelector, void*) {
+		if (isDirty() && !apply()) return 1;
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	virtual ~GroupPropertiesDialog() {}
+};
+FXDEFMAP(GroupPropertiesDialog) GroupPropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, GroupPropertiesDialog::ID_OK, GroupPropertiesDialog::onOk),
+	FXMAPFUNC(SEL_COMMAND, GroupPropertiesDialog::ID_APPLY, GroupPropertiesDialog::onApply),
+	FXMAPFUNC(SEL_UPDATE, GroupPropertiesDialog::ID_APPLY, GroupPropertiesDialog::onUpdApply),
+};
+FXIMPLEMENT(GroupPropertiesDialog, FXDialogBox, GroupPropertiesDialogMap, ARRAYNUMBER(GroupPropertiesDialogMap))
+
+// ---------------------------------------------------------------------
 // Dialog "Eigenschaften" einer Organisationseinheit (bzw. der Domaene
 // selbst): Allgemein, Verwaltet von, Gruppenrichtlinie.
 // ---------------------------------------------------------------------
@@ -6912,10 +7324,8 @@ private:
 	std::string origDesc, origStreet, origCity, origState, origZip, origCountry;
 
 	// Verwaltet von
-	FXTextField* mgrName = nullptr, *mgrOffice = nullptr, *mgrCity = nullptr, *mgrState = nullptr,
-	           *mgrCountry = nullptr, *mgrPhone = nullptr, *mgrFax = nullptr;
-	FXText* mgrStreet = nullptr;
-	std::string origManagerDn, managerDn;
+	ManagedByPanel* managedBy = nullptr;
+	std::string origManagerDn;
 
 	// Gruppenrichtlinie
 	FXIconList* linkList = nullptr;
@@ -6949,7 +7359,7 @@ public:
 		origState = ldifFirst(rec, "st");
 		origZip = ldifFirst(rec, "postalCode");
 		origCountry = ldifFirst(rec, "c");
-		origManagerDn = managerDn = ldifFirst(rec, "managedBy");
+		origManagerDn = ldifFirst(rec, "managedBy");
 		origBlock = ldifFirst(rec, "gPOptions") == "1";
 		links = parseGpLink(ldifFirst(rec, "gPLink"));
 		allGpos = listGposLdapi(domain.baseDN);
@@ -6967,29 +7377,13 @@ public:
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bs, 0,0,88,0, 4,4,3,3);
 		(new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3))->disable(); // bis zur ersten Aenderung grau
 
-		showManager();
 		reloadLinks();
 	}
 
 	// ---- Allgemein ---------------------------------------------------
-	FXTextField* labeledField(FXComposite* p, const char* label) {
-		FXHorizontalFrame* row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,140,0);
-		return new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
-	}
+	FXTextField* labeledField(FXComposite* p, const char* label) { return propLabeledField(p, label); }
+	FXText* labeledText(FXComposite* p, const char* label) { return propLabeledText(p, label); }
 
-	FXText* labeledText(FXComposite* p, const char* label) {
-		FXHorizontalFrame* row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-		new FXLabel(row, label, NULL, LAYOUT_TOP | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,140,0);
-		FXPacker* f = new FXPacker(row, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,74, 0,0,0,0);
-		return new FXText(f, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
-	}
-
-	static std::string crlfToLf(const std::string& s) {
-		std::string o;
-		for (char c : s) if (c != '\r') o += c;
-		return o;
-	}
 	static std::string lfToCrlf(const std::string& s) {
 		std::string o;
 		for (char c : s) { if (c == '\n') o += '\r'; o += c; }
@@ -7064,85 +7458,7 @@ public:
 	// ---- Verwaltet von -----------------------------------------------
 	void buildManagedByTab(FXTabBook* tabs) {
 		new FXTabItem(tabs, "Verwaltet von", NULL);
-		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
-		mgrName = labeledField(page, "&Name:");
-		mgrName->setEditable(FALSE);
-		FXHorizontalFrame* btns = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 140,0,0,4);
-		new FXButton(btns, "Ä&ndern...", NULL, this, ID_MGR_CHANGE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		new FXButton(btns, "&Eigenschaften", NULL, this, ID_MGR_PROPS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		new FXButton(btns, "&Löschen", NULL, this, ID_MGR_CLEAR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		mgrOffice = labeledField(page, "Büro:");
-		mgrStreet = labeledText(page, "Straße:");
-		mgrCity = labeledField(page, "Stadt:");
-		mgrState = labeledField(page, "Bundesland/Kanton:");
-		mgrCountry = labeledField(page, "Land/Region:");
-		mgrPhone = labeledField(page, "Rufnummer:");
-		mgrFax = labeledField(page, "Faxnummer:");
-		for (FXTextField* f : { mgrOffice, mgrCity, mgrState, mgrCountry, mgrPhone, mgrFax }) f->setEditable(FALSE);
-		mgrStreet->setEditable(FALSE);
-	}
-
-	void showManager() {
-		std::multimap<std::string, std::string> rec;
-		if (!managerDn.empty()) {
-			auto recs = ldapiSearch(managerDn, "base", "(objectClass=*)",
-			                        { "physicalDeliveryOfficeName", "streetAddress", "l", "st", "co", "telephoneNumber", "facsimileTelephoneNumber" });
-			if (!recs.empty()) rec = recs[0];
-		}
-		mgrName->setText(managerDn.empty() ? FXString() : dnLeafName(managerDn) + " (" + dnToFolder(managerDn) + ")");
-		mgrOffice->setText(ldifFirst(rec, "physicalDeliveryOfficeName").c_str());
-		mgrStreet->setText(crlfToLf(ldifFirst(rec, "streetAddress")).c_str());
-		mgrCity->setText(ldifFirst(rec, "l").c_str());
-		mgrState->setText(ldifFirst(rec, "st").c_str());
-		mgrCountry->setText(ldifFirst(rec, "co").c_str());
-		mgrPhone->setText(ldifFirst(rec, "telephoneNumber").c_str());
-		mgrFax->setText(ldifFirst(rec, "facsimileTelephoneNumber").c_str());
-	}
-
-	long onManagerChange(FXObject*, FXSelector, void*) {
-		getApp()->beginWaitCursor();
-		std::vector<GroupEntry> users = listAllUsersAsEntries();
-		getApp()->endWaitCursor();
-		GroupPickerDialog dlg(this, domain.realm, users, "Benutzer auswählen", resico_user);
-		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-		if (dlg.getResult().empty()) return 1;
-		if (dlg.getResult().size() > 1) {
-			FXMessageBox::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden.");
-			return 1;
-		}
-		managerDn = users[dlg.getResult()[0]].dn;
-		showManager();
-		return 1;
-	}
-
-	long onManagerClear(FXObject*, FXSelector, void*) {
-		managerDn.clear();
-		showManager();
-		return 1;
-	}
-
-	long onManagerProps(FXObject*, FXSelector, void*) {
-		if (managerDn.empty()) return 1;
-		std::string sam = ldapiReadAttr(managerDn, "sAMAccountName");
-		if (sam.empty()) return 1;
-		DirObject obj;
-		obj.name = dnLeafName(managerDn);
-		obj.accountName = sam.c_str();
-		std::string suffix = "," + std::string(domain.baseDN.text());
-		std::string rel = managerDn;
-		if (lowerCopy(rel).size() > suffix.size() && lowerCopy(rel).compare(rel.size() - suffix.size(), suffix.size(), lowerCopy(suffix)) == 0)
-			rel = rel.substr(0, rel.size() - suffix.size());
-		obj.dn = rel.c_str();
-		obj.type = OBJ_USER;
-		UserPropertiesDialog dlg(this, domain, obj);
-		dlg.execute(PLACEMENT_OWNER);
-		showManager();
-		return 1;
-	}
-
-	long onUpdManagerButtons(FXObject* sender, FXSelector, void*) {
-		sender->handle(this, FXSEL(SEL_COMMAND, managerDn.empty() ? ID_DISABLE : ID_ENABLE), NULL);
-		return 1;
+		managedBy = new ManagedByPanel(tabs, domain, origManagerDn);
 	}
 
 	// ---- Gruppenrichtlinie -------------------------------------------
@@ -7420,15 +7736,15 @@ public:
 	bool isDirty() {
 		std::string ldif;
 		collectGeneralChanges(ldif);
-		return !ldif.empty() || lowerCopy(managerDn) != lowerCopy(origManagerDn) || blockInheritance->getCheck() != origBlock;
+		return !ldif.empty() || lowerCopy(managedBy->getManagerDn()) != lowerCopy(origManagerDn) || blockInheritance->getCheck() != origBlock;
 	}
 
 	bool apply() {
 		std::string ldif;
 		collectGeneralChanges(ldif);
-		if (lowerCopy(managerDn) != lowerCopy(origManagerDn)) {
+		if (lowerCopy(managedBy->getManagerDn()) != lowerCopy(origManagerDn)) {
 			ldif += "replace: managedBy\n";
-			if (!managerDn.empty()) ldif += ldifAttrLine("managedBy", managerDn);
+			if (!managedBy->getManagerDn().empty()) ldif += ldifAttrLine("managedBy", managedBy->getManagerDn());
 			ldif += "-\n";
 		}
 		if (blockInheritance->getCheck() != origBlock)
@@ -7451,7 +7767,7 @@ public:
 			std::string cname; int cnum;
 			origCountry = selectedCountryCode(cname, cnum);
 		}
-		origManagerDn = managerDn;
+		origManagerDn = managedBy->getManagerDn();
 		origBlock = blockInheritance->getCheck();
 		return true;
 	}
@@ -7472,11 +7788,6 @@ FXDEFMAP(OUPropertiesDialog) OUPropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_OK, OUPropertiesDialog::onOk),
 	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_APPLY, OUPropertiesDialog::onApply),
 	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_APPLY, OUPropertiesDialog::onUpdApply),
-	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_MGR_CHANGE, OUPropertiesDialog::onManagerChange),
-	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_MGR_CLEAR, OUPropertiesDialog::onManagerClear),
-	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_MGR_CLEAR, OUPropertiesDialog::onUpdManagerButtons),
-	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_MGR_PROPS, OUPropertiesDialog::onManagerProps),
-	FXMAPFUNC(SEL_UPDATE, OUPropertiesDialog::ID_MGR_PROPS, OUPropertiesDialog::onUpdManagerButtons),
 	FXMAPFUNC(SEL_DOUBLECLICKED, OUPropertiesDialog::ID_LINKLIST, OUPropertiesDialog::onLinkDoubleClick),
 	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_NEW, OUPropertiesDialog::onGpoNew),
 	FXMAPFUNC(SEL_COMMAND, OUPropertiesDialog::ID_GPO_ADD, OUPropertiesDialog::onGpoAdd),
@@ -8066,10 +8377,15 @@ long DsAdminWindow::onProperties(FXObject*, FXSelector, void*) {
 long DsAdminWindow::onGroupProperties(FXObject*, FXSelector, void*) {
 	int idx = list->getCurrentItem();
 	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
-	DirObject& obj = currentObjects[idx];
+	DirObject obj = currentObjects[idx];
 	if (obj.type != OBJ_GROUP) return 1;
-	GroupMembersDialog dlg(this, obj.accountName);
+	getApp()->beginWaitCursor();
+	GroupPropertiesDialog dlg(this, domain, obj);
+	getApp()->endWaitCursor();
 	dlg.execute(PLACEMENT_OWNER);
+	// Auch nach "Abbrechen" neu laden -- "Übernehmen" kann vorher schon
+	// geschrieben haben.
+	onRefresh(NULL, 0, NULL);
 	return 1;
 }
 
