@@ -98,6 +98,35 @@ installieren soll. Die Feature-Liste kommt aus der Feature-Tabelle der
 Summary-Information-Stream (`msiinfo suminfo`) statt aus einer selbst
 erzeugten GUID, und Sprache sowie UpgradeCode aus der Property-Tabelle.
 
+## AD-Objekte der Softwareinstallation
+
+Auch diese Objekte sind gegen einen echten Windows-2000-Server
+abgeglichen (vollständiger `ldifde`-Export eines zugewiesenen Pakets).
+Die aus [MS-GPSI] abgeleitete Fassung wich deutlich ab:
+
+| | vorher | echtes Vorbild |
+|---|---|---|
+| CN des Pakets | `{GUID}` groß, mit Klammern | GUID **klein, ohne Klammern** |
+| `packageFlags` (zugewiesen) | `0x810` | **`0xA0084C70`** |
+| `versionNumberHi/Lo` | 0 / 0 | Haupt- / Nebenversion |
+| `machineArchitecture` | 0 | **1282** |
+| `revision` | 1 | 0 |
+| `installUiLevel` | fehlte | 3 |
+| `upgradeProductCode` | fehlte | binäre GUID |
+| `showInAdvancedViewOnly` | fehlte | TRUE |
+| `lastUpdateSequence` | fehlte | Zeitstempel |
+| Class Store: `extensionName` | fehlte | `Software` |
+| Class Store: `displayName` | fehlte | `LDAP://<GPO-DN>` |
+| Class Store: `appSchemaVersion` | fehlte | 1740 |
+
+`CN=Packages` ist auch auf dem echten Server ein `classStore`, nicht
+ein `container` -- das deckt sich mit dem Schema.
+
+Nicht gegengeprüft ist der Wert von `packageFlags` für
+**veröffentlichte** Pakete: das Vorbild enthielt nur zugewiesene. Dort
+wird das Assigned-Bit gegen das Published-Bit getauscht, was eine
+Annahme bleibt.
+
 ## Weitere Gruppenrichtlinien-Erweiterungen
 
 Neben den Administrativen Vorlagen sind drei weitere

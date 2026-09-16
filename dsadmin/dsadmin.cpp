@@ -1006,6 +1006,28 @@ static std::string generateNewGuidUpper() {
 	return "{" + out + "}";
 }
 
+// Der CN eines packageRegistration-Objekts ist auf einem echten
+// Windows-2000-Server eine GUID in Kleinbuchstaben OHNE geschweifte
+// Klammern -- im Gegensatz zum Dateinamen der .aas, der sie hat.
+static std::string generateNewGuidLowerPlain() {
+	std::string out;
+	runAsRootCaptured({ FXString("cat"), FXString("/proc/sys/kernel/random/uuid") }, out);
+	while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+	for (auto& c : out) c = tolower((unsigned char)c);
+	return out;
+}
+
+// Zeitstempel im Format, das Windows fuer lastUpdateSequence benutzt.
+static std::string updateSequenceStamp() {
+	time_t t = time(NULL);
+	struct tm lt;
+	localtime_r(&t, &lt);
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%04d%02d%02d%02d%02d%02d",
+	         lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, lt.tm_sec);
+	return buf;
+}
+
 // Haengt ein CSE+Werkzeug-GUID-Paar an gPCMachineExtensionNames/
 // gPCUserExtensionNames an, falls es dort noch nicht steht -- sonst
 // wuerde ein echter Client die jeweilige Erweiterung nie aufrufen,
@@ -1353,10 +1375,19 @@ static bool setFolderRedirectionPaths(FXWindow* owner, const DomainInfo& domain,
 // angegebenen skopierten GPO-DN an, falls sie noch nicht existieren.
 static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, const std::string& scopedGpoDn, std::string& log, FXString& errorMsg) {
 	std::string classStoreDn = "CN=Class Store," + scopedGpoDn;
+	// Attribute nach dem Vorbild eines echten Windows-2000-Servers:
+	// ohne extensionName/displayName/showInAdvancedViewOnly findet der
+	// Client den Store nicht als Softwareablage wieder.
+	std::string gpoDnForDisplay = scopedGpoDn.substr(scopedGpoDn.find(',') + 1); // ohne "CN=Machine,"
 	std::string ldif1 = "dn: " + classStoreDn + "\n"
 	                     "changetype: add\n"
 	                     "objectClass: classStore\n"
-	                     "description: Application Store\n";
+	                     "description: Application Store\n"
+	                     "extensionName: Software\n"
+	                     "appSchemaVersion: 1740\n"
+	                     "displayName: LDAP://" + gpoDnForDisplay + "\n"
+	                     "showInAdvancedViewOnly: TRUE\n"
+	                     "lastUpdateSequence: " + updateSequenceStamp() + "\n";
 	if (!runLdapChange(owner, realm, ldif1, true, log, errorMsg)) return false;   // CN=Class Store
 
 	// "CN=Packages" wird ebenfalls als classStore angelegt. Das ist keine
@@ -1370,7 +1401,8 @@ static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, 
 	std::string ldif2 = "dn: " + packagesDn + "\n"
 	                     "changetype: add\n"
 	                     "objectClass: classStore\n"
-	                     "description: Application Packages\n";
+	                     "description: Application Packages\n"
+	                     "showInAdvancedViewOnly: TRUE\n";
 	if (!runLdapChange(owner, realm, ldif2, true, log, errorMsg)) return false;   // CN=Packages
 
 	return true;
@@ -1494,6 +1526,9 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 	else
 		log += "Features aus der .msi: " + std::to_string(info.features.size()) + "\n";
 
+	// CN des Objekts: Kleinbuchstaben ohne Klammern (wie auf einem echten
+	// Server). Der Dateiname der .aas behaelt dagegen die Klammerform.
+	std::string packageCn = generateNewGuidLowerPlain();
 	std::string packageGuid = generateNewGuidUpper();
 	FXString realmLower = domain.realm; realmLower.lower();
 	std::string scope = params.assignedPerMachine ? "Machine" : "User";
@@ -1501,7 +1536,7 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 	std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
 	std::string classStoreDn = "CN=Class Store," + scopedGpoDn;
 	std::string packagesDn = "CN=Packages," + classStoreDn;
-	std::string packageDn = "CN=" + packageGuid + "," + packagesDn;
+	std::string packageDn = "CN=" + packageCn + "," + packagesDn;
 
 	if (!ensureClassStoreAndPackages(owner, domain.realm, scopedGpoDn, log, errorMsg)) return false;
 
@@ -1522,12 +1557,19 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 	std::string msiScriptPath = "\\\\" + std::string(realmLower.text()) + "\\sysvol\\" + std::string(realmLower.text()) +
 	                             "\\Policies\\" + std::string(gpoGuid.text()) + "\\" + scope + "\\Applications\\" + packageGuid + ".aas";
 
-	std::string msiScriptName = params.assignedPerMachine ? "A" : (params.published ? "P" : "A");
-	// packageFlags: Bit 0x10 MUSS immer gesetzt sein; dazu Assigned (0x800)
-	// oder Published (0x8), je nach Bereitstellungsart.
-	uint32_t packageFlags = 0x10;
-	if (!params.assignedPerMachine && params.published) packageFlags |= 0x8; // ACTFLG_Published
-	else packageFlags |= 0x800; // ACTFLG_Assigned
+	std::string msiScriptName = params.published ? "P" : "A";
+
+	// packageFlags: der Wert stammt nicht aus einer Auslegung der
+	// Spezifikation, sondern aus einem echten, von Windows 2000
+	// erzeugten Objekt fuer ein zugewiesenes Paket: 0xA0084C70. Mein
+	// frueher aus [MS-GPSI] abgeleiteter Wert war 0x810 -- also fast
+	// nichts davon.
+	uint32_t packageFlags = 0xA0084C70;
+	if (params.published) packageFlags = (packageFlags & ~0x800u) | 0x8u; // nicht gegengeprueft
+
+	// versionNumberHi/Lo sind schlicht Haupt- und Nebenversion.
+	int verHi = 0, verLo = 0;
+	sscanf(info.versionString.c_str(), "%d.%d", &verHi, &verLo);
 
 	std::string ldif = "dn: " + packageDn + "\n"
 	                    "changetype: add\n"
@@ -1540,11 +1582,18 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 	                    "msiScriptPath: " + msiScriptPath + "\n"
 	                    "msiFileList: 0:" + params.msiUncPath + "\n"
 	                    "productCode:: " + guidStringToBase64Binary(info.productCodeGuid) + "\n"
-	                    "versionNumberHi: 0\n"
-	                    "versionNumberLo: 0\n"
-	                    "revision: 1\n"
+	                    "versionNumberHi: " + std::to_string(verHi) + "\n"
+	                    "versionNumberLo: " + std::to_string(verLo) + "\n"
+	                    "revision: 0\n"
 	                    "localeID: " + std::to_string(info.langId) + "\n"
-	                    "machineArchitecture: 0\n";
+	                    "installUiLevel: 3\n"
+	                    "showInAdvancedViewOnly: TRUE\n"
+	                    "lastUpdateSequence: " + updateSequenceStamp() + "\n"
+	                    // 1282 ist der Wert, den ein echter Server fuer x86 schreibt.
+	                    "machineArchitecture: 1282\n";
+	if (!info.upgradeCodeGuid.empty())
+		ldif += "upgradeProductCode:: " + guidStringToBase64Binary(info.upgradeCodeGuid) + "\n";
+	if (props.count("ARPURLINFOABOUT")) ldif += "url: " + props["ARPURLINFOABOUT"] + "\n";
 	if (props.count("Manufacturer")) ldif += "vendor: " + props["Manufacturer"] + "\n";
 	if (!runLdapChange(owner, domain.realm, ldif, true, log, errorMsg)) return false;
 
