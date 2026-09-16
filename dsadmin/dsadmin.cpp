@@ -42,6 +42,33 @@ static std::string lowerCopy(const std::string& s) {
 	return r;
 }
 
+// Sortierung wie im deutschen Windows: Umlaute zaehlen als Grundbuchstabe
+// (Ä wie A, ß wie ss), Gross-/Kleinschreibung egal -- unabhaengig davon,
+// welche Sprache der Prozess eingestellt hat.
+static std::string germanSortKey(const std::string& s) {
+	std::string out;
+	for (size_t i = 0; i < s.size(); i++) {
+		unsigned char c = s[i];
+		if (c == 0xC3 && i + 1 < s.size()) {
+			unsigned char d = s[i + 1];
+			const char* rep = nullptr;
+			switch (d) {
+				case 0x84: case 0xA4: rep = "a"; break;   // Ä ä
+				case 0x96: case 0xB6: rep = "o"; break;   // Ö ö
+				case 0x9C: case 0xBC: rep = "u"; break;   // Ü ü
+				case 0x9F: rep = "ss"; break;             // ß
+			}
+			if (rep) { out += rep; out += '\x7f'; i++; continue; } // \x7f: bei Gleichstand nach dem Grundbuchstaben
+		}
+		out += (char)std::tolower(c);
+	}
+	return out;
+}
+
+static bool germanLess(const std::string& a, const std::string& b) {
+	return germanSortKey(a) < germanSortKey(b);
+}
+
 static RegLookup buildRegLookup(const RegPolFile& file) {
 	RegLookup lk;
 	for (auto& e : file.entries) {
@@ -3368,340 +3395,107 @@ struct PolHive {
 	std::string polPath;
 };
 
-class AdmEditorDialog : public FXDialogBox {
-	FXDECLARE(AdmEditorDialog)
-private:
-	FXTreeList* tree;
-	FXIconList* list;
-	PolHive machineHive, userHive;
-	std::string gptIniPath;
-	std::string gpoObjectDn;   // fuer das Hochzaehlen von versionNumber in AD
-	FXString realm;
-	std::map<FXTreeItem*, std::tuple<AdmCategory*, std::vector<const AdmCategory*>, PolHive*>> itemInfo;
-	std::vector<AdmPolicy*> currentPolicies;
-	std::vector<std::string> currentEffectiveKeys;
-	PolHive* currentHive = NULL;
-	std::map<AdmPolicy*, PendingEdit> edits;
-	std::map<AdmPolicy*, PolHive*> editHive; // welcher Zweig zu jedem Eintrag in "edits" gehoert
-	FXIcon *icoFolder, *icoPolicy;
-protected:
-	AdmEditorDialog() {}
-public:
-	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_SAVE, ID_SET_ENABLED, ID_SET_DISABLED, ID_SET_NOTCONF };
+static const char* REGISTRY_CSE_GUID = "{35378EAC-683F-11D2-A89A-00C04FBBCFA2}";
+static const char* REGISTRY_TOOL_GUID_MACHINE = "{0F6B957D-509E-11D1-A7CC-0000F87571E3}";
+static const char* REGISTRY_TOOL_GUID_USER = "{0F6B957E-509E-11D1-A7CC-0000F87571E3}";
 
-	void collectCategoryChildren(FXTreeItem* parentItem, std::vector<AdmCategory>& cats, std::vector<const AdmCategory*> chain, PolHive* hive) {
-		for (auto& cat : cats) {
-			FXTreeItem* item = tree->appendItem(parentItem, cat.label.c_str(), icoFolder, icoFolder);
-			std::vector<const AdmCategory*> newChain = chain;
-			newChain.push_back(&cat);
-			itemInfo[item] = { &cat, newChain, hive };
-			collectCategoryChildren(item, cat.subCategories, newChain, hive);
+static const char* admStateLabel(PolicyState st) {
+	return st == POLSTATE_ENABLED ? "Aktiviert" : st == POLSTATE_DISABLED ? "Deaktiviert" : "Nicht konfiguriert";
+}
+
+// Aktuell in der Registry.pol gespeicherter Wert eines Parts (fuer die
+// Vorbelegung des Bearbeiten-Dialogs).
+static std::string readStoredPartValue(const PolHive& hive, const std::string& key, const std::string& vn) {
+	auto it = hive.lookup.values.find({ lowerCopy(key), lowerCopy(vn) });
+	if (it == hive.lookup.values.end()) return "";
+	if (it->second.type == REG_TYPE_DWORD && it->second.data.size() >= 4) {
+		uint32_t v = (uint32_t)it->second.data[0] | ((uint32_t)it->second.data[1] << 8)
+		           | ((uint32_t)it->second.data[2] << 16) | ((uint32_t)it->second.data[3] << 24);
+		return std::to_string(v);
+	} else if (it->second.type == REG_TYPE_SZ) {
+		return std::string((const char*)it->second.data.data(), it->second.data.size());
+	}
+	return "";
+}
+
+// Wendet eine Richtlinienaenderung auf die Eintraege einer Registry.pol
+// an: alte Werte der Richtlinie entfernen, neue anhaengen bzw. bei
+// Deaktiviert/Nicht konfiguriert vorher gesetzte Parts aktiv loeschen.
+static void applyAdmPolicyEdit(std::vector<RegPolEntry>& finalEntries, const RegLookup& lookup,
+                               const AdmPolicy* pol, const PendingEdit& ed) {
+	auto removeEntry = [&](const std::string& key, const std::string& valuename) {
+		std::string lk = lowerCopy(key), lv = lowerCopy(valuename);
+		finalEntries.erase(std::remove_if(finalEntries.begin(), finalEntries.end(), [&](const RegPolEntry& e) {
+			return lowerCopy(e.key) == lk && lowerCopy(e.valuename) == lv;
+		}), finalEntries.end());
+	};
+	std::string key = ed.effectiveKey;
+	if (pol->hasValueOnOff) {
+		removeEntry(key, pol->valuename);
+		if (ed.state == POLSTATE_ENABLED) {
+			uint32_t v = 0; try { v = (uint32_t)std::stol(pol->valueOn.empty() ? "1" : pol->valueOn); } catch (...) {}
+			finalEntries.push_back(makeRegDwordEntry(key, pol->valuename, v));
+		} else if (ed.state == POLSTATE_DISABLED) {
+			uint32_t v = 0; try { v = (uint32_t)std::stol(pol->valueOff.empty() ? "0" : pol->valueOff); } catch (...) {}
+			finalEntries.push_back(makeRegDwordEntry(key, pol->valuename, v));
 		}
+		// POLSTATE_NOT_CONFIGURED: Zeile bleibt entfernt, keine neue.
 	}
-
-	const char* stateLabel(PolicyState st) {
-		return st == POLSTATE_ENABLED ? "Aktiviert" : st == POLSTATE_DISABLED ? "Deaktiviert" : "Nicht konfiguriert";
-	}
-
-	// Liest den aktuell in der Registry.pol gespeicherten Wert eines Parts
-	// (fuer die Anzeige beim Oeffnen des Bearbeiten-Dialogs).
-	std::string readStoredPartValue(PolHive* hive, const std::string& key, const std::string& vn) {
-		auto it = hive->lookup.values.find({ lowerCopy(key), lowerCopy(vn) });
-		if (it == hive->lookup.values.end()) return "";
-		if (it->second.type == REG_TYPE_DWORD && it->second.data.size() >= 4) {
-			uint32_t v = (uint32_t)it->second.data[0] | ((uint32_t)it->second.data[1] << 8)
-			           | ((uint32_t)it->second.data[2] << 16) | ((uint32_t)it->second.data[3] << 24);
-			return std::to_string(v);
-		} else if (it->second.type == REG_TYPE_SZ) {
-			return std::string((const char*)it->second.data.data(), it->second.data.size());
-		}
-		return "";
-	}
-
-	void showCategoryPolicies(AdmCategory* cat, const std::vector<const AdmCategory*>& chain, PolHive* hive) {
-		list->clearItems();
-		currentPolicies.clear();
-		currentEffectiveKeys.clear();
-		currentHive = hive;
-		for (auto& pol : cat->policies) {
-			std::string key = resolveEffectiveKey(pol, chain);
-			PolicyState st = edits.count(&pol) ? edits[&pol].state : determinePolicyState(pol, key, hive->lookup);
-			FXString txt = FXString(pol.label.c_str()) + "\t" + stateLabel(st);
-			list->appendItem(txt, icoPolicy, icoPolicy);
-			currentPolicies.push_back(&pol);
-			currentEffectiveKeys.push_back(key);
-		}
-	}
-
-	long onTreeChanged(FXObject*, FXSelector, void*) {
-		FXTreeItem* cur = tree->getCurrentItem();
-		if (!cur || !itemInfo.count(cur)) return 1;
-		auto& info = itemInfo[cur];
-		showCategoryPolicies(std::get<0>(info), std::get<1>(info), std::get<2>(info));
-		return 1;
-	}
-
-	long onListDoubleClick(FXObject*, FXSelector, void*) {
-		int idx = list->getCurrentItem();
-		if (idx < 0 || idx >= (int)currentPolicies.size()) return 1;
-		AdmPolicy* pol = currentPolicies[idx];
-		std::string key = currentEffectiveKeys[idx];
-		PolHive* hive = currentHive;
-		PolicyState curState = edits.count(pol) ? edits[pol].state : determinePolicyState(*pol, key, hive->lookup);
-		std::vector<std::string> curPartValues;
-		if (edits.count(pol)) {
-			curPartValues = edits[pol].partValues;
-		} else {
-			for (auto& part : pol->parts) {
-				std::string vn = !part.valuename.empty() ? part.valuename : pol->valuename;
-				curPartValues.push_back(readStoredPartValue(hive, key, vn));
-			}
-		}
-
-		PolicyEditDialog dlg(this, *pol, curState, curPartValues);
-		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-
-		PendingEdit ed;
-		ed.state = dlg.getState();
-		ed.partValues = dlg.getPartValues();
-		ed.effectiveKey = key;
-		edits[pol] = ed;
-		editHive[pol] = hive;
-
-		FXString txt = FXString(pol->label.c_str()) + "\t" + stateLabel(ed.state);
-		list->setItemText(idx, txt);
-		return 1;
-	}
-
-	// Setzt alle markierten Richtlinien der aktuellen Kategorie auf
-	// denselben Status -- derselbe Weg wie beim Einzeldialog, nur eben
-	// fuer mehrere Eintraege auf einmal. Gespeichert wird erst beim
-	// Klick auf "Speichern".
-	long onSetSelectionState(FXObject*, FXSelector sel, void*) {
-		if (!currentHive) return 1;
-		FXuint id = FXSELID(sel);
-		PolicyState target = (id == ID_SET_ENABLED) ? POLSTATE_ENABLED
-		                   : (id == ID_SET_DISABLED) ? POLSTATE_DISABLED
-		                   : POLSTATE_NOT_CONFIGURED;
-
-		int applied = 0, skipped = 0;
-		int n = list->getNumItems();
-		if (n > (int)currentPolicies.size()) n = (int)currentPolicies.size();
-		for (int i = 0; i < n; i++) {
-			if (!list->isItemSelected(i)) continue;
-			AdmPolicy* pol = currentPolicies[i];
-			// "Aktiviert" braucht bei Richtlinien mit Eingabefeldern
-			// konkrete Werte -- die kann eine Sammelaktion nicht raten,
-			// also bleiben die dem Einzeldialog vorbehalten.
-			if (target == POLSTATE_ENABLED && !pol->parts.empty()) { skipped++; continue; }
-
-			PendingEdit ed;
-			ed.state = target;
-			ed.effectiveKey = currentEffectiveKeys[i];
-			if (edits.count(pol)) {
-				ed.partValues = edits[pol].partValues;
-			} else {
-				for (auto& part : pol->parts) {
-					std::string vn = !part.valuename.empty() ? part.valuename : pol->valuename;
-					ed.partValues.push_back(readStoredPartValue(currentHive, ed.effectiveKey, vn));
+	for (size_t i = 0; i < pol->parts.size(); i++) {
+		auto& part = pol->parts[i];
+		std::string vn = !part.valuename.empty() ? part.valuename : pol->valuename;
+		std::string pv = i < ed.partValues.size() ? ed.partValues[i] : "";
+		removeEntry(key, vn);
+		removeEntry(key, "**del." + vn);
+		bool wasConfigured = lookup.values.count({ lowerCopy(key), lowerCopy(vn) }) > 0;
+		if (ed.state == POLSTATE_ENABLED) {
+			switch (part.type) {
+				case ADMPART_CHECKBOX:
+				case ADMPART_NUMERIC: {
+					uint32_t v = 0; try { v = (uint32_t)std::stol(pv.empty() ? "0" : pv); } catch (...) {}
+					finalEntries.push_back(makeRegDwordEntry(key, vn, v));
+					break;
 				}
-			}
-			edits[pol] = ed;
-			editHive[pol] = currentHive;
-			list->setItemText(i, FXString(pol->label.c_str()) + "\t" + stateLabel(target));
-			applied++;
-		}
-
-		if (applied == 0 && skipped == 0) {
-			FXMessageBox::information(this, MBOX_OK, "Keine Auswahl",
-				"Bitte zuerst eine oder mehrere Richtlinien in der Liste markieren.");
-		} else if (skipped > 0) {
-			char buf[320];
-			snprintf(buf, sizeof(buf),
-				"%d Richtlinie(n) auf \"Aktiviert\" gesetzt.\n\n"
-				"%d Richtlinie(n) mit Eingabefeldern wurden übersprungen --\n"
-				"diese bitte einzeln per Doppelklick aktivieren, damit die\n"
-				"Werte gesetzt werden können.", applied, skipped);
-			FXMessageBox::information(this, MBOX_OK, "Sammeländerung", "%s", buf);
-		}
-		return 1;
-	}
-
-	// Baut die finalen Eintraege eines Zweigs (Computer/Benutzer) aus
-	// dessen Original-Registry.pol + allen Sitzungs-Aenderungen, die zu
-	// diesem Zweig gehoeren.
-	std::vector<RegPolEntry> buildFinalEntries(PolHive* hive) {
-		std::vector<RegPolEntry> finalEntries = hive->file.entries;
-		auto removeEntry = [&](const std::string& key, const std::string& valuename) {
-			std::string lk = lowerCopy(key), lv = lowerCopy(valuename);
-			finalEntries.erase(std::remove_if(finalEntries.begin(), finalEntries.end(), [&](const RegPolEntry& e) {
-				return lowerCopy(e.key) == lk && lowerCopy(e.valuename) == lv;
-			}), finalEntries.end());
-		};
-
-		for (auto& kv : edits) {
-			AdmPolicy* pol = kv.first;
-			if (editHive[pol] != hive) continue;
-			PendingEdit& ed = kv.second;
-			std::string key = ed.effectiveKey;
-			if (pol->hasValueOnOff) {
-				removeEntry(key, pol->valuename);
-				if (ed.state == POLSTATE_ENABLED) {
-					uint32_t v = 0; try { v = (uint32_t)std::stol(pol->valueOn.empty() ? "1" : pol->valueOn); } catch (...) {}
-					finalEntries.push_back(makeRegDwordEntry(key, pol->valuename, v));
-				} else if (ed.state == POLSTATE_DISABLED) {
-					uint32_t v = 0; try { v = (uint32_t)std::stol(pol->valueOff.empty() ? "0" : pol->valueOff); } catch (...) {}
-					finalEntries.push_back(makeRegDwordEntry(key, pol->valuename, v));
-				}
-				// POLSTATE_NOT_CONFIGURED: Zeile bleibt entfernt, keine neue.
-			}
-			for (size_t i = 0; i < pol->parts.size(); i++) {
-				auto& part = pol->parts[i];
-				std::string vn = !part.valuename.empty() ? part.valuename : pol->valuename;
-				std::string pv = i < ed.partValues.size() ? ed.partValues[i] : "";
-				removeEntry(key, vn);
-				removeEntry(key, "**del." + vn);
-				bool wasConfigured = hive->lookup.values.count({ lowerCopy(key), lowerCopy(vn) }) > 0;
-				if (ed.state == POLSTATE_ENABLED) {
-					switch (part.type) {
-						case ADMPART_CHECKBOX:
-						case ADMPART_NUMERIC: {
-							uint32_t v = 0; try { v = (uint32_t)std::stol(pv.empty() ? "0" : pv); } catch (...) {}
-							finalEntries.push_back(makeRegDwordEntry(key, vn, v));
-							break;
-						}
-						case ADMPART_EDITTEXT:
-							finalEntries.push_back(makeRegSzEntry(key, vn, pv));
-							break;
-						case ADMPART_DROPDOWNLIST:
-						case ADMPART_COMBOBOX: {
-							bool isNum = false;
-							for (auto& it2 : part.items) if (it2.value == pv) isNum = it2.isNumeric;
-							if (isNum) {
-								uint32_t v = 0; try { v = (uint32_t)std::stol(pv.empty() ? "0" : pv); } catch (...) {}
-								finalEntries.push_back(makeRegDwordEntry(key, vn, v));
-							} else {
-								finalEntries.push_back(makeRegSzEntry(key, vn, pv));
-							}
-							break;
-						}
-						default: break;
+				case ADMPART_EDITTEXT:
+					finalEntries.push_back(makeRegSzEntry(key, vn, pv));
+					break;
+				case ADMPART_DROPDOWNLIST:
+				case ADMPART_COMBOBOX: {
+					bool isNum = false;
+					for (auto& it2 : part.items) if (it2.value == pv) isNum = it2.isNumeric;
+					if (isNum) {
+						uint32_t v = 0; try { v = (uint32_t)std::stol(pv.empty() ? "0" : pv); } catch (...) {}
+						finalEntries.push_back(makeRegDwordEntry(key, vn, v));
+					} else {
+						finalEntries.push_back(makeRegSzEntry(key, vn, pv));
 					}
-				} else if (wasConfigured) {
-					// Deaktiviert ODER (wieder) Nicht konfiguriert, aber vorher
-					// gesetzt -- aktiv loeschen, damit ein Client den Wert
-					// tatsaechlich entfernt statt ihn stehen zu lassen.
-					finalEntries.push_back(makeDeleteValueEntry(key, vn));
+					break;
 				}
+				default: break;
 			}
+		} else if (wasConfigured) {
+			// Deaktiviert ODER (wieder) Nicht konfiguriert, aber vorher
+			// gesetzt -- aktiv loeschen, damit ein Client den Wert
+			// tatsaechlich entfernt statt ihn stehen zu lassen.
+			finalEntries.push_back(makeDeleteValueEntry(key, vn));
 		}
-		return finalEntries;
 	}
+}
 
-	bool saveHive(PolHive* hive, std::string& errorMsg) {
-		std::vector<RegPolEntry> finalEntries = buildFinalEntries(hive);
-		FXString tmpPath = "/tmp/ice2k-regpol-tmp";
-		if (!writeRegPolFile(tmpPath.text(), finalEntries, errorMsg)) return false;
-		runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(hive->polPath.substr(0, hive->polPath.find_last_of('/')).c_str()) });
-		int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(hive->polPath.c_str()) });
-		runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
-		if (rc != 0) { errorMsg = "Konnte " + hive->polPath + " nicht schreiben (Root-Rechte?)."; return false; }
-		hive->file = parseRegPolFile(hive->polPath);
-		hive->lookup = buildRegLookup(hive->file);
-		return true;
+// Registry.pol als root lesen -- im SYSVOL darf der angemeldete Benutzer
+// in der Regel nicht lesen. Fehlende Datei = leer.
+static RegPolFile readRegPolAsRoot(const std::string& path) {
+	std::string raw;
+	if (runAsRootCaptured({ FXString("cat"), FXString(path.c_str()) }, raw) != 0) return RegPolFile();
+	const char* tmp = "/tmp/ice2k-regpol-read";
+	{
+		std::ofstream out(tmp, std::ios::binary);
+		out.write(raw.data(), (std::streamsize)raw.size());
 	}
-
-	long onSave(FXObject*, FXSelector, void*) {
-		bool touchedMachine = false, touchedUser = false;
-		for (auto& kv : editHive) {
-			if (kv.second == &machineHive) touchedMachine = true;
-			if (kv.second == &userHive) touchedUser = true;
-		}
-		if (!touchedMachine && !touchedUser) {
-			FXMessageBox::information(this, MBOX_OK, "Nichts zu speichern", "Es wurden keine Richtlinien geändert.");
-			return 1;
-		}
-		std::string errorMsg;
-		if (touchedMachine && !saveHive(&machineHive, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.c_str());
-			return 1;
-		}
-		if (touchedUser && !saveHive(&userHive, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.c_str());
-			return 1;
-		}
-		std::string versionLog;
-		bumpGpoVersion(this, realm, gpoObjectDn, touchedMachine, touchedUser, versionLog);
-
-		edits.clear();
-		editHive.clear();
-		FXTreeItem* cur = tree->getCurrentItem();
-		if (cur && itemInfo.count(cur)) {
-			auto& info = itemInfo[cur];
-			showCategoryPolicies(std::get<0>(info), std::get<1>(info), std::get<2>(info));
-		}
-
-		FXMessageBox::information(this, MBOX_OK, "Gespeichert", "Die Gruppenrichtlinie wurde gespeichert.");
-		return 1;
-	}
-
-	AdmEditorDialog(FXWindow* owner, std::vector<AdmCategory>&& machineCats, std::vector<AdmCategory>&& userCats,
-	                const std::string& machinePolPath, const std::string& userPolPath, const std::string& gptIniPath_,
-	                const std::string& gpoObjectDn_, const FXString& realm_)
-		: FXDialogBox(owner, "Gruppenrichtlinienobjekt-Editor", DECOR_ALL, 0,0,760,480),
-		  gptIniPath(gptIniPath_), gpoObjectDn(gpoObjectDn_), realm(realm_) {
-		machineHive.categories = std::move(machineCats);
-		machineHive.polPath = machinePolPath;
-		machineHive.file = parseRegPolFile(machinePolPath); // leer/fehlend ist okay -- noch keine Einstellungen
-		machineHive.lookup = buildRegLookup(machineHive.file);
-
-		userHive.categories = std::move(userCats);
-		userHive.polPath = userPolPath;
-		userHive.file = parseRegPolFile(userPolPath);
-		userHive.lookup = buildRegLookup(userHive.file);
-
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
-		FXSplitter* splitter = new FXSplitter(main, LAYOUT_FILL_X | LAYOUT_FILL_Y | SPLITTER_TRACKING);
-		FXPacker* treeframe = new FXPacker(splitter, FRAME_NORMAL | LAYOUT_FILL_Y, 0,0,280,0, 0,0,0,0);
-		tree = new FXTreeList(treeframe, this, ID_TREE,
-		                       SCROLLERS_DONT_TRACK | FRAME_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y |
-		                       TREELIST_SHOWS_BOXES | TREELIST_SHOWS_LINES | TREELIST_BROWSESELECT | TREELIST_ROOT_BOXES);
-		FXPacker* listframe = new FXPacker(splitter, FRAME_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
-		list = new FXIconList(listframe, this, ID_LIST,
-		                       ICONLIST_DETAILED | ICONLIST_EXTENDEDSELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y | FRAME_NORMAL);
-		list->appendHeader("Richtlinie", NULL, 400);
-		list->appendHeader("Status", NULL, 160);
-
-		icoFolder = new FXPNGIcon(getApp(), resico_folder, IMAGE_NEAREST); icoFolder->create();
-		icoPolicy = new FXPNGIcon(getApp(), resico_key, IMAGE_NEAREST); icoPolicy->create();
-
-		FXTreeItem* machineRoot = tree->appendItem(NULL, "Computerkonfiguration\\Administrative Vorlagen", icoFolder, icoFolder);
-		collectCategoryChildren(machineRoot, machineHive.categories, {}, &machineHive);
-		tree->expandTree(machineRoot);
-
-		FXTreeItem* userRoot = tree->appendItem(NULL, "Benutzerkonfiguration\\Administrative Vorlagen", icoFolder, icoFolder);
-		collectCategoryChildren(userRoot, userHive.categories, {}, &userHive);
-
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 10,10,6,6);
-		new FXLabel(btnf, "Auswahl setzen auf:");
-		new FXButton(btnf, "&Aktiviert", NULL, this, ID_SET_ENABLED, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		new FXButton(btnf, "&Deaktiviert", NULL, this, ID_SET_DISABLED, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		new FXButton(btnf, "&Nicht konfiguriert", NULL, this, ID_SET_NOTCONF, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "&Speichern", NULL, this, ID_SAVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-	}
-	virtual ~AdmEditorDialog() {}
-};
-FXDEFMAP(AdmEditorDialog) AdmEditorDialogMap[] = {
-	FXMAPFUNC(SEL_CHANGED, AdmEditorDialog::ID_TREE, AdmEditorDialog::onTreeChanged),
-	FXMAPFUNC(SEL_DOUBLECLICKED, AdmEditorDialog::ID_LIST, AdmEditorDialog::onListDoubleClick),
-	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SAVE, AdmEditorDialog::onSave),
-	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SET_ENABLED, AdmEditorDialog::onSetSelectionState),
-	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SET_DISABLED, AdmEditorDialog::onSetSelectionState),
-	FXMAPFUNC(SEL_COMMAND, AdmEditorDialog::ID_SET_NOTCONF, AdmEditorDialog::onSetSelectionState),
-};
-FXIMPLEMENT(AdmEditorDialog, FXDialogBox, AdmEditorDialogMap, ARRAYNUMBER(AdmEditorDialogMap))
+	RegPolFile f = parseRegPolFile(tmp);
+	unlink(tmp);
+	return f;
+}
 
 // ---------------------------------------------------------------------
 // Dialog "Eigenschaften" von Domäne/OU -- mit dem "Gruppenrichtlinie"-
@@ -4476,7 +4270,7 @@ static const std::vector<CountryEntry>& countryList() {
 		pos = end;
 	}
 	std::sort(list.begin(), list.end(), [](const CountryEntry& a, const CountryEntry& b) {
-		return strcoll(a.name.c_str(), b.name.c_str()) < 0;
+		return germanLess(a.name, b.name);
 	});
 	return list;
 }
@@ -5278,7 +5072,7 @@ static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::st
 class GpoEditorWindow : public FXDialogBox {
 	FXDECLARE(GpoEditorWindow)
 private:
-	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_ADM, GN_FOLDERREDIR, GN_TODO };
+	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_ADM, GN_ADMCAT, GN_FOLDERREDIR, GN_TODO };
 	struct Node {
 		NodeKind kind = GN_FOLDER;
 		bool machine = true;
@@ -5300,6 +5094,14 @@ private:
 	std::vector<int> rowDefs;                 // GN_SECPOL/GN_RIGHTS: Zeile -> Tabellenindex
 	std::vector<std::string> rowGroups;       // GN_RESTRICTED: Zeile -> "*SID" der Gruppe
 	std::vector<GroupEntry> principals;       // einmal geladen, fuer SID-Namen
+	std::vector<AdmPolicy*> rowPolicies;      // GN_ADMCAT: Zeilen nach den Unterkategorien
+	std::vector<std::string> rowPolicyKeys;
+
+	// Administrative Vorlagen: je Zweig (0 = Computer, 1 = Benutzer) die
+	// Kategorien aus den .adm-Dateien und die Registry.pol des GPOs.
+	PolHive admHive[2];
+	struct AdmNodeInfo { AdmCategory* cat; std::vector<const AdmCategory*> chain; int hive; };
+	std::map<FXTreeItem*, AdmNodeInfo> admNodes;
 	bool principalsLoaded = false;
 	InfFile inf;
 
@@ -5334,6 +5136,25 @@ public:
 		return it;
 	}
 
+	void addAdmCategories(FXTreeItem* parent, std::vector<AdmCategory>& cats, std::vector<const AdmCategory*> chain, int hive) {
+		for (auto& cat : cats) {
+			FXTreeItem* item = add(parent, cat.label.c_str(), resico_folder, GN_ADMCAT, hive == 0);
+			std::vector<const AdmCategory*> newChain = chain;
+			newChain.push_back(&cat);
+			admNodes[item] = { &cat, newChain, hive };
+			addAdmCategories(item, cat.subCategories, newChain, hive);
+		}
+	}
+
+	void loadAdmBranch(FXTreeItem* item, int hive) {
+		PolHive& h = admHive[hive];
+		h.categories = loadMergedAdmCategories(hive == 0 ? "MACHINE" : "USER");
+		h.polPath = gpoBranchDir(domain, guid, hive == 0) + "/Registry.pol";
+		h.file = readRegPolAsRoot(h.polPath);
+		h.lookup = buildRegLookup(h.file);
+		addAdmCategories(item, h.categories, {}, hive);
+	}
+
 	void buildTree() {
 		FXTreeItem* root = add(NULL, (gpoName + " [" + serverFqdn(domain) + "]").text(), resico_network, GN_FOLDER, true);
 
@@ -5362,7 +5183,7 @@ public:
 		add(pk, "Vertrauenswürdige Stammzertifizierungsstellen", resico_folder, GN_TODO, true);
 		add(pk, "Organisationsvertrauen", resico_folder, GN_TODO, true);
 		add(cSec, "IP-Sicherheitsrichtlinien auf Active Directory", resico_key, GN_TODO, true);
-		add(comp, "Administrative Vorlagen", resico_folder, GN_ADM, true);
+		FXTreeItem* admMachine = add(comp, "Administrative Vorlagen", resico_folder, GN_ADM, true);
 
 		FXTreeItem* usr = add(root, "Benutzerkonfiguration", resico_user, GN_FOLDER, false);
 		FXTreeItem* uSw = add(usr, "Softwareeinstellungen", resico_folder, GN_FOLDER, false);
@@ -5375,7 +5196,13 @@ public:
 		add(uPk, "Organisationsvertrauen", resico_folder, GN_TODO, false);
 		add(uWin, "Remoteinstallationsdienste", resico_folder, GN_TODO, false);
 		add(uWin, "Ordnerumleitung", resico_folder, GN_FOLDERREDIR, false);
-		add(usr, "Administrative Vorlagen", resico_folder, GN_ADM, false);
+		FXTreeItem* admUser = add(usr, "Administrative Vorlagen", resico_folder, GN_ADM, false);
+		if (haveAdmFiles()) {
+			getApp()->beginWaitCursor();
+			loadAdmBranch(admMachine, 0);
+			loadAdmBranch(admUser, 1);
+			getApp()->endWaitCursor();
+		}
 
 		// Aufgeklappt wie im Original beim Oeffnen: die Computerkonfiguration
 		// bis in die Sicherheitseinstellungen, die Benutzerkonfiguration eine
@@ -5399,6 +5226,8 @@ public:
 		rowPackages.clear();
 		rowDefs.clear();
 		rowGroups.clear();
+		rowPolicies.clear();
+		rowPolicyKeys.clear();
 		status->setText(" ");
 		auto nit = nodes.find(item);
 		if (nit == nodes.end()) return;
@@ -5420,7 +5249,7 @@ public:
 				// Wie im Original alphabetisch nach Bezeichnung.
 				for (size_t i = 0; i < node.defs->size(); i++) rowDefs.push_back((int)i);
 				std::sort(rowDefs.begin(), rowDefs.end(), [&](int a, int b) {
-					return strcoll((*node.defs)[a].label, (*node.defs)[b].label) < 0;
+					return germanLess((*node.defs)[a].label, (*node.defs)[b].label);
 				});
 				for (int i : rowDefs) {
 					const SecPolicyDef& def = (*node.defs)[i];
@@ -5437,7 +5266,7 @@ public:
 				FXIcon* ic = sharedPngIcon(resico_key);
 				for (size_t i = 0; i < USER_RIGHTS.size(); i++) rowDefs.push_back((int)i);
 				std::sort(rowDefs.begin(), rowDefs.end(), [&](int a, int b) {
-					return strcoll(USER_RIGHTS[a].label, USER_RIGHTS[b].label) < 0;
+					return germanLess(USER_RIGHTS[a].label, USER_RIGHTS[b].label);
 				});
 				for (int i : rowDefs) {
 					std::string v;
@@ -5506,7 +5335,33 @@ public:
 			}
 			case GN_ADM: {
 				setHeaders({ { "Name", 320 } });
-				status->setText(" Doppelklick öffnet die Administrativen Vorlagen.");
+				for (FXTreeItem* c = item->getFirst(); c; c = c->getNext()) {
+					list->appendItem(c->getText(), c->getClosedIcon(), c->getClosedIcon());
+					rowChildren.push_back(c);
+				}
+				if (!item->getFirst())
+					status->setText(haveAdmFiles() ? " In den .adm-Dateien gibt es für diesen Zweig keine Kategorien."
+					                               : " Es sind keine administrativen Vorlagen (.adm-Dateien) eingerichtet.");
+				break;
+			}
+			case GN_ADMCAT: {
+				setHeaders({ { "Richtlinie", 330 }, { "Einstellung", 160 } });
+				auto ait = admNodes.find(item);
+				if (ait == admNodes.end()) break;
+				FXIcon* folderIc = sharedPngIcon(resico_folder);
+				for (FXTreeItem* c = item->getFirst(); c; c = c->getNext()) {
+					list->appendItem(c->getText(), folderIc, folderIc);
+					rowChildren.push_back(c);
+				}
+				PolHive& h = admHive[ait->second.hive];
+				FXIcon* ic = sharedPngIcon(resico_key);
+				for (auto& pol : ait->second.cat->policies) {
+					std::string key = resolveEffectiveKey(pol, ait->second.chain);
+					PolicyState st = determinePolicyState(pol, key, h.lookup);
+					list->appendItem(FXString(pol.label.c_str()) + "\t" + admStateLabel(st), ic, ic);
+					rowPolicies.push_back(&pol);
+					rowPolicyKeys.push_back(key);
+				}
 				break;
 			}
 			case GN_TODO: {
@@ -5523,29 +5378,57 @@ public:
 		return 1;
 	}
 
-	long onTreeDoubleClick(FXObject*, FXSelector, void*) {
-		FXTreeItem* cur = tree->getCurrentItem();
-		auto nit = nodes.find(cur);
-		if (nit != nodes.end() && nit->second.kind == GN_ADM) openAdmEditor();
-		return 0; // Auf-/Zuklappen per Doppelklick weiter zulassen
-	}
+	void editAdmPolicy(int row) {
+		auto ait = admNodes.find(shownItem);
+		int pIdx = row - (int)rowChildren.size();
+		if (ait == admNodes.end() || pIdx < 0 || pIdx >= (int)rowPolicies.size() || !requireRoot()) return;
+		int hive = ait->second.hive;
+		PolHive& h = admHive[hive];
+		// Frisch lesen -- ein anderes Fenster koennte inzwischen geschrieben haben.
+		h.file = readRegPolAsRoot(h.polPath);
+		h.lookup = buildRegLookup(h.file);
 
-	void openAdmEditor() {
-		if (!haveAdmFiles()) {
-			FXMessageBox::error(this, MBOX_OK, "ADM-Vorlagen fehlen",
-				"Es sind keine administrativen Vorlagen (.adm-Dateien) eingerichtet.\n"
-				"Bitte starte das Programm neu und lade sie herunter.");
-			return;
+		AdmPolicy* pol = rowPolicies[pIdx];
+		const std::string& key = rowPolicyKeys[pIdx];
+		PolicyState curState = determinePolicyState(*pol, key, h.lookup);
+		std::vector<std::string> curPartValues;
+		for (auto& part : pol->parts) {
+			std::string vn = !part.valuename.empty() ? part.valuename : pol->valuename;
+			curPartValues.push_back(readStoredPartValue(h, key, vn));
 		}
-		std::string base = gpoSysvolBase(domain, guid);
-		std::vector<AdmCategory> machineCats = loadMergedAdmCategories("MACHINE");
-		std::vector<AdmCategory> userCats = loadMergedAdmCategories("USER");
+
+		PolicyEditDialog dlg(this, *pol, curState, curPartValues);
+		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		PendingEdit ed;
+		ed.state = dlg.getState();
+		ed.partValues = dlg.getPartValues();
+		ed.effectiveKey = key;
+		if (ed.state == curState && ed.partValues == curPartValues) return;
+
+		std::vector<RegPolEntry> entries = h.file.entries;
+		applyAdmPolicyEdit(entries, h.lookup, pol, ed);
+
+		std::string err;
+		FXString tmpPath = "/tmp/ice2k-regpol-tmp";
+		if (!writeRegPolFile(tmpPath.text(), entries, err)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.c_str()); return; }
+		std::string branch = gpoBranchDir(domain, guid, hive == 0);
+		bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(h.polPath.c_str()) }) == 0;
+		int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(h.polPath.c_str()) });
+		runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
+		if (rc != 0) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Konnte %s nicht schreiben.", h.polPath.c_str()); return; }
+		if (!existed) inheritSysvolPermissions(branch, h.polPath, false);
+
+		// Registry-Erweiterung eintragen und Version des Zweigs erhoehen.
 		std::string gpoDn = "CN=" + guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
-		AdmEditorDialog dlg(this, std::move(machineCats), std::move(userCats),
-		                    gpoBranchDir(domain, guid, true) + "/Registry.pol",
-		                    gpoBranchDir(domain, guid, false) + "/Registry.pol",
-		                    base + "/GPT.INI", gpoDn, domain.realm);
-		dlg.execute(PLACEMENT_OWNER);
+		std::string log;
+		FXString errorMsg;
+		if (!ensureExtensionRegistered(this, domain.realm, gpoDn, hive == 0, REGISTRY_CSE_GUID,
+		                               hive == 0 ? REGISTRY_TOOL_GUID_MACHINE : REGISTRY_TOOL_GUID_USER, log, errorMsg))
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+
+		h.file = readRegPolAsRoot(h.polPath);
+		h.lookup = buildRegLookup(h.file);
+		reselect(row);
 	}
 
 	void selectTreeItem(FXTreeItem* it) {
@@ -5563,7 +5446,12 @@ public:
 		const Node node = nit->second;
 		switch (node.kind) {
 			case GN_FOLDER:
+			case GN_ADM:
 				if (idx < (int)rowChildren.size()) selectTreeItem(rowChildren[idx]);
+				break;
+			case GN_ADMCAT:
+				if (idx < (int)rowChildren.size()) selectTreeItem(rowChildren[idx]);
+				else editAdmPolicy(idx);
 				break;
 			case GN_SECPOL:
 				editSecurityPolicy(node, idx);
@@ -5833,7 +5721,6 @@ public:
 };
 FXDEFMAP(GpoEditorWindow) GpoEditorWindowMap[] = {
 	FXMAPFUNC(SEL_CHANGED, GpoEditorWindow::ID_TREE, GpoEditorWindow::onTreeChanged),
-	FXMAPFUNC(SEL_DOUBLECLICKED, GpoEditorWindow::ID_TREE, GpoEditorWindow::onTreeDoubleClick),
 	FXMAPFUNC(SEL_DOUBLECLICKED, GpoEditorWindow::ID_LIST, GpoEditorWindow::onListDoubleClick),
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, GpoEditorWindow::ID_LIST, GpoEditorWindow::onListRightClick),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_NEW_PACKAGE, GpoEditorWindow::onNewPackage),
