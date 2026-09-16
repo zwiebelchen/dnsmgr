@@ -2810,7 +2810,7 @@ public:
 		const FXuint bstyle = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
 		new FXButton(btnf, "OK", NULL, this, ID_OK, bstyle | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bstyle, 0,0,88,0, 4,4,3,3);
-		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bstyle, 0,0,88,0, 4,4,3,3);
+		(new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bstyle, 0,0,88,0, 4,4,3,3))->disable(); // bis zur ersten Aenderung grau
 
 		reloadMemberList();
 	}
@@ -4863,7 +4863,7 @@ public:
 		  domain(domain_), guid(guid_), gpoName(gpoName_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
 		FXSplitter* splitter = new FXSplitter(main, LAYOUT_FILL_X | LAYOUT_FILL_Y | SPLITTER_TRACKING);
-		FXPacker* treeframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_Y, 0,0,420,0, 0,0,0,0);
+		FXPacker* treeframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_Y, 0,0,340,0, 0,0,0,0);
 		tree = new FXTreeList(treeframe, this, ID_TREE,
 		                      LAYOUT_FILL_X | LAYOUT_FILL_Y | TREELIST_SHOWS_BOXES | TREELIST_SHOWS_LINES | TREELIST_BROWSESELECT | TREELIST_ROOT_BOXES);
 		FXPacker* listframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
@@ -4962,7 +4962,7 @@ public:
 				break;
 			}
 			case GN_SECPOL: {
-				setHeaders({ { "Richtlinie", 430 }, { "Computereinstellung", 260 } });
+				setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 200 } });
 				inf = loadGptTmpl(domain, guid);
 				FXIcon* ic = sharedPngIcon(resico_key);
 				for (auto& def : *node.defs) {
@@ -5264,7 +5264,7 @@ public:
 		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
 		new FXButton(btnf, "OK", NULL, this, ID_OK, bs | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bs, 0,0,88,0, 4,4,3,3);
-		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3);
+		(new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3))->disable(); // bis zur ersten Aenderung grau
 	}
 
 	int wantedFlags() const { return (disableUser->getCheck() ? 1 : 0) | (disableMachine->getCheck() ? 2 : 0); }
@@ -5443,7 +5443,7 @@ public:
 		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
 		new FXButton(btnf, "OK", NULL, this, ID_OK, bs | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bs, 0,0,88,0, 4,4,3,3);
-		new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3);
+		(new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3))->disable(); // bis zur ersten Aenderung grau
 
 		showManager();
 		reloadLinks();
@@ -5488,7 +5488,8 @@ public:
 		if (isDomainRoot) {
 			std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
 			FXString nb = smbConfValue(conf, "workgroup"); nb.upper();
-			FXTextField* nbf = labeledField(page, "Domänenname (Prä-Windows 2000):");
+			new FXLabel(page, "Domänenname (Prä-Windows 2000):", NULL, JUSTIFY_LEFT);
+			FXTextField* nbf = new FXTextField(page, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
 			nbf->setText(nb);
 			nbf->setEditable(FALSE);
 			new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
