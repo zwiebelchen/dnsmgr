@@ -7809,6 +7809,269 @@ FXDEFMAP(OUPropertiesDialog) OUPropertiesDialogMap[] = {
 FXIMPLEMENT(OUPropertiesDialog, FXDialogBox, OUPropertiesDialogMap, ARRAYNUMBER(OUPropertiesDialogMap))
 
 // ---------------------------------------------------------------------
+// LDAP-Filterwerte maskieren (RFC 4515), damit Eingaben wie "(" oder "*"
+// die Suche nicht verbiegen.
+// ---------------------------------------------------------------------
+static std::string ldapFilterEscape(const std::string& v) {
+	std::string out;
+	for (unsigned char c : v) {
+		switch (c) {
+			case '*': out += "\\2a"; break;
+			case '(': out += "\\28"; break;
+			case ')': out += "\\29"; break;
+			case '\\': out += "\\5c"; break;
+			case 0: out += "\\00"; break;
+			default: out += (char)c;
+		}
+	}
+	return out;
+}
+
+// Objekt aus einer vollen DN fuer die Eigenschaftendialoge zusammenbauen.
+static DirObject dirObjectFromDn(const std::string& dn, const DomainInfo& domain, ObjType type, const std::string& sam) {
+	DirObject obj;
+	obj.name = dnLeafName(dn);
+	obj.accountName = sam.c_str();
+	std::string suffix = "," + std::string(domain.baseDN.text());
+	std::string rel = dn;
+	if (rel.size() > suffix.size() && lowerCopy(rel).compare(rel.size() - suffix.size(), suffix.size(), lowerCopy(suffix)) == 0)
+		rel = rel.substr(0, rel.size() - suffix.size());
+	obj.dn = rel.c_str();
+	obj.type = type;
+	return obj;
+}
+
+// ---------------------------------------------------------------------
+// Dialog "Benutzer, Kontakte und Gruppen suchen".
+// ---------------------------------------------------------------------
+class FindObjectsDialog : public FXDialogBox {
+	FXDECLARE(FindObjectsDialog)
+private:
+	DomainInfo domain;
+	FXTextField* nameField = nullptr, *descField = nullptr;
+	FXIconList* results = nullptr;
+	FXLabel* countLabel = nullptr;
+	struct Hit { std::string dn, sam; ObjType type; };
+	std::vector<Hit> hits;
+protected:
+	FindObjectsDialog() {}
+public:
+	enum { ID_FIND = FXDialogBox::ID_LAST, ID_CLEAR, ID_RESULTS };
+	FindObjectsDialog(FXWindow* owner, const DomainInfo& domain_)
+		: FXDialogBox(owner, "Benutzer, Kontakte und Gruppen suchen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE | DECOR_RESIZE, 0,0,620,460),
+		  domain(domain_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,8,8, 0,6);
+		FXHorizontalFrame* top = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
+		FXVerticalFrame* left = new FXVerticalFrame(top, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 0,6);
+		FXHorizontalFrame* scope = new FXHorizontalFrame(left, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(scope, "Suchen:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,60,0);
+		FXListBox* what = new FXListBox(scope, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		what->appendItem("Benutzer, Kontakte und Gruppen");
+		what->disable();
+		new FXLabel(scope, "  In:", NULL, LAYOUT_CENTER_Y);
+		FXListBox* where = new FXListBox(scope, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		FXString realmLower = domain.realm; realmLower.lower();
+		where->appendItem(realmLower, sharedPngIcon(resico_server));
+		where->disable();
+
+		FXTabBook* tabs = new FXTabBook(left, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X);
+		new FXTabItem(tabs, "Benutzer, Kontakte und Gruppen", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X, 0,0,0,0, 10,10,10,10, 0,6);
+		nameField = propLabeledField(page, "&Name:", 100);
+		descField = propLabeledField(page, "&Beschreibung:", 100);
+
+		FXVerticalFrame* btns = new FXVerticalFrame(top, PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,24,0, 0,6);
+		new FXButton(btns, "&Jetzt suchen", NULL, this, ID_FIND, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Beenden", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "N&eue Suche", NULL, this, ID_CLEAR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+
+		FXPacker* rf = new FXPacker(main, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		results = new FXIconList(rf, this, ID_RESULTS, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		results->appendHeader("Name", NULL, 180);
+		results->appendHeader("Typ", NULL, 220);
+		results->appendHeader("Beschreibung", NULL, 200);
+		countLabel = new FXLabel(main, " ", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+	}
+
+	virtual void create() {
+		FXDialogBox::create();
+		nameField->setFocus();
+	}
+
+	long onFind(FXObject*, FXSelector, void*) {
+		std::string name = trimStr(nameField->getText().text());
+		std::string desc = trimStr(descField->getText().text());
+		std::string filter = "(&(|(objectClass=user)(objectClass=group)(objectClass=contact))(!(objectClass=computer))";
+		if (!name.empty()) {
+			std::string n = ldapFilterEscape(name);
+			filter += "(|(cn=*" + n + "*)(sAMAccountName=*" + n + "*)(displayName=*" + n + "*))";
+		}
+		if (!desc.empty()) filter += "(description=*" + ldapFilterEscape(desc) + "*)";
+		filter += ")";
+		getApp()->beginWaitCursor();
+		auto recs = ldapiSearch(domain.baseDN.text(), "sub", filter, { "sAMAccountName", "objectClass", "groupType", "description" });
+		getApp()->endWaitCursor();
+		std::sort(recs.begin(), recs.end(), [](const std::multimap<std::string, std::string>& a, const std::multimap<std::string, std::string>& b) {
+			return germanLess(dnLeafName(ldifFirst(a, "dn")).text(), dnLeafName(ldifFirst(b, "dn")).text());
+		});
+		results->clearItems();
+		hits.clear();
+		for (auto& rec : recs) {
+			std::string cls;
+			auto range = rec.equal_range("objectclass");
+			for (auto it = range.first; it != range.second; ++it) cls = lowerCopy(it->second);
+			Hit h;
+			h.dn = ldifFirst(rec, "dn");
+			h.sam = ldifFirst(rec, "sAMAccountName");
+			FXString typeName;
+			const unsigned char* icon;
+			if (cls == "group") {
+				long gt = 0;
+				try { gt = std::stol(ldifFirst(rec, "groupType")); } catch (...) {}
+				typeName = groupTypeName(gt); h.type = OBJ_GROUP; icon = resico_users;
+			} else if (cls == "contact") {
+				typeName = "Kontakt"; h.type = OBJ_OTHER; icon = resico_user;
+			} else {
+				typeName = "Benutzer"; h.type = OBJ_USER; icon = resico_user;
+			}
+			FXIcon* ic = sharedPngIcon(icon);
+			results->appendItem(dnLeafName(h.dn) + "\t" + typeName + "\t" + ldifFirst(rec, "description").c_str(), ic, ic);
+			hits.push_back(h);
+		}
+		countLabel->setText((std::to_string(hits.size()) + " Element(e) gefunden").c_str());
+		return 1;
+	}
+
+	long onClear(FXObject*, FXSelector, void*) {
+		nameField->setText("");
+		descField->setText("");
+		results->clearItems();
+		hits.clear();
+		countLabel->setText(" ");
+		nameField->setFocus();
+		return 1;
+	}
+
+	long onResultDoubleClick(FXObject*, FXSelector, void* ptr) {
+		FXint idx = (FXint)(FXival)ptr;
+		if (idx < 0 || idx >= (int)hits.size()) return 1;
+		const Hit& h = hits[idx];
+		DirObject obj = dirObjectFromDn(h.dn, domain, h.type, h.sam);
+		if (h.type == OBJ_USER) { UserPropertiesDialog dlg(this, domain, obj); dlg.execute(PLACEMENT_OWNER); }
+		else if (h.type == OBJ_GROUP) { GroupPropertiesDialog dlg(this, domain, obj); dlg.execute(PLACEMENT_OWNER); }
+		return 1;
+	}
+	virtual ~FindObjectsDialog() {}
+};
+FXDEFMAP(FindObjectsDialog) FindObjectsDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, FindObjectsDialog::ID_FIND, FindObjectsDialog::onFind),
+	FXMAPFUNC(SEL_COMMAND, FindObjectsDialog::ID_CLEAR, FindObjectsDialog::onClear),
+	FXMAPFUNC(SEL_DOUBLECLICKED, FindObjectsDialog::ID_RESULTS, FindObjectsDialog::onResultDoubleClick),
+};
+FXIMPLEMENT(FindObjectsDialog, FXDialogBox, FindObjectsDialogMap, ARRAYNUMBER(FindObjectsDialogMap))
+
+// ---------------------------------------------------------------------
+// "Neues Objekt - Kontakt" und "Neues Objekt - Freigegebener Ordner".
+// Kopfzeile "Erstellen in: <Ordner>" wie im Original.
+// ---------------------------------------------------------------------
+static void newObjectHeader(FXComposite* p, const unsigned char* icon, const FXString& containerFolder) {
+	FXHorizontalFrame* head = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+	new FXLabel(head, "", sharedPngIcon(icon), LAYOUT_CENTER_Y);
+	new FXLabel(head, "Erstellen in:   " + containerFolder, NULL, LAYOUT_CENTER_Y);
+	new FXHorizontalSeparator(p, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+}
+
+class NewContactDialog : public FXDialogBox {
+	FXDECLARE(NewContactDialog)
+private:
+	FXTextField* given = nullptr, *initials = nullptr, *surname = nullptr, *fullName = nullptr, *display = nullptr;
+	bool fullNameTouched = false;
+protected:
+	NewContactDialog() {}
+public:
+	enum { ID_NAMEPART = FXDialogBox::ID_LAST, ID_FULLNAME };
+	NewContactDialog(FXWindow* owner, const FXString& containerFolder)
+		: FXDialogBox(owner, "Neues Objekt - Kontakt", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		newObjectHeader(main, resico_user, containerFolder);
+		FXHorizontalFrame* row = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, "&Vorname:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,130,0);
+		given = new FXTextField(row, 14, this, ID_NAMEPART, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		new FXLabel(row, "&Initialen:", NULL, LAYOUT_CENTER_Y);
+		initials = new FXTextField(row, 4, this, ID_NAMEPART, FRAME_SUNKEN | FRAME_THICK);
+		surname = propLabeledField(main, "&Nachname:", 130);
+		surname->setTarget(this); surname->setSelector(ID_NAMEPART);
+		fullName = propLabeledField(main, "&Vollständiger Name:", 130);
+		fullName->setTarget(this); fullName->setSelector(ID_FULLNAME);
+		display = propLabeledField(main, "&Anzeigename:", 130);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	// Wie im Original setzt sich der vollstaendige Name aus Vorname,
+	// Initialen und Nachname zusammen, bis man ihn selbst aendert.
+	long onNamePart(FXObject*, FXSelector, void*) {
+		if (fullNameTouched) return 1;
+		FXString v = given->getText();
+		if (!initials->getText().empty()) v += " " + initials->getText() + ".";
+		if (!surname->getText().empty()) v += (v.empty() ? "" : " ") + surname->getText();
+		fullName->setText(v.trim());
+		return 1;
+	}
+	long onFullName(FXObject*, FXSelector, void*) { fullNameTouched = true; return 1; }
+	std::string getGiven() const { return trimStr(given->getText().text()); }
+	std::string getInitials() const { return trimStr(initials->getText().text()); }
+	std::string getSurname() const { return trimStr(surname->getText().text()); }
+	std::string getFullName() const { return trimStr(fullName->getText().text()); }
+	std::string getDisplay() const { return trimStr(display->getText().text()); }
+	virtual ~NewContactDialog() {}
+};
+FXDEFMAP(NewContactDialog) NewContactDialogMap[] = {
+	FXMAPFUNC(SEL_CHANGED, NewContactDialog::ID_NAMEPART, NewContactDialog::onNamePart),
+	FXMAPFUNC(SEL_CHANGED, NewContactDialog::ID_FULLNAME, NewContactDialog::onFullName),
+};
+FXIMPLEMENT(NewContactDialog, FXDialogBox, NewContactDialogMap, ARRAYNUMBER(NewContactDialogMap))
+
+class NewSharedFolderDialog : public FXDialogBox {
+	FXDECLARE(NewSharedFolderDialog)
+private:
+	FXTextField* name = nullptr, *unc = nullptr;
+protected:
+	NewSharedFolderDialog() {}
+public:
+	NewSharedFolderDialog(FXWindow* owner, const FXString& containerFolder)
+		: FXDialogBox(owner, "Neues Objekt - Freigegebener Ordner", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		newObjectHeader(main, resico_folder, containerFolder);
+		new FXLabel(main, "&Name:");
+		name = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		new FXLabel(main, "&Netzwerkpfad (\\\\Server\\Freigabe):");
+		unc = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	std::string getName() const { return trimStr(name->getText().text()); }
+	std::string getUnc() const { return trimStr(unc->getText().text()); }
+	virtual ~NewSharedFolderDialog() {}
+};
+FXIMPLEMENT(NewSharedFolderDialog, FXDialogBox, NULL, 0)
+
+// Wert fuer eine RDN maskieren (RFC 4514): , + " \ < > ; = und Rand-Leerzeichen.
+static std::string rdnEscape(const std::string& v) {
+	std::string out;
+	for (size_t i = 0; i < v.size(); i++) {
+		char c = v[i];
+		bool edgeSpace = c == ' ' && (i == 0 || i + 1 == v.size());
+		if (strchr(",+\"\\<>;=", c) || edgeSpace || (i == 0 && c == '#')) out += '\\';
+		out += c;
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------
 // Hauptfenster
 // ---------------------------------------------------------------------
 class DsAdminWindow : public FXMainWindow {
@@ -7818,6 +8081,11 @@ private:
 	FXMenuPane *konsolemenu, *vorgangmenu, *ansichtmenu, *hilfemenu;
 	FXToolBar* toolbar;
 	FXSplitter* splitter;
+	FXPacker* treeframe = nullptr;
+	// Verlauf fuer Zurueck/Vor -- relative DNs der besuchten Container.
+	std::vector<FXString> history;
+	int historyPos = -1;
+	bool navigatingHistory = false;
 	FXTreeList* tree;
 	FXIconList* list;
 
@@ -7838,7 +8106,9 @@ public:
 	enum {
 		ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT,
 		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_NEW_COMPUTER, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS,
-		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT, ID_RESET_PASSWORD, ID_ADVANCED_VIEW
+		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT, ID_RESET_PASSWORD, ID_ADVANCED_VIEW,
+		ID_BACK, ID_FORWARD, ID_UP, ID_TOGGLE_TREE, ID_TOOL_PROPERTIES, ID_EXPORT_LIST, ID_FIND,
+		ID_ADD_TO_GROUP, ID_NEW_CONTACT, ID_NEW_SHARED_FOLDER, ID_SEL_OBJECT
 	};
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -7859,6 +8129,24 @@ public:
 	long onUserProperties(FXObject*, FXSelector, void*);
 	long onMoveObject(FXObject*, FXSelector, void*);
 	long onRenameObject(FXObject*, FXSelector, void*);
+	long onBack(FXObject*, FXSelector, void*);
+	long onForward(FXObject*, FXSelector, void*);
+	long onUp(FXObject*, FXSelector, void*);
+	long onUpdBack(FXObject*, FXSelector, void*);
+	long onUpdForward(FXObject*, FXSelector, void*);
+	long onUpdUp(FXObject*, FXSelector, void*);
+	long onToggleTree(FXObject*, FXSelector, void*);
+	long onToolProperties(FXObject*, FXSelector, void*);
+	long onExportList(FXObject*, FXSelector, void*);
+	long onFind(FXObject*, FXSelector, void*);
+	long onAddToGroup(FXObject*, FXSelector, void*);
+	long onUpdAddToGroup(FXObject*, FXSelector, void*);
+	long onUpdSelObject(FXObject*, FXSelector, void*);
+	long onNewContact(FXObject*, FXSelector, void*);
+	long onNewSharedFolder(FXObject*, FXSelector, void*);
+	void selectContainer(const FXString& relDN);
+	int selectedListIndex() const;
+	void fillNewMenu(FXMenuPane* pane);
 
 	DsAdminWindow(FXApp* a);
 	void loadTree();
@@ -7887,6 +8175,23 @@ FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_USER_PROPS, DsAdminWindow::onUserProperties),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_MOVE_OBJECT, DsAdminWindow::onMoveObject),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_RENAME_OBJECT, DsAdminWindow::onRenameObject),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_BACK, DsAdminWindow::onBack),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_BACK, DsAdminWindow::onUpdBack),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_FORWARD, DsAdminWindow::onForward),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_FORWARD, DsAdminWindow::onUpdForward),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_UP, DsAdminWindow::onUp),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_UP, DsAdminWindow::onUpdUp),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_TOGGLE_TREE, DsAdminWindow::onToggleTree),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_TOOL_PROPERTIES, DsAdminWindow::onToolProperties),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_EXPORT_LIST, DsAdminWindow::onExportList),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_FIND, DsAdminWindow::onFind),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_ADD_TO_GROUP, DsAdminWindow::onAddToGroup),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_ADD_TO_GROUP, DsAdminWindow::onUpdAddToGroup),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_MOVE_OBJECT, DsAdminWindow::onUpdSelObject),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_RENAME_OBJECT, DsAdminWindow::onUpdSelObject),
+	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_DELETE_OBJECT, DsAdminWindow::onUpdSelObject),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_CONTACT, DsAdminWindow::onNewContact),
+	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_SHARED_FOLDER, DsAdminWindow::onNewSharedFolder),
 };
 FXIMPLEMENT(DsAdminWindow, FXMainWindow, DsAdminWindowMap, ARRAYNUMBER(DsAdminWindowMap))
 
@@ -7904,7 +8209,20 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	new FXMenuCommand(konsolemenu, "&Beenden", NULL, getApp(), FXApp::ID_QUIT);
 	vorgangmenu = new FXMenuPane(this);
 	new FXMenuTitle(menubar, "&Vorgang", NULL, vorgangmenu);
+	new FXMenuCommand(vorgangmenu, "&Suchen...", NULL, this, ID_FIND);
+	FXMenuPane* vorgangNeu = new FXMenuPane(this);
+	fillNewMenu(vorgangNeu);
+	new FXMenuCascade(vorgangmenu, "&Neu", NULL, vorgangNeu);
+	new FXMenuSeparator(vorgangmenu);
+	new FXMenuCommand(vorgangmenu, "Zu &Gruppe hinzufügen...", NULL, this, ID_ADD_TO_GROUP);
+	new FXMenuCommand(vorgangmenu, "&Verschieben...", NULL, this, ID_MOVE_OBJECT);
+	new FXMenuCommand(vorgangmenu, "U&mbenennen...", NULL, this, ID_RENAME_OBJECT);
+	new FXMenuCommand(vorgangmenu, "&Löschen", NULL, this, ID_DELETE_OBJECT);
+	new FXMenuSeparator(vorgangmenu);
 	new FXMenuCommand(vorgangmenu, "&Aktualisieren", NULL, this, ID_REFRESH);
+	new FXMenuCommand(vorgangmenu, "Liste e&xportieren...", NULL, this, ID_EXPORT_LIST);
+	new FXMenuSeparator(vorgangmenu);
+	new FXMenuCommand(vorgangmenu, "&Eigenschaften", NULL, this, ID_TOOL_PROPERTIES);
 	ansichtmenu = new FXMenuPane(this);
 	new FXMenuTitle(menubar, "&Ansicht", NULL, ansichtmenu);
 	new FXMenuCheck(ansichtmenu, "&Erweiterte Funktionen", this, ID_ADVANCED_VIEW);
@@ -7912,12 +8230,36 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	new FXMenuTitle(menubar, "&?", NULL, hilfemenu);
 	new FXMenuCommand(hilfemenu, "&Info...", NULL, this, ID_ABOUT);
 
+	// Werkzeugleiste wie im Original: MMC-Standardknoepfe, dann die des
+	// Snap-Ins. Die Snap-In-Symbole (res/dsa) sind vorlaeufig.
 	toolbar = new FXToolBar(main, LAYOUT_SIDE_TOP | LAYOUT_FILL_X | FRAME_RAISED);
-	FXGIFIcon* icoRefresh = new FXGIFIcon(getApp(), resico_mmc_refresh);
-	new FXButton(toolbar, "\tAktualisieren", icoRefresh, this, ID_REFRESH, BUTTON_TOOLBAR|FRAME_RAISED|LAYOUT_CENTER_Y,0,0,0,0,2,2,2,2);
+	auto tbButton = [&](const char* tip, FXIcon* icon, FXSelector sel) {
+		new FXButton(toolbar, tip, icon, this, sel, BUTTON_TOOLBAR|FRAME_RAISED|LAYOUT_CENTER_Y,0,0,0,0,2,2,2,2);
+	};
+	auto tbSeparator = [&]() { new FXVerticalSeparator(toolbar, SEPARATOR_GROOVE|LAYOUT_FILL_Y,0,0,0,0,3,2,2,2); };
+	auto gif = [&](const unsigned char* data) { return new FXGIFIcon(getApp(), data); };
+	auto png = [&](const unsigned char* data) { return new FXPNGIcon(getApp(), data, IMAGE_NEAREST); };
+	tbButton("\tZurück", gif(resico_mmc_back), ID_BACK);
+	tbButton("\tVor", gif(resico_mmc_forward), ID_FORWARD);
+	tbSeparator();
+	tbButton("\tEbene nach oben", gif(resico_mmc_up), ID_UP);
+	tbButton("\tStruktur anzeigen/ausblenden", gif(resico_mmc_contree), ID_TOGGLE_TREE);
+	tbSeparator();
+	tbButton("\tEigenschaften", gif(resico_mmc_properties), ID_TOOL_PROPERTIES);
+	tbButton("\tAktualisieren", gif(resico_mmc_refresh), ID_REFRESH);
+	tbButton("\tListe exportieren", gif(resico_mmc_export), ID_EXPORT_LIST);
+	tbSeparator();
+	tbButton("\tHilfe", gif(resico_mmc_help), ID_ABOUT);
+	tbSeparator();
+	tbButton("\tNeuen Benutzer im aktuellen Container erstellen", png(resico_dsa_newuser), ID_NEW_USER);
+	tbButton("\tNeue Gruppe im aktuellen Container erstellen", png(resico_dsa_newgroup), ID_NEW_GROUP);
+	tbButton("\tNeue Organisationseinheit im aktuellen Container erstellen", png(resico_dsa_newou), ID_NEW_OU);
+	tbButton("\tObjekte in Active Directory suchen", png(resico_dsa_find), ID_FIND);
+	tbButton("\tAusgewählte Objekte zu einer Gruppe hinzufügen", png(resico_dsa_addtogroup), ID_ADD_TO_GROUP);
+	new FXToolTip(getApp());
 
 	splitter = new FXSplitter(main, LAYOUT_FILL_X|LAYOUT_FILL_Y|SPLITTER_TRACKING);
-	FXPacker* treeframe = new FXPacker(splitter, FRAME_NORMAL|LAYOUT_FILL_Y, 0,0,260,0, 0,0,0,0);
+	treeframe = new FXPacker(splitter, FRAME_NORMAL|LAYOUT_FILL_Y, 0,0,260,0, 0,0,0,0);
 	tree = new FXTreeList(treeframe, this, ID_TREE,
 	                       SCROLLERS_DONT_TRACK|FRAME_NORMAL|LAYOUT_FILL_X|LAYOUT_FILL_Y|
 	                       TREELIST_SHOWS_BOXES|TREELIST_SHOWS_LINES|TREELIST_BROWSESELECT|TREELIST_ROOT_BOXES);
@@ -8005,6 +8347,11 @@ void DsAdminWindow::loadTree() {
 }
 
 void DsAdminWindow::showContainer(FXString relDN) {
+	if (!navigatingHistory && (historyPos < 0 || history[historyPos] != relDN)) {
+		history.resize(historyPos + 1);
+		history.push_back(relDN);
+		historyPos = (int)history.size() - 1;
+	}
 	currentContainerRelDN = relDN;
 	currentObjects = listContainerObjects(relDN, domain);
 	enrichFromLdap(currentObjects, relDN.empty() ? domain.baseDN : relDN + "," + domain.baseDN, domain.baseDN);
@@ -8041,7 +8388,14 @@ void DsAdminWindow::showContainer(FXString relDN) {
 			case OBJ_COMPUTER: typeName = "Computer"; ic = icoServer; break;
 			case OBJ_OU: typeName = "Organisationseinheit"; ic = icoFolder; break;
 			case OBJ_CONTAINER: typeName = "Container"; ic = icoFolder; break;
-			default: typeName = obj.objectClass.empty() ? "Objekt" : obj.objectClass.text(); ic = icoFolder; break;
+			default: {
+				std::string cls = lowerCopy(obj.objectClass.text());
+				if (cls == "contact") { typeName = "Kontakt"; ic = icoUser; }
+				else if (cls == "volume") { typeName = "Freigegebener Ordner"; ic = icoFolder; }
+				else if (cls == "printqueue") { typeName = "Drucker"; ic = icoServer; }
+				else { typeName = obj.objectClass.empty() ? "Objekt" : obj.objectClass.text(); ic = icoFolder; }
+				break;
+			}
 		}
 		FXString txt = obj.name + "\t" + typeName + "\t" + obj.description;
 		list->appendItem(txt, ic, ic);
@@ -8106,10 +8460,7 @@ long DsAdminWindow::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 
 	FXMenuPane menu(this);
 	FXMenuPane neuMenu(this);
-	new FXMenuCommand(&neuMenu, "&Benutzer...", NULL, this, ID_NEW_USER);
-	new FXMenuCommand(&neuMenu, "&Gruppe...", NULL, this, ID_NEW_GROUP);
-	new FXMenuCommand(&neuMenu, "&Organisationseinheit...", NULL, this, ID_NEW_OU);
-	new FXMenuCommand(&neuMenu, "&Computer...", NULL, this, ID_NEW_COMPUTER);
+	fillNewMenu(&neuMenu);
 	new FXMenuCascade(&menu, "&Neu", NULL, &neuMenu);
 	new FXMenuSeparator(&menu);
 	if (relDN.empty() || isOU(relDN)) {
@@ -8412,6 +8763,209 @@ long DsAdminWindow::onAdvancedView(FXObject*, FXSelector, void*) {
 
 long DsAdminWindow::onUpdAdvancedView(FXObject* sender, FXSelector, void*) {
 	sender->handle(this, FXSEL(SEL_COMMAND, g_advancedView ? ID_CHECK : ID_UNCHECK), NULL);
+	return 1;
+}
+
+void DsAdminWindow::fillNewMenu(FXMenuPane* pane) {
+	// Reihenfolge wie im deutschen Original.
+	new FXMenuCommand(pane, "&Computer", NULL, this, ID_NEW_COMPUTER);
+	new FXMenuCommand(pane, "&Kontakt", NULL, this, ID_NEW_CONTACT);
+	new FXMenuCommand(pane, "&Gruppe", NULL, this, ID_NEW_GROUP);
+	new FXMenuCommand(pane, "&Organisationseinheit", NULL, this, ID_NEW_OU);
+	new FXMenuCommand(pane, "&Benutzer", NULL, this, ID_NEW_USER);
+	new FXMenuCommand(pane, "&Freigegebener Ordner", NULL, this, ID_NEW_SHARED_FOLDER);
+}
+
+void DsAdminWindow::selectContainer(const FXString& relDN) {
+	for (auto& kv : itemToRelDN) {
+		if (kv.second != relDN) continue;
+		if (kv.first->getParent()) tree->expandTree(kv.first->getParent());
+		tree->selectItem(kv.first);
+		tree->setCurrentItem(kv.first);
+		tree->makeItemVisible(kv.first);
+		break;
+	}
+	showContainer(relDN);
+}
+
+long DsAdminWindow::onBack(FXObject*, FXSelector, void*) {
+	if (historyPos <= 0) return 1;
+	historyPos--;
+	navigatingHistory = true;
+	selectContainer(history[historyPos]);
+	navigatingHistory = false;
+	return 1;
+}
+
+long DsAdminWindow::onForward(FXObject*, FXSelector, void*) {
+	if (historyPos + 1 >= (int)history.size()) return 1;
+	historyPos++;
+	navigatingHistory = true;
+	selectContainer(history[historyPos]);
+	navigatingHistory = false;
+	return 1;
+}
+
+long DsAdminWindow::onUp(FXObject*, FXSelector, void*) {
+	if (currentContainerRelDN.empty()) return 1;
+	std::vector<std::string> parts = splitDnEscaped(currentContainerRelDN.text());
+	std::string parent;
+	for (size_t i = 1; i < parts.size(); i++) parent += (parent.empty() ? "" : ",") + parts[i];
+	selectContainer(parent.c_str());
+	return 1;
+}
+
+long DsAdminWindow::onUpdBack(FXObject* sender, FXSelector, void*) {
+	sender->handle(this, FXSEL(SEL_COMMAND, historyPos > 0 ? ID_ENABLE : ID_DISABLE), NULL);
+	return 1;
+}
+long DsAdminWindow::onUpdForward(FXObject* sender, FXSelector, void*) {
+	sender->handle(this, FXSEL(SEL_COMMAND, historyPos + 1 < (int)history.size() ? ID_ENABLE : ID_DISABLE), NULL);
+	return 1;
+}
+long DsAdminWindow::onUpdUp(FXObject* sender, FXSelector, void*) {
+	sender->handle(this, FXSEL(SEL_COMMAND, (domain.isDC && !currentContainerRelDN.empty()) ? ID_ENABLE : ID_DISABLE), NULL);
+	return 1;
+}
+
+long DsAdminWindow::onToggleTree(FXObject*, FXSelector, void*) {
+	if (treeframe->shown()) treeframe->hide(); else treeframe->show();
+	splitter->recalc();
+	return 1;
+}
+
+int DsAdminWindow::selectedListIndex() const {
+	int idx = list->getCurrentItem();
+	if (idx < 0 || idx >= (int)currentObjects.size() || !list->isItemSelected(idx)) return -1;
+	return idx;
+}
+
+// "Eigenschaften" aus Werkzeugleiste/Vorgang: markiertes Objekt der Liste,
+// sonst der geoeffnete Container.
+long DsAdminWindow::onToolProperties(FXObject*, FXSelector, void*) {
+	int idx = selectedListIndex();
+	if (idx >= 0) {
+		switch (currentObjects[idx].type) {
+			case OBJ_USER: return onUserProperties(NULL, 0, NULL);
+			case OBJ_GROUP: return onGroupProperties(NULL, 0, NULL);
+			case OBJ_OU: propertiesFromList = true; return onProperties(NULL, 0, NULL);
+			default: return 1;
+		}
+	}
+	if (currentContainerRelDN.empty() || isOU(currentContainerRelDN)) {
+		propertiesFromList = false;
+		return onProperties(NULL, 0, NULL);
+	}
+	return 1;
+}
+
+long DsAdminWindow::onExportList(FXObject*, FXSelector, void*) {
+	FXString file = FXFileDialog::getSaveFilename(this, "Liste exportieren", "Liste.txt",
+	                                              "Text (Tabstopp-getrennt) (*.txt)\nText (kommagetrennt) (*.csv)\nAlle Dateien (*)");
+	if (file.empty()) return 1;
+	bool csv = FXPath::extension(file).lower() == "csv";
+	auto field = [&](const FXString& v) -> std::string {
+		std::string t = v.text();
+		if (!csv) return t;
+		std::string q = "\"";
+		for (char c : t) { if (c == '"') q += '"'; q += c; }
+		return q + "\"";
+	};
+	std::string sep = csv ? "," : "\t";
+	std::string out = field("Name") + sep + field("Typ") + sep + field("Beschreibung") + "\r\n";
+	for (FXint i = 0; i < list->getNumItems(); i++) {
+		FXString t = list->getItemText(i);
+		out += field(t.section('\t', 0)) + sep + field(t.section('\t', 1)) + sep + field(t.section('\t', 2)) + "\r\n";
+	}
+	FILE* f = fopen(file.text(), "wb");
+	if (!f) { FXMessageBox::error(this, MBOX_OK, "Liste exportieren", "Die Datei %s konnte nicht geschrieben werden.", file.text()); return 1; }
+	fwrite(out.data(), 1, out.size(), f);
+	fclose(f);
+	return 1;
+}
+
+long DsAdminWindow::onFind(FXObject*, FXSelector, void*) {
+	if (!domain.isDC) return 1;
+	FindObjectsDialog dlg(this, domain);
+	dlg.execute(PLACEMENT_OWNER);
+	onRefresh(NULL, 0, NULL);
+	return 1;
+}
+
+long DsAdminWindow::onAddToGroup(FXObject*, FXSelector, void*) {
+	int idx = selectedListIndex();
+	if (idx < 0) return 1;
+	DirObject obj = currentObjects[idx];
+	std::string objDn = std::string((obj.dn + "," + domain.baseDN).text());
+	getApp()->beginWaitCursor();
+	std::vector<GroupEntry> groups;
+	for (auto& c : listMemberCandidates(domain))
+		if (c.icon == resico_users && lowerCopy(c.dn) != lowerCopy(objDn)) groups.push_back(c);
+	getApp()->endWaitCursor();
+	GroupPickerDialog dlg(this, domain.realm, groups, "Gruppen auswählen", resico_users);
+	if (!dlg.execute(PLACEMENT_OWNER) || dlg.getResult().empty()) return 1;
+	std::string ldif;
+	for (int gi : dlg.getResult())
+		ldif += "dn: " + groups[gi].dn + "\nchangetype: modify\nadd: member\n" + ldifAttrLine("member", objDn) + "-\n\n";
+	std::string log;
+	FXString errorMsg;
+	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Active Directory", "%s", errorMsg.text());
+		return 1;
+	}
+	FXMessageBox::information(this, MBOX_OK, "Active Directory", "Der Vorgang \"Zu Gruppe hinzufügen\" wurde erfolgreich abgeschlossen.");
+	return 1;
+}
+
+long DsAdminWindow::onUpdAddToGroup(FXObject* sender, FXSelector, void*) {
+	int idx = selectedListIndex();
+	bool ok = idx >= 0 && (currentObjects[idx].type == OBJ_USER || currentObjects[idx].type == OBJ_GROUP ||
+	                       currentObjects[idx].type == OBJ_COMPUTER);
+	sender->handle(this, FXSEL(SEL_COMMAND, ok ? ID_ENABLE : ID_DISABLE), NULL);
+	return 1;
+}
+
+long DsAdminWindow::onUpdSelObject(FXObject* sender, FXSelector, void*) {
+	sender->handle(this, FXSEL(SEL_COMMAND, selectedListIndex() >= 0 ? ID_ENABLE : ID_DISABLE), NULL);
+	return 1;
+}
+
+long DsAdminWindow::onNewContact(FXObject*, FXSelector, void*) {
+	if (!domain.isDC) return 1;
+	FXString container = currentContainerRelDN.empty() ? domain.baseDN : currentContainerRelDN + "," + domain.baseDN;
+	NewContactDialog dlg(this, dnToFolder(("CN=x," + container).text()));
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	std::string cn = dlg.getFullName();
+	if (cn.empty()) { FXMessageBox::error(this, MBOX_OK, "Neues Objekt - Kontakt", "Bitte einen vollständigen Namen angeben."); return 1; }
+	std::string ldif = "dn: CN=" + rdnEscape(cn) + "," + std::string(container.text()) + "\nchangetype: add\nobjectClass: contact\n";
+	if (!dlg.getGiven().empty()) ldif += ldifAttrLine("givenName", dlg.getGiven());
+	if (!dlg.getInitials().empty()) ldif += ldifAttrLine("initials", dlg.getInitials());
+	if (!dlg.getSurname().empty()) ldif += ldifAttrLine("sn", dlg.getSurname());
+	if (!dlg.getDisplay().empty()) ldif += ldifAttrLine("displayName", dlg.getDisplay());
+	std::string log;
+	FXString errorMsg;
+	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return 1; }
+	showContainer(currentContainerRelDN);
+	return 1;
+}
+
+long DsAdminWindow::onNewSharedFolder(FXObject*, FXSelector, void*) {
+	if (!domain.isDC) return 1;
+	FXString container = currentContainerRelDN.empty() ? domain.baseDN : currentContainerRelDN + "," + domain.baseDN;
+	NewSharedFolderDialog dlg(this, dnToFolder(("CN=x," + container).text()));
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	std::string name = dlg.getName(), unc = dlg.getUnc();
+	if (name.empty() || unc.size() < 5 || unc.compare(0, 2, "\\\\") != 0) {
+		FXMessageBox::error(this, MBOX_OK, "Neues Objekt - Freigegebener Ordner",
+			"Bitte einen Namen und einen Netzwerkpfad der Form \\\\Server\\Freigabe angeben.");
+		return 1;
+	}
+	std::string ldif = "dn: CN=" + rdnEscape(name) + "," + std::string(container.text()) +
+	                   "\nchangetype: add\nobjectClass: volume\n" + ldifAttrLine("uNCName", unc);
+	std::string log;
+	FXString errorMsg;
+	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return 1; }
+	showContainer(currentContainerRelDN);
 	return 1;
 }
 
