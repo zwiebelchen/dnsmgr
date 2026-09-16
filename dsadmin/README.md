@@ -156,9 +156,12 @@ gefunden), obwohl die Datei existiert. Deshalb werden Besitzer, Modus
 und NT-ACL anschließend vom übergeordneten Verzeichnis des GPO-Zweigs
 übernommen (`samba-tool ntacl get --as-sddl` → `ntacl set`).
 
-Dasselbe Muster ist auch eine Ebene höher aufgetreten: nach einer
-Neuinstallation oder manuellen Eingriffen hilft dort
-`samba-tool ntacl sysvolreset`.
+Dieselbe Übernahme greift beim Schreiben der `GPT.INI` durch den
+Versionszähler: auch dort setzt `cp` als root Besitzer und Modus neu
+und lässt die NT-ACL fallen.
+
+Eine Ebene höher hilft nach einer Neuinstallation oder manuellen
+Eingriffen `samba-tool ntacl sysvolreset`.
 
 ## Weitere Gruppenrichtlinien-Erweiterungen
 
@@ -238,6 +241,18 @@ Debian fehlt. `dsadmin` prüft vor dem ersten LDAP-Zugriff, ob sie
 vorhanden sind, und bietet die Installation an -- sonst scheitert die
 erste GPO-Änderung mit einer nichtssagenden `env`-Meldung. `dcpromo`
 installiert das Paket inzwischen gleich bei der Heraufstufung mit.
+
+## Löschen von Gruppenrichtlinienobjekten
+
+"Entfernen" löst -- wie im Original -- nur die Verknüpfung; das Objekt
+selbst bleibt bestehen. Dadurch sammeln sich mit der Zeit verwaiste
+GPOs an. Die zusätzliche Schaltfläche "Löschen..." entfernt das Objekt
+vollständig: erst wird die Verknüpfung im aktuellen Container gelöst
+(sonst bliebe in `gPLink` ein Verweis auf ein Objekt stehen, das es
+nicht mehr gibt), dann löscht `samba-tool gpo del` das AD-Objekt samt
+SYSVOL-Verzeichnis. Die Rückfrage weist ausdrücklich darauf hin, dass
+das auch andere Container betrifft und dass "Entfernen" die richtige
+Wahl ist, wenn nur die Verknüpfung weg soll.
 
 ## Verknüpfungsreihenfolge
 

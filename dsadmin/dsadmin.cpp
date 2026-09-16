@@ -675,6 +675,19 @@ static bool linkGpo(FXWindow* owner, const FXString& guid, const FXString& conta
 	return true;
 }
 
+// Loescht ein GPO vollstaendig: AD-Objekt und SYSVOL-Verzeichnis.
+// "Entfernen" im Reiter loest dagegen nur die Verknuepfung -- so haelt
+// es auch das Original, was aber dazu fuehrt, dass sich mit der Zeit
+// verwaiste GPOs ansammeln.
+static bool deleteGpoCompletely(FXWindow* owner, const FXString& guid, FXString& errorMsg) {
+	FXString cred = ensureAdminCreds(owner);
+	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann das Gruppenrichtlinienobjekt nicht gelöscht werden."; return false; }
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("del"), guid, cred }, out);
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
+	return true;
+}
+
 static bool unlinkGpo(FXWindow* owner, const FXString& guid, const FXString& containerFullDN, FXString& errorMsg) {
 	FXString cred = ensureAdminCreds(owner);
 	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann die Verknüpfung nicht entfernt werden."; return false; }
@@ -2404,6 +2417,14 @@ static void writeGptIniVersion(const std::string& gptIniPath, uint32_t newVersio
 	out.close();
 	runAsRoot({ FXString("cp"), tmpPath, FXString(gptIniPath.c_str()) });
 	runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
+
+	// "cp" als root setzt Besitzer und Modus der Zieldatei neu und laesst
+	// die NT-ACL fallen -- danach gehoert die GPT.INI root statt den
+	// Domaenen-Administratoren. Deshalb die Rechte des GPO-Verzeichnisses
+	// wieder uebernehmen, wie bei der .aas-Datei auch.
+	size_t slash = gptIniPath.find_last_of('/');
+	if (slash != std::string::npos)
+		inheritSysvolPermissions(gptIniPath.substr(0, slash), gptIniPath, false);
 }
 
 // ---------------------------------------------------------------------
@@ -3298,7 +3319,7 @@ private:
 	std::vector<FXString> linkedGuids;
 	std::map<FXString, FXString> guidToName;
 public:
-	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS, ID_FOLDER_REDIR, ID_LINK_UP, ID_LINK_DOWN };
+	enum { ID_NEW_GPO = FXDialogBox::ID_LAST, ID_ADD_GPO, ID_REMOVE_GPO, ID_EDIT_GPO, ID_INSTALL_SOFTWARE, ID_SECURITY_SETTINGS, ID_SCRIPTS, ID_FOLDER_REDIR, ID_LINK_UP, ID_LINK_DOWN, ID_DELETE_GPO };
 	long onNewGpo(FXObject*, FXSelector, void*);
 	long onAddGpo(FXObject*, FXSelector, void*);
 	long onRemoveGpo(FXObject*, FXSelector, void*);
@@ -3307,6 +3328,7 @@ public:
 	long onSecuritySettings(FXObject*, FXSelector, void*);
 	long onScripts(FXObject*, FXSelector, void*);
 	long onFolderRedirection(FXObject*, FXSelector, void*);
+	long onDeleteGpo(FXObject*, FXSelector, void*);
 	long onLinkUp(FXObject*, FXSelector, void*);
 	long onLinkDown(FXObject*, FXSelector, void*);
 	long moveSelectedLink(int delta);
@@ -3340,6 +3362,7 @@ public:
 		new FXButton(gpoBtns, "&Hinzufügen...", NULL, this, ID_ADD_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Entfernen", NULL, this, ID_REMOVE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "&Bearbeiten...", NULL, this, ID_EDIT_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
+		new FXButton(gpoBtns, "&Löschen...", NULL, this, ID_DELETE_GPO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "Nach &oben", NULL, this, ID_LINK_UP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXButton(gpoBtns, "Nach &unten", NULL, this, ID_LINK_DOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		FXHorizontalFrame* gpoBtns2 = new FXHorizontalFrame(gpoPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,4);
@@ -3365,6 +3388,7 @@ FXDEFMAP(PropertiesDialog) PropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SECURITY_SETTINGS, PropertiesDialog::onSecuritySettings),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_SCRIPTS, PropertiesDialog::onScripts),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_FOLDER_REDIR, PropertiesDialog::onFolderRedirection),
+	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_DELETE_GPO, PropertiesDialog::onDeleteGpo),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_LINK_UP, PropertiesDialog::onLinkUp),
 	FXMAPFUNC(SEL_COMMAND, PropertiesDialog::ID_LINK_DOWN, PropertiesDialog::onLinkDown),
 };
@@ -3506,6 +3530,36 @@ long PropertiesDialog::moveSelectedLink(int delta) {
 		gpoList->setCurrentItem(target);
 		gpoList->selectItem(target);
 	}
+	return 1;
+}
+
+long PropertiesDialog::onDeleteGpo(FXObject*, FXSelector, void*) {
+	int idx = gpoList->getCurrentItem();
+	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
+	FXString guid = linkedGuids[idx];
+	FXString name = guidToName.count(guid) ? guidToName[guid] : guid;
+
+	// Deutlich vom blossen "Entfernen" abgrenzen: das hier ist endgueltig
+	// und betrifft auch alle anderen Container, die das GPO verknuepft
+	// haben.
+	if (FXMessageBox::warning(this, MBOX_YES_NO, "Gruppenrichtlinienobjekt löschen",
+		"\"%s\" wird vollständig gelöscht -- das Objekt in Active Directory\n"
+		"und sein Verzeichnis im SYSVOL, mit allen Einstellungen darin.\n\n"
+		"Das wirkt sich auch auf alle anderen Container aus, die dieses\n"
+		"Objekt verknüpft haben. Soll nur die Verknüpfung hier entfernt\n"
+		"werden, ist \"Entfernen\" die richtige Schaltfläche.\n\n"
+		"Endgültig löschen?", name.text()) != MBOX_CLICKED_YES) return 1;
+
+	// Erst die Verknuepfung hier loesen, dann loeschen -- sonst bleibt in
+	// gPLink ein Verweis auf ein Objekt stehen, das es nicht mehr gibt.
+	FXString errorMsg;
+	unlinkGpo(this, guid, containerFullDN, errorMsg);
+
+	if (!deleteGpoCompletely(this, guid, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Löschen fehlgeschlagen", "%s", errorMsg.text());
+		return 1;
+	}
+	reloadList();
 	return 1;
 }
 
