@@ -134,6 +134,32 @@ Nicht gegengeprüft ist der Wert von `packageFlags` für
 wird das Assigned-Bit gegen das Published-Bit getauscht, was eine
 Annahme bleibt.
 
+### Entfernen mit Deinstallation
+
+Ein echter Windows-2000-Server **löscht das Paketobjekt nicht**, wenn
+die Software auch von den Clients verschwinden soll. Es bleibt stehen
+und wird umgeschrieben:
+
+| | zugewiesen | zur Deinstallation vorgemerkt |
+|---|---|---|
+| `msiScriptName` | `A` | `R` |
+| `packageFlags` | `0xA0084C70` | `0xA0080110` |
+
+Der Client sieht daran beim nächsten Start, dass er die Anwendung
+entfernen soll. Wird das Objekt stattdessen gelöscht -- wie es diese
+Umsetzung zuvor tat -- erfährt er davon nie und die Software bleibt
+installiert.
+
+Das Entfernen fragt deshalb wie im Original nach: sofort deinstallieren
+(Objekt umschreiben) oder auf den Clients belassen (Objekt löschen).
+Ein bereits vorgemerkter Auftrag wird in der Liste als "wird
+deinstalliert" angezeigt; ihn zu entfernen löscht dann nur noch den
+Auftrag selbst.
+
+Die Flags werden von Windows vorzeichenbehaftet geschrieben
+(`0xA0084C70` erscheint als `-1610068880`) -- beim Auslesen muss über
+`int32_t` geparst werden, `stoul` scheitert daran.
+
 ## Schreibweise der SYSVOL-Zweige
 
 `samba-tool gpo create` legt die Zweige als `Machine` und `User` an --

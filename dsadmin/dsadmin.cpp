@@ -1680,6 +1680,7 @@ struct SoftwarePackageInfo {
 	std::string msiScriptPath;
 	bool assigned = true;    // aus packageFlags abgeleitet
 	bool published = false;
+	bool pendingRemoval = false; // msiScriptName "R": wartet auf Deinstallation
 };
 
 // Listet alle Pakete eines Zweigs (Computer/Benutzer) eines GPOs auf.
@@ -1708,15 +1709,96 @@ static std::vector<SoftwarePackageInfo> listSoftwarePackages(FXWindow* owner, co
 		if (line.rfind("displayName: ", 0) == 0) { cur.displayName = line.substr(13); continue; }
 		if (line.rfind("msiScriptPath: ", 0) == 0) { cur.msiScriptPath = line.substr(15); continue; }
 		if (line.rfind("packageFlags: ", 0) == 0) {
+			// Windows schreibt den Wert vorzeichenbehaftet (0xA0084C70
+			// erscheint als -1610068880); stoul wuerde daran scheitern.
 			uint32_t flags = 0;
-			try { flags = (uint32_t)std::stoul(line.substr(14)); } catch (...) {}
+			try { flags = (uint32_t)(int32_t)std::stoll(line.substr(14)); } catch (...) {}
 			cur.assigned = (flags & 0x800) != 0;
 			cur.published = (flags & 0x8) != 0;
 			continue;
 		}
+		if (line.rfind("msiScriptName: ", 0) == 0) { cur.pendingRemoval = (line.substr(15) == "R"); continue; }
 	}
 	flush();
 	return out;
+}
+
+// Beim Entfernen fragt das Original, was mit bereits installierter
+// Software geschehen soll. Genau diese zwei Moeglichkeiten bilden wir ab.
+class RemovePackageDialog : public FXDialogBox {
+	FXDECLARE(RemovePackageDialog)
+private:
+	FXRadioButton *rbUninstall, *rbLeave;
+protected:
+	RemovePackageDialog() : rbUninstall(NULL), rbLeave(NULL) {}
+public:
+	enum { ID_CHOICE = FXDialogBox::ID_LAST };
+	long onChoice(FXObject* sender, FXSelector, void*) {
+		rbUninstall->setCheck(sender == rbUninstall);
+		rbLeave->setCheck(sender == rbLeave);
+		return 1;
+	}
+	bool uninstallFromClients() const { return rbUninstall->getCheck(); }
+
+	RemovePackageDialog(FXWindow* owner, const std::string& name)
+		: FXDialogBox(owner, "Software entfernen", DECOR_TITLE | DECOR_BORDER, 0,0,440,210) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12);
+		new FXLabel(main, ("\"" + name + "\" aus der Gruppenrichtlinie entfernen:").c_str(), NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+		rbUninstall = new FXRadioButton(main, "Software &sofort von Benutzern und Computern deinstallieren", this, ID_CHOICE);
+		new FXLabel(main, "Das Paket bleibt als Auftrag stehen, bis alle Clients die\n"
+		                  "Anwendung entfernt haben.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		rbLeave = new FXRadioButton(main, "Software auf den Clients &belassen", this, ID_CHOICE);
+		new FXLabel(main, "Nur die Zuweisung wird gelöscht. Bereits installierte\n"
+		                  "Anwendungen bleiben erhalten und werden nicht mehr verwaltet.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		rbUninstall->setCheck(TRUE);
+
+		FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+		new FXFrame(btns, LAYOUT_FILL_X);
+		new FXButton(btns, "OK", NULL, this, ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btns, "Abbrechen", NULL, this, ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+};
+
+FXDEFMAP(RemovePackageDialog) RemovePackageDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, RemovePackageDialog::ID_CHOICE, RemovePackageDialog::onChoice),
+};
+FXIMPLEMENT(RemovePackageDialog, FXDialogBox, RemovePackageDialogMap, ARRAYNUMBER(RemovePackageDialogMap))
+
+// Merkt ein Paket zur Deinstallation vor, statt es zu loeschen.
+//
+// So macht es auch ein echter Windows-2000-Server: das
+// packageRegistration-Objekt bleibt stehen, msiScriptName wechselt von
+// "A" auf "R" und packageFlags von 0xA0084C70 auf 0xA0080110. Der
+// Client sieht daran beim naechsten Start, dass er die Anwendung
+// entfernen soll. Wird das Objekt stattdessen geloescht, erfaehrt er
+// davon nie und die Software bleibt installiert. (Werte aus dem
+// Vergleich mit einem echten Server uebernommen.)
+static const uint32_t PACKAGE_FLAGS_REMOVE = 0xA0080110;
+
+static bool markSoftwarePackageForRemoval(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid,
+                                           bool isMachine, const SoftwarePackageInfo& pkg,
+                                           std::string& log, FXString& errorMsg) {
+	std::string scope = isMachine ? "Machine" : "User";
+	std::string scopedGpoDn = "CN=" + scope + ",CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+	std::string classStoreDn = "CN=Class Store," + scopedGpoDn;
+	std::string packageDn = "CN=" + pkg.guid + ",CN=Packages," + classStoreDn;
+	std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+
+	std::string ldif = "dn: " + packageDn + "\n"
+	                    "changetype: modify\n"
+	                    "replace: msiScriptName\n"
+	                    "msiScriptName: R\n-\n"
+	                    "replace: packageFlags\n"
+	                    "packageFlags: " + std::to_string((int32_t)PACKAGE_FLAGS_REMOVE) + "\n-\n"
+	                    "replace: lastUpdateSequence\n"
+	                    "lastUpdateSequence: " + updateSequenceStamp() + "\n";
+	if (!runLdapChange(owner, domain.realm, ldif, false, log, errorMsg)) return false;
+
+	if (!bumpClassStoreConfirmation(owner, domain.realm, classStoreDn, log, errorMsg)) return false;
+	bumpGpoVersion(owner, domain.realm, gpoObjectDn, isMachine, !isMachine, log);
+	return true;
 }
 
 // Entfernt ein Paket wieder: LDAP-Objekt loeschen + zugehoerige
@@ -2933,11 +3015,14 @@ public:
 	void reload() {
 		machineList->clearItems();
 		machinePkgs = listSoftwarePackages(credOwner, domain, gpoGuid, true);
-		for (auto& p : machinePkgs) machineList->appendItem((p.displayName + " (Zugewiesen)").c_str());
+		for (auto& p : machinePkgs)
+			machineList->appendItem((p.displayName + (p.pendingRemoval ? " (wird deinstalliert)" : " (Zugewiesen)")).c_str());
 
 		userList->clearItems();
 		userPkgs = listSoftwarePackages(credOwner, domain, gpoGuid, false);
-		for (auto& p : userPkgs) userList->appendItem((p.displayName + (p.published ? " (Veröffentlicht)" : " (Zugewiesen)")).c_str());
+		for (auto& p : userPkgs)
+			userList->appendItem((p.displayName + (p.pendingRemoval ? " (wird deinstalliert)"
+			                                     : p.published ? " (Veröffentlicht)" : " (Zugewiesen)")).c_str());
 	}
 
 	long onAdd(FXWindow* owner, bool forcedMachine) {
@@ -2960,28 +3045,44 @@ public:
 	long onAddMachine(FXObject* o, FXSelector s, void* p) { (void)o; (void)s; (void)p; return onAdd(this, true); }
 	long onAddUser(FXObject* o, FXSelector s, void* p) { (void)o; (void)s; (void)p; return onAdd(this, false); }
 
-	long onRemoveMachine(FXObject*, FXSelector, void*) {
-		int idx = machineList->getCurrentItem();
-		if (idx < 0 || idx >= (int)machinePkgs.size()) return 1;
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen", "\"%s\" wirklich entfernen?", machinePkgs[idx].displayName.c_str()) != MBOX_CLICKED_YES) return 1;
-		FXString errorMsg;
-		if (!deleteSoftwarePackage(credOwner, domain, gpoGuid, true, machinePkgs[idx], errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	long removeSelected(bool isMachine) {
+		auto& pkgs = isMachine ? machinePkgs : userPkgs;
+		int idx = (isMachine ? machineList : userList)->getCurrentItem();
+		if (idx < 0 || idx >= (int)pkgs.size()) return 1;
+
+		// Steht das Paket schon auf "wird deinstalliert", ist die Frage
+		// nach der Software auf den Clients hinfaellig -- dann geht es
+		// nur noch darum, den Auftrag selbst loszuwerden.
+		if (pkgs[idx].pendingRemoval) {
+			if (FXMessageBox::question(this, MBOX_YES_NO, "Eintrag löschen",
+				"\"%s\" ist bereits zur Deinstallation vorgemerkt.\n\n"
+				"Den Auftrag jetzt endgültig aus der Gruppenrichtlinie löschen?\n"
+				"Clients, die ihn noch nicht ausgeführt haben, behalten die\n"
+				"Anwendung dann.", pkgs[idx].displayName.c_str()) != MBOX_CLICKED_YES) return 1;
+			FXString errorMsg;
+			if (!deleteSoftwarePackage(credOwner, domain, gpoGuid, isMachine, pkgs[idx], errorMsg))
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			reload();
+			return 1;
 		}
+
+		RemovePackageDialog dlg(this, pkgs[idx].displayName);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
+		FXString errorMsg;
+		std::string log;
+		bool ok;
+		if (dlg.uninstallFromClients())
+			ok = markSoftwarePackageForRemoval(credOwner, domain, gpoGuid, isMachine, pkgs[idx], log, errorMsg);
+		else
+			ok = deleteSoftwarePackage(credOwner, domain, gpoGuid, isMachine, pkgs[idx], errorMsg);
+
+		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 		reload();
 		return 1;
 	}
-	long onRemoveUser(FXObject*, FXSelector, void*) {
-		int idx = userList->getCurrentItem();
-		if (idx < 0 || idx >= (int)userPkgs.size()) return 1;
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen", "\"%s\" wirklich entfernen?", userPkgs[idx].displayName.c_str()) != MBOX_CLICKED_YES) return 1;
-		FXString errorMsg;
-		if (!deleteSoftwarePackage(credOwner, domain, gpoGuid, false, userPkgs[idx], errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
-		}
-		reload();
-		return 1;
-	}
+	long onRemoveMachine(FXObject*, FXSelector, void*) { return removeSelected(true); }
+	long onRemoveUser(FXObject*, FXSelector, void*) { return removeSelected(false); }
 
 	SoftwarePackageListDialog(FXWindow* owner, const DomainInfo& domain_, const FXString& gpoGuid_)
 		: FXDialogBox(owner, "Softwareinstallation", DECOR_ALL, 0,0,520,420),
