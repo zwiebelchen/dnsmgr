@@ -5417,6 +5417,7 @@ public:
 			select = std::max(0, std::min(select, (int)entries.size() - 1));
 			nameList->setCurrentItem(select);
 			nameList->selectItem(select);
+			nameList->makeItemVisible(select);
 		}
 		refreshChecks();
 	}

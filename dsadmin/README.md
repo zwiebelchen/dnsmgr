@@ -136,7 +136,7 @@ Doppelklick bearbeitet.
   Windows-Clients wirken nur Einträge, deren Name dort ein Dienst ist.
   Beim ersten Definieren bekommt ein Dienst Standardberechtigungen
   (Administratoren/SYSTEM Vollzugriff, interaktive Benutzer und Dienste
-  lesend); "Sicherheit bearbeiten..." folgt mit dem Berechtigungsdialog.
+  lesend); "Sicherheit bearbeiten..." öffnet den Berechtigungsdialog.
 - Noch ohne Funktion: Registrierung, Dateisystem,
   Richtlinien öffentlicher Schlüssel, IP-Sicherheit,
   Internet Explorer-Wartung, Remoteinstallationsdienste.
@@ -144,6 +144,29 @@ Doppelklick bearbeitet.
 Die Zweige heißen bei den provisionierten Standard-GPOs `MACHINE`/`USER`,
 bei neu angelegten `Machine`/`User`; geschrieben wird immer in das
 vorhandene Verzeichnis.
+
+## Berechtigungsdialog
+
+Ein Dialog für alle Objekte mit Berechtigungen (Systemdienste, später
+Registrierung und Dateisystem): oben die Konten mit Hinzufügen/Entfernen
+über die Objektauswahl, darunter die einfachen Berechtigungen mit
+Zulassen/Verweigern -- je Objektart die von Windows 2000 (Dienste:
+Vollzugriff, Lesen, Starten/beenden/anhalten, Schreiben, Löschen;
+Registrierung: Vollzugriff, Lesen; Dateisystem: Vollzugriff, Ändern,
+Lesen/Ausführen, Lesen, Schreiben).
+
+Gespeichert wird SDDL. Der Leser/Schreiber ist verlustfrei: Besitzer,
+Gruppe, SACL, DACL-Flags, Hex-Rechte und Objekt-ACEs gehen unverändert
+durch, SDDL-Kürzel (`BA`, `SY`, `DA` ...) werden beim Lesen zu SIDs
+aufgelöst und beim Schreiben wieder verwendet. Nur Konten, an denen im
+Dialog etwas geändert wurde, bekommen neu erzeugte Einträge -- in
+kanonischer Reihenfolge (Verweigern vor Zulassen, Geerbtes zuletzt);
+alles andere bleibt Zeichen für Zeichen stehen. Generische Rechte
+(`GA`/`GR`/`GW`/`GX`) werden für die Anzeige in die Bits der jeweiligen
+Objektart übersetzt. Geerbte Berechtigungen erscheinen grau angehakt;
+"Vererbbare übergeordnete Berechtigungen übernehmen" (nicht bei
+Diensten) schaltet das `P`-Flag und fragt beim Abschalten wie das
+Original, ob die geerbten Einträge übernommen oder entfernt werden.
 
 ## Administrative Vorlagen
 
