@@ -459,13 +459,31 @@ Original die niedrigste Priorität. Der Gruppenrichtlinie-Reiter zeigt
 die Liste deshalb umgekehrt an: oben steht, was zuletzt in `gPLink`
 steht, und "Nach oben" bedeutet "höhere Priorität".
 
-## Gruppenmitgliedschaft
+## Eigenschaften einer Gruppe
 
-"Eigenschaften" auf einer Sicherheitsgruppe öffnet eine
-Mitgliederliste mit Hinzufügen/Entfernen (`samba-tool group
-addmembers`/`removemembers`/`listmembers`) -- für besonders
-geschützte Gruppen greift bei Bedarf derselbe Administrator-
-Anmeldedaten-Fallback wie bei GPOs.
+Doppelklick oder "Eigenschaften" öffnet wie im Original vier Reiter;
+geschrieben wird erst mit OK/Übernehmen:
+
+- *Allgemein*: Gruppenname (Prä-Windows 2000), Beschreibung, E-Mail,
+  Gruppenbereich (Lokal in Domäne/Global/Universal) und Gruppentyp
+  (Sicherheit/Verteilung) über `groupType`, Anmerkungen (`info`, mit
+  CRLF). Bei vordefinierten Gruppen (Builtin) sind Bereich und Typ
+  gesperrt. Bereich/Typ werden vor den Mitgliedern geschrieben, damit
+  eine von AD abgelehnte Umwandlung auffällt, bevor sich etwas anderes
+  ändert.
+- *Mitglieder*: Benutzer, Computer und Gruppen mit Active
+  Directory-Ordner; Hinzufügen über die Objektauswahl, Entfernen mit
+  Rückfrage. Geschrieben als ein LDAP-Modify mit `add: member` /
+  `delete: member` auf der Gruppe -- DNs statt Anmeldenamen, damit
+  Computerkonten und Namen mit Sonderzeichen ohne Umweg funktionieren.
+- *Mitglied von*: ändert das `member`-Attribut der jeweils anderen
+  Gruppe. Nach einem Teilfehler wird der echte Stand neu gelesen.
+- *Verwaltet von*: dasselbe Panel wie bei Organisationseinheiten und
+  der Domäne (`ManagedByPanel`).
+
+Wie bei Benutzern führen Mitgliederlisten keine Mitgliedschaft über die
+primäre Gruppe (`primaryGroupID`) -- das Original zeigt sie dort auch
+nicht.
 
 ## Anzeigename vs. Anmeldename
 

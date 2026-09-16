@@ -7166,11 +7166,13 @@ public:
 		new FXLabel(head, cn, NULL, LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
-		samField = propLabeledField(page, "Gruppenname (&Prä-Windows 2000):", 200);
+		// Wie im Original steht der Prä-Windows-2000-Name ueber seinem Feld.
+		new FXLabel(page, "Gruppenname (&Prä-Windows 2000):", NULL, JUSTIFY_LEFT);
+		samField = new FXTextField(page, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
 		samField->setText(origSam.c_str());
-		descField = propLabeledField(page, "&Beschreibung:", 200);
+		descField = propLabeledField(page, "&Beschreibung:", 110);
 		descField->setText(origDesc.c_str());
-		mailField = propLabeledField(page, "&E-Mail:", 200);
+		mailField = propLabeledField(page, "&E-Mail:", 110);
 		mailField->setText(origMail.c_str());
 
 		FXHorizontalFrame* boxes = new FXHorizontalFrame(page, LAYOUT_FILL_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,4,4, 10,0);
@@ -7184,7 +7186,7 @@ public:
 		// Vordefinierte Gruppen (Builtin) haben einen festen Bereich und Typ.
 		if (builtin) for (FXWindow* w : { (FXWindow*)r1, (FXWindow*)r2, (FXWindow*)r3, (FXWindow*)t1, (FXWindow*)t2 }) w->disable();
 
-		infoText = propLabeledText(page, "&Anmerkungen:", 90, 200);
+		infoText = propLabeledText(page, "&Anmerkungen:", 90, 110);
 		infoText->setText(origInfo.c_str());
 	}
 
