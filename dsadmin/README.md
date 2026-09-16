@@ -70,6 +70,71 @@ Domänendatenbank. `dsadmin` übernimmt genau das: die Verwaltung von
   anlegen/verknüpfen/lösen über `samba-tool gpo`) und dem
   vollständigen Gruppenrichtlinienobjekt-Editor dahinter (siehe unten)
 
+## Eigenschaften von Organisationseinheit und Domäne
+
+Wie im Original drei Reiter:
+
+- *Allgemein*: Beschreibung, Straße (mehrzeilig, in AD mit CRLF),
+  Stadt, Bundesland/Kanton, PLZ, Land/Region. Die Länderliste kommt
+  aus dem Debian-Paket `iso-codes` (`iso_3166-1.json`), die deutschen
+  Namen direkt aus dessen `.mo`-Datei; geschrieben werden `c`, `co`
+  und `countryCode`. Bei der Domäne selbst stattdessen der
+  Prä-Windows-2000-Name und der Domänenmodus.
+- *Verwaltet von*: `managedBy` über die Objektauswahl, dazu Büro,
+  Adresse und Rufnummern des Verantwortlichen (nur lesend).
+- *Gruppenrichtlinie*: Verknüpfungen mit "Kein Vorrang" (Option 2) und
+  "Deaktiviert" (Option 1), Neu, Hinzufügen..., Bearbeiten, Optionen...,
+  Löschen..., Eigenschaften (Erstellt/Geändert/Revisionen, Computer-
+  bzw. Benutzerkonfiguration deaktivieren über `flags`), Nach
+  oben/unten, "Richtlinienvererbung deaktivieren" (`gPOptions`).
+  Doppelklick oder Bearbeiten öffnet das Gruppenrichtlinienfenster.
+
+Gelesen wird über Sambas privilegierten ldapi-Socket (ohne
+Anmeldedaten), geschrieben per LDAP mit Administrator-Anmeldedaten.
+
+## Gruppenrichtlinienfenster
+
+Nachbau des Gruppenrichtlinienobjekt-Editors: Baum mit Computer- und
+Benutzerkonfiguration, rechts der Inhalt des gewählten Knotens,
+Doppelklick bearbeitet.
+
+- **Softwareinstallation** (Computer/Benutzer): Pakete mit
+  Bereitstellungsstatus, Rechtsklick für Neu → Paket... und Entfernen...
+- **Skripts**, **Ordnerumleitung**, **Administrative Vorlagen**: öffnen
+  die bestehenden Dialoge bzw. den ADM-Editor.
+- **Sicherheitseinstellungen** in `Machine/Microsoft/Windows
+  NT/SecEdit/GptTmpl.inf` (UTF-16LE mit BOM; Abschnitte und Schlüssel,
+  die hier nicht bearbeitet werden, bleiben erhalten):
+  - Kennwortrichtlinien, Kontosperrungsrichtlinien (`[System Access]`)
+  - Überwachungsrichtlinien (`[Event Audit]`, Bit 1 Erfolg, Bit 2 Fehler)
+  - Zuweisen von Benutzerrechten (`[Privilege Rights]`, Konten als
+    `*SID`; aufgelöst über `objectSid` aus AD plus feste SIDs wie
+    Jeder oder Authentifizierte Benutzer)
+  - Sicherheitsoptionen (die Liste von Windows 2000, überwiegend
+    `[Registry Values]` als `MACHINE\...=4,1` bzw. `=1,"Text"`)
+  - Einstellungen für Ereignisprotokolle (`[Application Log]` usw.)
+  - Eingeschränkte Gruppen (`[Group Membership]`, `*SID__Members` und
+    `*SID__Memberof`; wie im Original legt "Gruppe hinzufügen" beide
+    Listen zunächst leer an)
+
+  Beim Speichern werden fehlende Verzeichnisse mit den SYSVOL-Rechten
+  des Zweigs angelegt, die Sicherheits-Erweiterung
+  `{827D319E-6EAC-11D2-A4EA-00C04F79F83A}` im GPO registriert und die
+  Version erhöht.
+
+  Kontorichtlinien wirken in AD nur aus GPOs, die mit der Domäne selbst
+  verknüpft sind; ein Windows-DC übernimmt sie dann ins Domänenobjekt.
+  Samba tut das nicht, deshalb gehen die definierten Kennwort- und
+  Sperrwerte eines mit der Domäne verknüpften GPOs zusätzlich an
+  `samba-tool domain passwordsettings`.
+- Noch ohne Funktion: Systemdienste, Registrierung, Dateisystem,
+  Richtlinien öffentlicher Schlüssel, IP-Sicherheit,
+  Internet Explorer-Wartung, Remoteinstallationsdienste.
+
+Die Zweige heißen bei den provisionierten Standard-GPOs `MACHINE`/`USER`,
+bei neu angelegten `Machine`/`User`; geschrieben wird immer in das
+vorhandene Verzeichnis.
+
 ## Gruppenrichtlinienobjekt-Editor
 
 Der "&Bearbeiten..."-Button im Gruppenrichtlinie-Reiter öffnet den
@@ -335,15 +400,14 @@ LDAP gelesen, umsortiert und komplett zurückgeschrieben. Die
 Optionsflags jeder einzelnen Verknüpfung (`;0`, `;1` ...) bleiben dabei
 erhalten.
 
-Offener Punkt: Die Liste zeigt die Verknüpfungen in genau der
-Reihenfolge, in der sie im `gPLink`-Attribut stehen (das ist auch die
-Ausgabereihenfolge von `samba-tool gpo getlink`). Welches Ende davon
-die höhere Priorität hat, ist hier noch nicht gegen einen echten
-Client verifiziert -- im echten Active Directory hängt `setlink` neue
-Verknüpfungen hinten an, während sie in der Oberfläche oben mit der
-höchsten Priorität erscheinen. Sollte sich das bestätigen, müsste die
-Anzeige umgedreht werden, damit "Nach oben" wie im Original
-"höhere Priorität" bedeutet.
+Geklärt (am Samba-Quelltext, `samba/gp/gpclass.py` und
+`samba/netcmd/gpo.py`): Die Blöcke in `gPLink` werden von vorn nach
+hinten verarbeitet, Späteres überschreibt Früheres -- die **höchste
+Priorität hat also der letzte Block**. `samba-tool gpo setlink` stellt
+neue Verknüpfungen vorne an, eine neue Verknüpfung bekommt damit wie im
+Original die niedrigste Priorität. Der Gruppenrichtlinie-Reiter zeigt
+die Liste deshalb umgekehrt an: oben steht, was zuletzt in `gPLink`
+steht, und "Nach oben" bedeutet "höhere Priorität".
 
 ## Gruppenmitgliedschaft
 
