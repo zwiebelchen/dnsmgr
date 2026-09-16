@@ -654,6 +654,18 @@ static bool createGpo(FXWindow* owner, const FXString& displayName, FXString& er
 	return true;
 }
 
+// Loescht das Gruppenrichtlinienobjekt selbst -- samt SYSVOL-Anteil und
+// allen Verknuepfungen. Nicht zu verwechseln mit unlinkGpo(), das nur
+// die Verknuepfung zu einem Container loest.
+static bool deleteGpo(FXWindow* owner, const FXString& guid, FXString& errorMsg) {
+	FXString cred = ensureAdminCreds(owner);
+	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann kein GPO gelöscht werden."; return false; }
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("gpo"), FXString("del"), guid, cred }, out);
+	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
+	return true;
+}
+
 static bool linkGpo(FXWindow* owner, const FXString& guid, const FXString& containerFullDN, FXString& errorMsg) {
 	FXString cred = ensureAdminCreds(owner);
 	if (cred.empty()) { errorMsg = "Ohne Administrator-Anmeldedaten kann kein GPO verknüpft werden."; return false; }
@@ -3317,8 +3329,53 @@ long PropertiesDialog::onAddGpo(FXObject*, FXSelector, void*) {
 long PropertiesDialog::onRemoveGpo(FXObject*, FXSelector, void*) {
 	int idx = gpoList->getCurrentItem();
 	if (idx < 0 || idx >= (int)linkedGuids.size()) return 1;
+	FXString guid = linkedGuids[idx];
+	FXString name = guidToName.count(guid) ? guidToName[guid] : guid;
+
+	// Wie im Original nachfragen, was gemeint ist. Ohne die Frage loest
+	// "Entfernen" nur die Verknuepfung, das Objekt bleibt bestehen --
+	// und beim naechsten Anlegen unter demselben Namen scheitert man an
+	// "A GPO already existing with name". Vorgabe ist, ebenfalls wie im
+	// Original, das blosse Loesen der Verknuepfung.
+	FXDialogBox dlg(this, "Gruppenrichtlinienobjekt entfernen",
+	                 DECOR_TITLE | DECOR_BORDER, 0,0,0,0, 10,10,10,10);
+	FXVerticalFrame* main = new FXVerticalFrame(&dlg, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+	new FXLabel(main, FXString("Was soll mit \"") + name + "\" geschehen?", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+	new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+
+	FXint choice = 0;
+	FXDataTarget target(choice);
+	new FXRadioButton(main, "Die &Verknüpfung aus der Liste entfernen",
+	                   &target, FXDataTarget::ID_OPTION + 0);
+	new FXRadioButton(main, "Die Verknüpfung entfernen und das Gruppenrichtlinienobjekt\n&dauerhaft löschen",
+	                   &target, FXDataTarget::ID_OPTION + 1);
+
+	FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
+	new FXFrame(btns, LAYOUT_FILL_X);
+	new FXButton(btns, "OK", NULL, &dlg, FXDialogBox::ID_ACCEPT,
+	              BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	new FXButton(btns, "Abbrechen", NULL, &dlg, FXDialogBox::ID_CANCEL,
+	              BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+
 	FXString errorMsg;
-	unlinkGpo(this, linkedGuids[idx], containerFullDN, errorMsg);
+	if (!unlinkGpo(this, guid, containerFullDN, errorMsg)) {
+		FXMessageBox::error(this, MBOX_OK, "Entfernen fehlgeschlagen", "%s", errorMsg.text());
+		return 1;
+	}
+
+	if (choice == 1) {
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Dauerhaft löschen",
+			"\"%s\" wird endgültig gelöscht -- mit allen Einstellungen und\n"
+			"allen Verknüpfungen zu anderen Containern.\n\nFortfahren?",
+			name.text()) != MBOX_CLICKED_YES) {
+			reloadList();
+			return 1;
+		}
+		if (!deleteGpo(this, guid, errorMsg))
+			FXMessageBox::error(this, MBOX_OK, "Löschen fehlgeschlagen", "%s", errorMsg.text());
+	}
 	reloadList();
 	return 1;
 }

@@ -242,12 +242,14 @@ solchen Zeilen, wird sie ungefiltert angezeigt, damit nie etwas
 verlorengeht.
 
 Ein Fall wird eigens behandelt: "A GPO already existing with name".
-Das passiert regelmäßig, weil "Entfernen" im Gruppenrichtlinie-Reiter
-nur die **Verknüpfung** löst -- das Gruppenrichtlinienobjekt selbst
-bleibt bestehen, genau wie im echten Windows. Legt man danach eines mit
-demselben Namen an, scheitert das. Statt der Rohmeldung erklärt der
-Dialog das und bietet an, das vorhandene Objekt mit dem Container zu
-verknüpfen.
+Legt man ein Gruppenrichtlinienobjekt unter einem Namen an, den es
+schon gibt, erklärt der Dialog das und bietet an, das vorhandene Objekt
+mit dem Container zu verknüpfen.
+
+Vorbeugend fragt "Entfernen" wie im Original nach, was gemeint ist:
+nur die Verknüpfung lösen (Vorgabe) oder das Objekt dauerhaft löschen.
+Beim dauerhaften Löschen folgt eine zweite Rückfrage, weil dabei auch
+alle Verknüpfungen zu anderen Containern verschwinden.
 
 ## Bekannte Grenzen
 - Objekte werden immer in dem Container angelegt, der im Baum markiert
