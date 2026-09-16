@@ -129,23 +129,25 @@ gesetzten Werte waren damit sofort wieder falsch.
 `CN=Packages` ist auch auf dem echten Server ein `classStore`, nicht
 ein `container` -- das deckt sich mit dem Schema.
 
-Die `packageFlags` stammen alle aus echten Objekten:
+Die `packageFlags` stammen alle aus echten Objekten -- keiner der
+Werte ist abgeleitet oder geraten:
 
 | Zustand | `msiScriptName` | `packageFlags` |
 |---|---|---|
 | zugewiesen (Computer) | `A` | `0xA0084C70` |
+| zugewiesen (Benutzer) | `A` | `0xA00C0E70` |
 | veröffentlicht (Benutzer) | `P` | `0xA0080878` |
 | zur Deinstallation vorgemerkt | `R` | `0xA0080110` |
 
-Die naheliegende Annahme, veröffentlichte Pakete tauschten das
-Assigned-Bit `0x800` gegen `0x8`, war falsch: `0x800` bleibt stehen,
-`0x8` kommt hinzu, und `0x400` sowie `0x4000` fallen weg. Beim Auslesen
-muss deshalb auf `0x8` geprüft werden, bevor auf `0x800` -- sonst gilt
-ein veröffentlichtes Paket als zugewiesen.
+Zwei naheliegende Annahmen haben sich dabei als falsch erwiesen.
+Veröffentlichte Pakete tauschen das Assigned-Bit `0x800` **nicht**
+gegen `0x8` -- `0x800` bleibt stehen, `0x8` kommt hinzu, `0x400` und
+`0x4000` fallen weg. Und die Zuweisung an die Benutzerkonfiguration
+benutzt **nicht** denselben Wert wie beim Computer: dort fehlt `0x4000`,
+dafür sind `0x200` und `0x40000` gesetzt.
 
-Kein Beispiel lag für "der Benutzerkonfiguration **zugewiesen**" vor
-(statt veröffentlicht); dort wird der Wert für zugewiesene Pakete
-benutzt, was eine Annahme bleibt.
+Beim Auslesen muss auf `0x8` geprüft werden, bevor auf `0x800` -- sonst
+gilt ein veröffentlichtes Paket als zugewiesen.
 
 ### Entfernen mit Deinstallation
 

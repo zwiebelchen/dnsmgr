@@ -809,13 +809,15 @@ static bool downloadAndExtractAdmFiles(FXWindow* owner, std::string& log, FXStri
 // AD-Objektklassen (Package-Registration, Class-Store) sind Teil des
 // Standard-AD-Schemas und liegen auch bei Samba bereits vor.
 // ---------------------------------------------------------------------
-// Alle drei Werte aus echten Objekten eines Windows-2000-Servers.
-// Fuer "der Benutzerkonfiguration zugewiesen" (statt veroeffentlicht)
-// lag kein Beispiel vor; dort wird der Wert fuer zugewiesene Pakete
-// benutzt, was eine Annahme bleibt.
-static const uint32_t PACKAGE_FLAGS_ASSIGNED  = 0xA0084C70;
-static const uint32_t PACKAGE_FLAGS_PUBLISHED = 0xA0080878;
-static const uint32_t PACKAGE_FLAGS_REMOVE    = 0xA0080110;
+// Alle vier Werte stammen aus echten Objekten eines
+// Windows-2000-Servers -- keiner davon ist abgeleitet oder geraten.
+// Bemerkenswert: Computer- und Benutzerzuweisung unterscheiden sich
+// nicht nur im Zweig, sondern auch in den Flags (Computer hat 0x4000,
+// Benutzer dafuer 0x200 und 0x40000).
+static const uint32_t PACKAGE_FLAGS_ASSIGNED_MACHINE = 0xA0084C70;
+static const uint32_t PACKAGE_FLAGS_ASSIGNED_USER    = 0xA00C0E70;
+static const uint32_t PACKAGE_FLAGS_PUBLISHED        = 0xA0080878;
+static const uint32_t PACKAGE_FLAGS_REMOVE           = 0xA0080110;
 
 static const char* GPSI_CSE_GUID = "{C6DC5466-785A-11D2-84D0-00C04FB169F7}";
 static const char* GPSI_TOOL_GUID_USER = "{BACF5C8A-A3C7-11D1-A760-00C04FB9603F}";
@@ -1638,12 +1640,15 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 
 	std::string msiScriptName = params.published ? "P" : "A";
 
-	// packageFlags: beide Werte stammen aus echten, von Windows 2000
-	// erzeugten Objekten -- nicht aus einer Auslegung der Spezifikation.
-	// Die naheliegende Annahme, veroeffentlichte Pakete tauschten das
-	// Assigned-Bit 0x800 gegen 0x8, war falsch: 0x800 bleibt stehen,
-	// 0x8 kommt hinzu, und 0x400 sowie 0x4000 fallen weg.
-	uint32_t packageFlags = params.published ? PACKAGE_FLAGS_PUBLISHED : PACKAGE_FLAGS_ASSIGNED;
+	// packageFlags: alle Werte aus echten, von Windows 2000 erzeugten
+	// Objekten. Zwei Annahmen haben sich dabei als falsch erwiesen --
+	// veroeffentlichte Pakete tauschen das Assigned-Bit 0x800 nicht
+	// gegen 0x8 (0x800 bleibt stehen), und die Zuweisung an die
+	// Benutzerkonfiguration hat einen eigenen Wert statt desselben wie
+	// beim Computer.
+	uint32_t packageFlags = params.assignedPerMachine ? PACKAGE_FLAGS_ASSIGNED_MACHINE
+	                      : params.published          ? PACKAGE_FLAGS_PUBLISHED
+	                                                  : PACKAGE_FLAGS_ASSIGNED_USER;
 
 	// versionNumberHi/Lo sind schlicht Haupt- und Nebenversion.
 	int verHi = 0, verLo = 0;
