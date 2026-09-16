@@ -809,6 +809,14 @@ static bool downloadAndExtractAdmFiles(FXWindow* owner, std::string& log, FXStri
 // AD-Objektklassen (Package-Registration, Class-Store) sind Teil des
 // Standard-AD-Schemas und liegen auch bei Samba bereits vor.
 // ---------------------------------------------------------------------
+// Alle drei Werte aus echten Objekten eines Windows-2000-Servers.
+// Fuer "der Benutzerkonfiguration zugewiesen" (statt veroeffentlicht)
+// lag kein Beispiel vor; dort wird der Wert fuer zugewiesene Pakete
+// benutzt, was eine Annahme bleibt.
+static const uint32_t PACKAGE_FLAGS_ASSIGNED  = 0xA0084C70;
+static const uint32_t PACKAGE_FLAGS_PUBLISHED = 0xA0080878;
+static const uint32_t PACKAGE_FLAGS_REMOVE    = 0xA0080110;
+
 static const char* GPSI_CSE_GUID = "{C6DC5466-785A-11D2-84D0-00C04FB169F7}";
 static const char* GPSI_TOOL_GUID_USER = "{BACF5C8A-A3C7-11D1-A760-00C04FB9603F}";
 static const char* GPSI_TOOL_GUID_MACHINE = "{942A8E4F-A261-11D1-A760-00C04FB9603F}";
@@ -1630,13 +1638,12 @@ static bool addSoftwarePackage(FXWindow* owner, const DomainInfo& domain, const 
 
 	std::string msiScriptName = params.published ? "P" : "A";
 
-	// packageFlags: der Wert stammt nicht aus einer Auslegung der
-	// Spezifikation, sondern aus einem echten, von Windows 2000
-	// erzeugten Objekt fuer ein zugewiesenes Paket: 0xA0084C70. Mein
-	// frueher aus [MS-GPSI] abgeleiteter Wert war 0x810 -- also fast
-	// nichts davon.
-	uint32_t packageFlags = 0xA0084C70;
-	if (params.published) packageFlags = (packageFlags & ~0x800u) | 0x8u; // nicht gegengeprueft
+	// packageFlags: beide Werte stammen aus echten, von Windows 2000
+	// erzeugten Objekten -- nicht aus einer Auslegung der Spezifikation.
+	// Die naheliegende Annahme, veroeffentlichte Pakete tauschten das
+	// Assigned-Bit 0x800 gegen 0x8, war falsch: 0x800 bleibt stehen,
+	// 0x8 kommt hinzu, und 0x400 sowie 0x4000 fallen weg.
+	uint32_t packageFlags = params.published ? PACKAGE_FLAGS_PUBLISHED : PACKAGE_FLAGS_ASSIGNED;
 
 	// versionNumberHi/Lo sind schlicht Haupt- und Nebenversion.
 	int verHi = 0, verLo = 0;
@@ -1775,7 +1782,6 @@ FXIMPLEMENT(RemovePackageDialog, FXDialogBox, RemovePackageDialogMap, ARRAYNUMBE
 // entfernen soll. Wird das Objekt stattdessen geloescht, erfaehrt er
 // davon nie und die Software bleibt installiert. (Werte aus dem
 // Vergleich mit einem echten Server uebernommen.)
-static const uint32_t PACKAGE_FLAGS_REMOVE = 0xA0080110;
 
 static bool markSoftwarePackageForRemoval(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid,
                                            bool isMachine, const SoftwarePackageInfo& pkg,

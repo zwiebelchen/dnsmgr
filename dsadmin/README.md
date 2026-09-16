@@ -129,10 +129,23 @@ gesetzten Werte waren damit sofort wieder falsch.
 `CN=Packages` ist auch auf dem echten Server ein `classStore`, nicht
 ein `container` -- das deckt sich mit dem Schema.
 
-Nicht gegengeprüft ist der Wert von `packageFlags` für
-**veröffentlichte** Pakete: das Vorbild enthielt nur zugewiesene. Dort
-wird das Assigned-Bit gegen das Published-Bit getauscht, was eine
-Annahme bleibt.
+Die `packageFlags` stammen alle aus echten Objekten:
+
+| Zustand | `msiScriptName` | `packageFlags` |
+|---|---|---|
+| zugewiesen (Computer) | `A` | `0xA0084C70` |
+| veröffentlicht (Benutzer) | `P` | `0xA0080878` |
+| zur Deinstallation vorgemerkt | `R` | `0xA0080110` |
+
+Die naheliegende Annahme, veröffentlichte Pakete tauschten das
+Assigned-Bit `0x800` gegen `0x8`, war falsch: `0x800` bleibt stehen,
+`0x8` kommt hinzu, und `0x400` sowie `0x4000` fallen weg. Beim Auslesen
+muss deshalb auf `0x8` geprüft werden, bevor auf `0x800` -- sonst gilt
+ein veröffentlichtes Paket als zugewiesen.
+
+Kein Beispiel lag für "der Benutzerkonfiguration **zugewiesen**" vor
+(statt veröffentlicht); dort wird der Wert für zugewiesene Pakete
+benutzt, was eine Annahme bleibt.
 
 ### Entfernen mit Deinstallation
 
