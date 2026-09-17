@@ -2741,6 +2741,30 @@ FXIMPLEMENT(GroupPickerDialog, FXDialogBox, GroupPickerDialogMap, ARRAYNUMBER(Gr
 // Original. Umgesetzt sind "Allgemein", "Konto" und "Mitglied von";
 // alle Aenderungen werden erst mit OK/Übernehmen geschrieben.
 // ---------------------------------------------------------------------
+// ---------------------------------------------------------------------
+// Laenderliste fuer "Land/Region" -- aus dsprop.dll (siehe
+// countries_w2k.h), Reihenfolge und Schreibweise wie im Original.
+// ---------------------------------------------------------------------
+struct CountryEntry { std::string alpha2, name; int numeric = 0; };
+
+static const std::vector<CountryEntry>& countryList() {
+	static std::vector<CountryEntry> list;
+	if (!list.empty()) return list;
+	for (auto& c : W2K_COUNTRIES) {
+		CountryEntry e;
+		e.alpha2 = c.alpha2;
+		e.name = c.name;
+		e.numeric = c.numeric;
+		list.push_back(e);
+	}
+	return list;
+}
+
+static std::string crlfToLf(const std::string& s);
+static std::string ldapiReadAttr(const std::string& dn, const std::string& attr);
+static std::vector<GroupEntry> listAllUsersAsEntries();
+static DirObject dirObjectFromDn(const std::string& dn, const DomainInfo& domain, ObjType type, const std::string& sam);
+
 class UserPropertiesDialog : public FXDialogBox {
 	FXDECLARE(UserPropertiesDialog)
 private:
@@ -2749,8 +2773,24 @@ private:
 	FXString userFullDN;
 
 	// Allgemein
-	struct AttrField { const char* attr; FXTextField* field; FXString orig; };
+	// Einfache Attributfelder aller Reiter; mehrzeilige (FXText) werden in AD
+	// mit CRLF gespeichert.
+	struct AttrField { const char* attr; FXTextField* field; FXString orig; FXText* text = nullptr; };
 	std::vector<AttrField> attrFields;
+	static FXString fieldValue(const AttrField& f) { return f.field ? f.field->getText() : f.text->getText(); }
+
+	// Adresse: Land (c/co/countryCode)
+	FXListBox* countryBox = nullptr;
+	std::string origCountry;
+	// Profil: Basisordner (homeDirectory/homeDrive)
+	FXint homeMode = 0;               // 0 = lokaler Pfad, 1 = verbinden
+	FXDataTarget* homeTarget = nullptr;
+	FXTextField* homeLocal = nullptr, *homeUnc = nullptr;
+	FXListBox* homeDriveBox = nullptr;
+	std::string origHomeDir, origHomeDrive;
+	// Organisation: Vorgesetzte(r) (manager)
+	FXTextField* managerName = nullptr;
+	std::string origManagerDn, managerDn;
 
 	// Konto
 	// Konto (dsprop.dll, Dialog 136)
@@ -2777,10 +2817,11 @@ private:
 protected:
 	UserPropertiesDialog() {}
 public:
-	enum { ID_MEMBER_ADD = FXDialogBox::ID_LAST, ID_MEMBER_REMOVE, ID_SET_PRIMARY, ID_APPLY, ID_OK };
+	enum { ID_MEMBER_ADD = FXDialogBox::ID_LAST, ID_MEMBER_REMOVE, ID_SET_PRIMARY, ID_APPLY, ID_OK,
+	       ID_MANAGER_CHANGE, ID_MANAGER_SHOW, ID_MANAGER_CLEAR };
 
 	UserPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const DirObject& obj)
-		: FXDialogBox(owner, "Eigenschaften von " + obj.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,480,520),
+		: FXDialogBox(owner, "Eigenschaften von " + obj.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,540,540),
 		  domain(domain_), accountName(obj.accountName) {
 		userFullDN = obj.dn.empty() ? domain.baseDN : obj.dn + "," + domain.baseDN;
 
@@ -2800,8 +2841,14 @@ public:
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
 		FXTabBook* tabs = new FXTabBook(main, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
 
+		// Reiterfolge wie im Original: Allgemein, Adresse, Konto, Profil,
+		// Rufnummern, Organisation, Mitglied von.
 		buildGeneralTab(tabs, obj, rec);
+		buildAddressTab(tabs, rec);
 		buildAccountTab(tabs, rec);
+		buildProfileTab(tabs, rec);
+		buildPhonesTab(tabs, rec);
+		buildOrganizationTab(tabs, rec);
 		buildMemberOfTab(tabs);
 
 		// Reihenfolge wie im Original: OK, Abbrechen, Übernehmen -- rechtsbuendig.
@@ -3002,6 +3049,185 @@ public:
 		return expiresNever ? std::string() : trimStr(expiresDate->getText().text());
 	}
 
+	// ---- Adresse (dsprop.dll, Dialog 134) ------------------------------
+	FXTextField* pageField(FXComposite* p, const char* label, const char* attr, const std::multimap<std::string, std::string>& rec, FXint lw = 90) {
+		FXHorizontalFrame* row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,lw,0);
+		FXTextField* tf = new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		FXString v = ldifFirst(rec, attr).c_str();
+		tf->setText(v);
+		attrFields.push_back({ attr, tf, v });
+		return tf;
+	}
+	FXText* pageText(FXComposite* p, const char* label, const char* attr, const std::multimap<std::string, std::string>& rec, FXint h, FXint lw) {
+		FXComposite* row = p;
+		if (lw > 0) {
+			row = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+			new FXLabel(row, label, NULL, LAYOUT_TOP | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,lw,0);
+		} else {
+			new FXLabel(p, label, NULL, JUSTIFY_LEFT);
+		}
+		FXPacker* f = new FXPacker(row, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,h, 0,0,0,0);
+		FXText* t = new FXText(f, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		FXString v = crlfToLf(ldifFirst(rec, attr)).c_str();
+		t->setText(v);
+		AttrField af{ attr, nullptr, v };
+		af.text = t;
+		attrFields.push_back(af);
+		return t;
+	}
+
+	void buildAddressTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
+		new FXTabItem(tabs, "Adresse", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		pageText(page, "&Straße:", "streetAddress", rec, 80, 130);
+		pageField(page, "&Postfach:", "postOfficeBox", rec, 130);
+		pageField(page, "S&tadt:", "l", rec, 130);
+		pageField(page, "B&undesland/Kanton:", "st", rec, 130);
+		pageField(page, "PL&Z:", "postalCode", rec, 130);
+		FXHorizontalFrame* row = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, "&Land/Region:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,130,0);
+		countryBox = new FXListBox(row, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		origCountry = ldifFirst(rec, "c");
+		countryBox->appendItem("");
+		int sel = 0;
+		const auto& countries = countryList();
+		for (size_t i = 0; i < countries.size(); i++) {
+			countryBox->appendItem(countries[i].name.c_str());
+			if (!origCountry.empty() && lowerCopy(countries[i].alpha2) == lowerCopy(origCountry)) sel = (int)i + 1;
+		}
+		if (sel == 0 && !origCountry.empty()) sel = countryBox->appendItem(origCountry.c_str());
+		countryBox->setNumVisible(12);
+		countryBox->setCurrentItem(sel);
+	}
+
+	std::string selectedCountry(std::string& name, int& numeric) const {
+		int i = countryBox->getCurrentItem();
+		const auto& countries = countryList();
+		name.clear(); numeric = 0;
+		if (i <= 0) return "";
+		if (i - 1 < (int)countries.size()) { name = countries[i - 1].name; numeric = countries[i - 1].numeric; return countries[i - 1].alpha2; }
+		return origCountry;
+	}
+
+	// ---- Profil (Dialog 315) --------------------------------------------
+	void buildProfileTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
+		new FXTabItem(tabs, "Profil", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
+		FXGroupBox* prof = new FXGroupBox(page, "Benutzerprofil", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		pageField(prof, "&Profilpfad:", "profilePath", rec, 110);
+		pageField(prof, "Anmelde&skript:", "scriptPath", rec, 110);
+
+		FXGroupBox* home = new FXGroupBox(page, "Basisordner", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		origHomeDir = ldifFirst(rec, "homeDirectory");
+		origHomeDrive = ldifFirst(rec, "homeDrive");
+		homeMode = origHomeDrive.empty() ? 0 : 1;
+		homeTarget = new FXDataTarget(homeMode);
+		FXHorizontalFrame* r1 = new FXHorizontalFrame(home, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXRadioButton(r1, "&Lokaler Pfad:", homeTarget, FXDataTarget::ID_OPTION + 0, RADIOBUTTON_NORMAL | LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH, 0,0,110,0);
+		homeLocal = new FXTextField(r1, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		FXHorizontalFrame* r2 = new FXHorizontalFrame(home, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 4,0);
+		new FXRadioButton(r2, "&Verbinden von:", homeTarget, FXDataTarget::ID_OPTION + 1, RADIOBUTTON_NORMAL | LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH, 0,0,110,0);
+		homeDriveBox = new FXListBox(r2, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LISTBOX_NORMAL | LAYOUT_CENTER_Y);
+		int driveSel = 25; // Z:
+		for (char c = 'C'; c <= 'Z'; c++) {
+			std::string dl = std::string(1, c) + ":";
+			homeDriveBox->appendItem(dl.c_str());
+			if (lowerCopy(dl) == lowerCopy(origHomeDrive)) driveSel = c - 'C';
+		}
+		homeDriveBox->setNumVisible(10);
+		homeDriveBox->setCurrentItem(std::min(driveSel, homeDriveBox->getNumItems() - 1));
+		new FXLabel(r2, "m&it:", NULL, LAYOUT_CENTER_Y);
+		homeUnc = new FXTextField(r2, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		if (homeMode == 0) homeLocal->setText(origHomeDir.c_str()); else homeUnc->setText(origHomeDir.c_str());
+	}
+
+	// ---- Rufnummern (Dialog 218) ----------------------------------------
+	void buildPhonesTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
+		new FXTabItem(tabs, "Rufnummern", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXGroupBox* g = new FXGroupBox(page, "Rufnummern ", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		const char* rows[][3] = {
+			{ "&Privat: ", "homePhone", "&Andere..." }, { "&Funkruf:", "pager", "A&ndere..." }, { "&Mobil:", "mobile", "An&dere..." },
+			{ "Fa&x:", "facsimileTelephoneNumber", "And&ere..." }, { "IP-Telef&on:", "ipPhone", "Ande&re..." },
+		};
+		for (auto& r : rows) addOtherRow(g, r[0], r[1], r[2], rec);
+		pageText(page, "Anmer&kung:", "info", rec, 110, 0);
+	}
+
+	// ---- Organisation (Dialog 135) ----------------------------------------
+	void buildOrganizationTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
+		new FXTabItem(tabs, "Organisation", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		pageField(page, "&Anrede:", "title", rec);
+		pageField(page, "Ab&teilung:", "department", rec);
+		pageField(page, "&Firma:", "company", rec);
+		FXGroupBox* g = new FXGroupBox(page, "Vorgesetzte(r)", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		FXHorizontalFrame* nr = new FXHorizontalFrame(g, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(nr, "&Name:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,80,0);
+		managerName = new FXTextField(nr, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
+		FXHorizontalFrame* br = new FXHorizontalFrame(g, LAYOUT_FILL_X, 0,0,0,0, 80,0,0,0, 6,0);
+		new FXButton(br, "Än&dern...", NULL, this, ID_MANAGER_CHANGE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(br, "An&zeigen", NULL, this, ID_MANAGER_SHOW, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(br, "&Löschen", NULL, this, ID_MANAGER_CLEAR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		origManagerDn = managerDn = ldifFirst(rec, "manager");
+		managerName->setText(managerDn.empty() ? FXString() : dnLeafName(managerDn));
+
+		new FXLabel(page, "&Mitarbeiter:", NULL, JUSTIFY_LEFT);
+		FXPacker* lf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		FXList* reports = new FXList(lf, NULL, 0, LIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		auto range = rec.equal_range("directreports");
+		for (auto it = range.first; it != range.second; ++it) reports->appendItem(dnLeafName(it->second));
+	}
+
+	long onManagerChange(FXObject*, FXSelector, void*) {
+		getApp()->beginWaitCursor();
+		std::vector<GroupEntry> users = listAllUsersAsEntries();
+		getApp()->endWaitCursor();
+		GroupPickerDialog dlg(this, domain.realm, users, "Benutzer auswählen", resico_user);
+		if (!dlg.execute(PLACEMENT_OWNER) || dlg.getResult().empty()) return 1;
+		if (dlg.getResult().size() > 1) { FXMessageBox::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden."); return 1; }
+		managerDn = users[dlg.getResult()[0]].dn;
+		managerName->setText(dnLeafName(managerDn));
+		return 1;
+	}
+	long onManagerClear(FXObject*, FXSelector, void*) { managerDn.clear(); managerName->setText(""); return 1; }
+	long onManagerShow(FXObject*, FXSelector, void*) {
+		if (managerDn.empty()) return 1;
+		std::string sam = ldapiReadAttr(managerDn, "sAMAccountName");
+		if (sam.empty()) return 1;
+		UserPropertiesDialog dlg(this, domain, dirObjectFromDn(managerDn, domain, OBJ_USER, sam));
+		dlg.execute(PLACEMENT_OWNER);
+		return 1;
+	}
+	long onUpdManagerButtons(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, managerDn.empty() ? ID_DISABLE : ID_ENABLE), NULL);
+		return 1;
+	}
+
+	std::string wantedHomeDir() const { return trimStr((homeMode ? homeUnc : homeLocal)->getText().text()); }
+	std::string wantedHomeDrive() const {
+		return homeMode ? std::string(homeDriveBox->getItemText(homeDriveBox->getCurrentItem()).text()) : std::string();
+	}
+
+	// LDIF fuer Land, Basisordner und Vorgesetzte(n).
+	std::string extraLdif() const {
+		std::string l;
+		std::string cname; int cnum;
+		std::string code = selectedCountry(cname, cnum);
+		if (lowerCopy(code) != lowerCopy(origCountry)) {
+			if (code.empty()) l += "replace: c\n-\nreplace: co\n-\nreplace: countryCode\ncountryCode: 0\n-\n";
+			else l += "replace: c\n" + ldifAttrLine("c", code) + "-\nreplace: co\n" + ldifAttrLine("co", cname) +
+			          "-\nreplace: countryCode\ncountryCode: " + std::to_string(cnum) + "\n-\n";
+		}
+		std::string hd = wantedHomeDir(), hdr = wantedHomeDrive();
+		if (hd.empty()) hdr.clear();
+		if (hd != origHomeDir) { l += "replace: homeDirectory\n"; if (!hd.empty()) l += ldifAttrLine("homeDirectory", hd); l += "-\n"; }
+		if (lowerCopy(hdr) != lowerCopy(origHomeDrive)) { l += "replace: homeDrive\n"; if (!hdr.empty()) l += ldifAttrLine("homeDrive", hdr); l += "-\n"; }
+		if (lowerCopy(managerDn) != lowerCopy(origManagerDn)) { l += "replace: manager\n"; if (!managerDn.empty()) l += ldifAttrLine("manager", managerDn); l += "-\n"; }
+		return l;
+	}
+
 	// ---- Mitglied von ------------------------------------------------
 	void buildMemberOfTab(FXTabBook* tabs) {
 		new FXTabItem(tabs, "Mitglied von", NULL);
@@ -3124,7 +3350,8 @@ public:
 
 	// ---- Uebernehmen -------------------------------------------------
 	bool isDirty() const {
-		for (auto& f : attrFields) if (f.field->getText() != f.orig) return true;
+		for (auto& f : attrFields) if (fieldValue(f) != f.orig) return true;
+		if (!extraLdif().empty()) return true;
 		if (wantedUac() != origUac || wantedUpn() != origUpn) return true;
 		if ((bool)mustChangeCheck->getCheck() != origMustChange || (bool)lockedCheck->getCheck() != origLocked) return true;
 		if (wantedExpiresText() != origExpiresText) return true;
@@ -3147,15 +3374,18 @@ public:
 		// ein Syntaxfehler).
 		std::string ldif;
 		for (auto& f : attrFields) {
-			FXString v = f.field->getText();
+			FXString v = fieldValue(f);
 			v.trim();
 			FXString o = f.orig;
 			o.trim();
 			if (v == o) continue;
+			std::string val = v.text();
+			if (f.text) { std::string crlf; for (char c : val) { if (c == '\n') crlf += '\r'; crlf += c; } val = crlf; }
 			ldif += std::string("replace: ") + f.attr + "\n";
-			if (!v.empty()) ldif += ldifAttrLine(f.attr, v.text());
+			if (!val.empty()) ldif += ldifAttrLine(f.attr, val);
 			ldif += "-\n";
 		}
+		ldif += extraLdif();
 		if (!ldif.empty()) {
 			ldif = "dn: " + std::string(userFullDN.text()) + "\nchangetype: modify\n" + ldif;
 			std::string log;
@@ -3163,7 +3393,12 @@ public:
 				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 				return false;
 			}
-			for (auto& f : attrFields) { FXString v = f.field->getText(); v.trim(); f.field->setText(v); f.orig = v; }
+			for (auto& f : attrFields) { FXString v = fieldValue(f); v.trim(); if (f.field) f.field->setText(v); f.orig = v; }
+			std::string cname; int cnum;
+			origCountry = selectedCountry(cname, cnum);
+			origHomeDir = wantedHomeDir();
+			origHomeDrive = origHomeDir.empty() ? std::string() : wantedHomeDrive();
+			origManagerDn = managerDn;
 		}
 
 		// Konto -- Rueckfragen wie dsprop.dll (Text 1031)
@@ -3272,7 +3507,7 @@ public:
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
 
-	virtual ~UserPropertiesDialog() { delete expiresTarget; }
+	virtual ~UserPropertiesDialog() { delete expiresTarget; delete homeTarget; }
 };
 FXDEFMAP(UserPropertiesDialog) UserPropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MEMBER_ADD, UserPropertiesDialog::onMemberAdd),
@@ -3283,6 +3518,11 @@ FXDEFMAP(UserPropertiesDialog) UserPropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_APPLY, UserPropertiesDialog::onApply),
 	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_APPLY, UserPropertiesDialog::onUpdApply),
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_OK, UserPropertiesDialog::onOk),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MANAGER_CHANGE, UserPropertiesDialog::onManagerChange),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MANAGER_CLEAR, UserPropertiesDialog::onManagerClear),
+	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_MANAGER_CLEAR, UserPropertiesDialog::onUpdManagerButtons),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MANAGER_SHOW, UserPropertiesDialog::onManagerShow),
+	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_MANAGER_SHOW, UserPropertiesDialog::onUpdManagerButtons),
 };
 FXIMPLEMENT(UserPropertiesDialog, FXDialogBox, UserPropertiesDialogMap, ARRAYNUMBER(UserPropertiesDialogMap))
 
@@ -4356,24 +4596,6 @@ static std::string gpoBranchDir(const DomainInfo& domain, const std::string& gui
 	return base + "/" + preferred;
 }
 
-// ---------------------------------------------------------------------
-// Laenderliste fuer "Land/Region" -- aus dsprop.dll (siehe
-// countries_w2k.h), Reihenfolge und Schreibweise wie im Original.
-// ---------------------------------------------------------------------
-struct CountryEntry { std::string alpha2, name; int numeric = 0; };
-
-static const std::vector<CountryEntry>& countryList() {
-	static std::vector<CountryEntry> list;
-	if (!list.empty()) return list;
-	for (auto& c : W2K_COUNTRIES) {
-		CountryEntry e;
-		e.alpha2 = c.alpha2;
-		e.name = c.name;
-		e.numeric = c.numeric;
-		list.push_back(e);
-	}
-	return list;
-}
 
 // ---------------------------------------------------------------------
 // GptTmpl.inf -- die Sicherheitsvorlage eines GPOs
