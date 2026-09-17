@@ -127,6 +127,19 @@ nicht im Repository):
   Abschalten der Vererbung (109).
 - `gptext.dll`: Richtliniendialog mit den Reitern "Richtlinie" (200) und
   "Erklärung" (225) sowie "Vorherige/Nächste Richtlinie".
+- `dsprop.dll`: Eigenschaftenseiten -- Benutzer "Allgemein" (131) mit
+  "Andere..."-Knöpfen, "Konto" (136) mit den Kontooptionen
+  (`userAccountControl`-Bits, "Benutzer muss Kennwort bei nächster
+  Anmeldung ändern" über `pwdLastSet`), "Konto ist gesperrt"
+  (`lockoutTime`), "Ablaufdatum des Kontos" (`accountExpires`, wie im
+  Original Beginn des Folgetags) und UPN-Suffix; Gruppe "Allgemein"
+  (156), "Verwaltet von" (234), OU "Allgemein" (226). Die Länderliste
+  (Texte 4000 ff.) steht in `countries_w2k.h` -- in Großbuchstaben wie im
+  Original; das Paket `iso-codes` wird nicht mehr gebraucht. "Benutzer
+  kann das Kennwort nicht ändern" (eine Berechtigung, kein Bit),
+  "Anmeldezeiten..." und "Anmelden..." sind noch ohne Funktion.
+- `appmgr.dll`: Spalten der Softwareinstallation ("Bereitstellungszustand",
+  "Quelle" aus `msiFileList`) und der Dialog "Software entfernen" (211).
 
 Die Symbole unter `res/gpedit` stammen aus derselben DLL (Bitmaps 1 und
 1229, Magenta als Transparenz in echtes Alpha umgesetzt): Ordner,

@@ -1673,6 +1673,7 @@ struct SoftwarePackageInfo {
 	bool assigned = true;    // aus packageFlags abgeleitet
 	bool published = false;
 	bool pendingRemoval = false; // msiScriptName "R": wartet auf Deinstallation
+	std::string sourcePath;      // aus msiFileList ("0:" + UNC-Pfad), Spalte "Quelle"
 };
 
 // Listet alle Pakete eines Zweigs (Computer/Benutzer) eines GPOs auf.
@@ -1688,7 +1689,7 @@ static std::vector<SoftwarePackageInfo> listSoftwarePackages(FXWindow* owner, co
 	runAsRootCaptured({
 		FXString("bash"), FXString("-c"),
 		FXString("LDAPTLS_REQCERT=never ldapsearch -H ldap://127.0.0.1 -Z -x -o ldif-wrap=no -LLL -D '") + g_adminUser + "@" + domain.realm +
-			"' -w '" + g_adminPass + "' -b '" + packagesDn.c_str() + "' -s one '(objectClass=packageRegistration)' cn displayName packageFlags msiScriptPath msiScriptName 2>/dev/null"
+			"' -w '" + g_adminPass + "' -b '" + packagesDn.c_str() + "' -s one '(objectClass=packageRegistration)' cn displayName packageFlags msiScriptPath msiScriptName msiFileList 2>/dev/null"
 	}, raw);
 
 	SoftwarePackageInfo cur;
@@ -1700,6 +1701,13 @@ static std::vector<SoftwarePackageInfo> listSoftwarePackages(FXWindow* owner, co
 		if (line.rfind("cn: ", 0) == 0) { cur.guid = line.substr(4); continue; }
 		if (line.rfind("displayName: ", 0) == 0) { cur.displayName = line.substr(13); continue; }
 		if (line.rfind("msiScriptPath: ", 0) == 0) { cur.msiScriptPath = line.substr(15); continue; }
+		if (line.rfind("msiFileList: ", 0) == 0) {
+			std::string v = line.substr(13);
+			size_t colon = v.find(':');
+			if (colon != std::string::npos && colon < 3) v = v.substr(colon + 1); // Laufnummer "0:" abschneiden
+			if (cur.sourcePath.empty()) cur.sourcePath = v;
+			continue;
+		}
 		if (line.rfind("packageFlags: ", 0) == 0) {
 			// Windows schreibt den Wert vorzeichenbehaftet (0xA0084C70
 			// erscheint als -1610068880); stoul wuerde daran scheitern.
@@ -1733,17 +1741,13 @@ public:
 	bool uninstallFromClients() const { return rbUninstall->getCheck(); }
 
 	RemovePackageDialog(FXWindow* owner, const std::string& name)
-		: FXDialogBox(owner, "Software entfernen", DECOR_TITLE | DECOR_BORDER, 0,0,440,210) {
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12);
-		new FXLabel(main, ("\"" + name + "\" aus der Gruppenrichtlinie entfernen:").c_str(), NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
-		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-
-		rbUninstall = new FXRadioButton(main, "Software &sofort von Benutzern und Computern deinstallieren", this, ID_CHOICE);
-		new FXLabel(main, "Das Paket bleibt als Auftrag stehen, bis alle Clients die\n"
-		                  "Anwendung entfernt haben.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
-		rbLeave = new FXRadioButton(main, "Software auf den Clients &belassen", this, ID_CHOICE);
-		new FXLabel(main, "Nur die Zuweisung wird gelöscht. Bereits installierte\n"
-		                  "Anwendungen bleiben erhalten und werden nicht mehr verwaltet.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		: FXDialogBox(owner, "Software entfernen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0) {
+		// Texte wie appmgr.dll, Dialog 211.
+		(void)name;
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,8);
+		new FXLabel(main, "Wählen Sie eine der folgenden Optionen:", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		rbUninstall = new FXRadioButton(main, "&Software sofort von Benutzern und Computern deinstallieren", this, ID_CHOICE, RADIOBUTTON_NORMAL | JUSTIFY_LEFT);
+		rbLeave = new FXRadioButton(main, "&Benutzer dürfen die Software weiterhin verwenden, aber\nNeuinstallationen sind nicht zugelassen", this, ID_CHOICE, RADIOBUTTON_NORMAL | JUSTIFY_LEFT);
 		rbUninstall->setCheck(TRUE);
 
 		FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
@@ -6364,14 +6368,15 @@ public:
 				break;
 			}
 			case GN_SOFTWARE: {
-				setHeaders({ { "Name", 320 }, { "Bereitstellungsstatus", 180 } });
+				// Spalten wie appmgr.dll (Texte 2, 6, 12).
+				setHeaders({ { "Name", 300 }, { "Bereitstellungszustand", 160 }, { "Quelle", 260 } });
 				getApp()->beginWaitCursor();
 				rowPackages = listSoftwarePackages(this, domain, guid.c_str(), node.machine);
 				getApp()->endWaitCursor();
 				FXIcon* ic = sharedPngIcon(resico_folder);
 				for (auto& p : rowPackages) {
 					const char* st = p.pendingRemoval ? "Wird deinstalliert" : p.published ? "Veröffentlicht" : "Zugewiesen";
-					list->appendItem(FXString(p.displayName.c_str()) + "\t" + st, ic, ic);
+					list->appendItem(FXString(p.displayName.c_str()) + "\t" + st + "\t" + p.sourcePath.c_str(), ic, ic);
 				}
 				status->setText(" Rechtsklick in die Liste: Neues Paket hinzufügen oder ein Paket entfernen.");
 				break;
