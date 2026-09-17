@@ -3215,10 +3215,12 @@ private:
 	FXint stateVar = 0; // 0=Nicht konfiguriert, 1=Aktiviert, 2=Deaktiviert
 	FXDataTarget* stateTarget = NULL;
 	std::vector<PartWidget> partWidgets;
+	int navigation = NAV_NONE;
 protected:
 	PolicyEditDialog() {}
 public:
-	enum { ID_STATE = FXDialogBox::ID_LAST };
+	enum { ID_STATE = FXDialogBox::ID_LAST, ID_PREV, ID_NEXT };
+	enum { NAV_NONE = 0, NAV_PREV = 1, NAV_NEXT = 2 };
 	long onStateChanged(FXObject*, FXSelector, void*) {
 		bool enabled = (stateVar == 1);
 		for (auto& pw : partWidgets) {
@@ -3229,23 +3231,31 @@ public:
 		return 1;
 	}
 
-	PolicyEditDialog(FXWindow* owner, const AdmPolicy& pol, PolicyState initialState, const std::vector<std::string>& initialPartValues)
-		: FXDialogBox(owner, FXString("Eigenschaften von ") + pol.label.c_str(), DECOR_TITLE | DECOR_BORDER, 0,0,440,0),
+	// Aufbau wie gptext.dll: Eigenschaftenseiten "Richtlinie" (Dialog 200)
+	// und "Erklärung" (225), jeweils mit "Vorherige/Nächste Richtlinie".
+	// hasPrev/hasNext steuern, ob es in der Liste einen Nachbarn gibt.
+	PolicyEditDialog(FXWindow* owner, const AdmPolicy& pol, PolicyState initialState, const std::vector<std::string>& initialPartValues,
+	                 bool hasPrev = false, bool hasNext = false)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + pol.label.c_str(), DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,480,480),
 		  policy(&pol) {
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		new FXLabel(main, pol.label.c_str(), NULL, LABEL_NORMAL | JUSTIFY_LEFT);
-		FXText* explainText = new FXText(main, NULL, 0, TEXT_READONLY | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,70);
-		explainText->setText(pol.explainText.c_str());
+		FXVerticalFrame* outer = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(outer, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		// ---- Richtlinie ----
+		new FXTabItem(tabs, "Richtlinie", NULL);
+		FXVerticalFrame* main = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,4);
+		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 8,0);
+		new FXLabel(head, "", sharedPngIcon(resico_key), LAYOUT_CENTER_Y);
+		new FXLabel(head, pol.label.c_str(), NULL, LABEL_NORMAL | JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
 		stateVar = (initialState == POLSTATE_ENABLED) ? 1 : (initialState == POLSTATE_DISABLED) ? 2 : 0;
 		stateTarget = new FXDataTarget(stateVar, this, ID_STATE);
-		FXGroupBox* group = new FXGroupBox(main, "", GROUPBOX_NORMAL | FRAME_GROOVE | LAYOUT_FILL_X);
-		FXVerticalFrame* radioFrame = new FXVerticalFrame(group, LAYOUT_FILL_X);
-		new FXRadioButton(radioFrame, "&Nicht konfiguriert", stateTarget, FXDataTarget::ID_OPTION + 0);
-		new FXRadioButton(radioFrame, "&Aktiviert", stateTarget, FXDataTarget::ID_OPTION + 1);
-		new FXRadioButton(radioFrame, "&Deaktiviert", stateTarget, FXDataTarget::ID_OPTION + 2);
+		new FXRadioButton(main, "Nicht &konfiguriert", stateTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(main, "&Aktiviert", stateTarget, FXDataTarget::ID_OPTION + 1);
+		new FXRadioButton(main, "&Deaktiviert", stateTarget, FXDataTarget::ID_OPTION + 2);
 
-		FXVerticalFrame* dynamicArea = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,4,4);
+		FXVerticalFrame* dynamicArea = new FXVerticalFrame(main, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,6,4);
 		for (size_t i = 0; i < pol.parts.size(); i++) {
 			auto& part = pol.parts[i];
 			std::string initVal = i < initialPartValues.size() ? initialPartValues[i] : "";
@@ -3280,13 +3290,37 @@ public:
 			partWidgets.push_back(pw);
 		}
 
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		auto navButtons = [&](FXComposite* page) {
+			FXHorizontalFrame* nav = new FXHorizontalFrame(page, LAYOUT_FILL_X | LAYOUT_SIDE_BOTTOM, 0,0,0,0, 0,0,6,0, 6,0);
+			FXButton* pb = new FXButton(nav, "&Vorherige Richtlinie", NULL, this, ID_PREV, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+			FXButton* nb = new FXButton(nav, "&Nächste Richtlinie", NULL, this, ID_NEXT, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+			if (!hasPrev) pb->disable();
+			if (!hasNext) nb->disable();
+		};
+		navButtons(main);
+
+		// ---- Erklärung ----
+		new FXTabItem(tabs, "Erklärung", NULL);
+		FXVerticalFrame* expl = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,4);
+		new FXLabel(expl, FXString("Erklärung für:  ") + pol.label.c_str(), NULL, JUSTIFY_LEFT);
+		navButtons(expl);
+		FXPacker* ef = new FXPacker(expl, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		FXText* explainText = new FXText(ef, NULL, 0, TEXT_READONLY | TEXT_WORDWRAP | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		explainText->setText(pol.explainText.c_str());
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(outer, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 
 		onStateChanged(NULL, 0, NULL);
 	}
+
+	// "Vorherige/Nächste Richtlinie": wie OK (Aenderung wird uebernommen),
+	// der Aufrufer oeffnet danach den Nachbarn.
+	long onPrev(FXObject*, FXSelector, void*) { navigation = NAV_PREV; return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL); }
+	long onNext(FXObject*, FXSelector, void*) { navigation = NAV_NEXT; return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL); }
+	int getNavigation() const { return navigation; }
 
 	PolicyState getState() const {
 		return stateVar == 1 ? POLSTATE_ENABLED : stateVar == 2 ? POLSTATE_DISABLED : POLSTATE_NOT_CONFIGURED;
@@ -3308,6 +3342,8 @@ public:
 };
 FXDEFMAP(PolicyEditDialog) PolicyEditDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, PolicyEditDialog::ID_STATE, PolicyEditDialog::onStateChanged),
+	FXMAPFUNC(SEL_COMMAND, PolicyEditDialog::ID_PREV, PolicyEditDialog::onPrev),
+	FXMAPFUNC(SEL_COMMAND, PolicyEditDialog::ID_NEXT, PolicyEditDialog::onNext),
 };
 FXIMPLEMENT(PolicyEditDialog, FXDialogBox, PolicyEditDialogMap, ARRAYNUMBER(PolicyEditDialogMap))
 
@@ -6298,9 +6334,15 @@ public:
 	}
 
 	void editAdmPolicy(int row) {
+		// "Vorherige/Nächste Richtlinie" im Dialog: nach dem Speichern den
+		// Nachbarn in der Liste oeffnen (nur Richtlinien, keine Kategorien).
+		while (row >= 0) row = editAdmPolicyOnce(row);
+	}
+
+	int editAdmPolicyOnce(int row) {
 		auto ait = admNodes.find(shownItem);
 		int pIdx = row - (int)rowChildren.size();
-		if (ait == admNodes.end() || pIdx < 0 || pIdx >= (int)rowPolicies.size() || !requireRoot()) return;
+		if (ait == admNodes.end() || pIdx < 0 || pIdx >= (int)rowPolicies.size() || !requireRoot()) return -1;
 		int hive = ait->second.hive;
 		PolHive& h = admHive[hive];
 		// Frisch lesen -- ein anderes Fenster koennte inzwischen geschrieben haben.
@@ -6316,27 +6358,32 @@ public:
 			curPartValues.push_back(readStoredPartValue(h, key, vn));
 		}
 
-		PolicyEditDialog dlg(this, *pol, curState, curPartValues);
-		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		PolicyEditDialog dlg(this, *pol, curState, curPartValues, pIdx > 0, pIdx + 1 < (int)rowPolicies.size());
+		if (!dlg.execute(PLACEMENT_OWNER)) return -1;
+		int nextRow = dlg.getNavigation() == PolicyEditDialog::NAV_PREV ? row - 1
+		            : dlg.getNavigation() == PolicyEditDialog::NAV_NEXT ? row + 1 : -1;
 		PendingEdit ed;
 		ed.state = dlg.getState();
 		ed.partValues = dlg.getPartValues();
 		ed.effectiveKey = key;
 		// Unveraendert? Die Eingabefelder zaehlen nur bei "Aktiviert" -- sonst
 		// zeigt der Dialog bloss Vorgabewerte an.
-		if (ed.state == curState && (ed.state != POLSTATE_ENABLED || ed.partValues == curPartValues)) return;
+		if (ed.state == curState && (ed.state != POLSTATE_ENABLED || ed.partValues == curPartValues)) {
+			if (nextRow >= 0) reselect(nextRow);
+			return nextRow;
+		}
 
 		std::vector<RegPolEntry> entries = h.file.entries;
 		applyAdmPolicyEdit(entries, h.lookup, pol, ed);
 
 		std::string err;
 		FXString tmpPath = "/tmp/ice2k-regpol-tmp";
-		if (!writeRegPolFile(tmpPath.text(), entries, err)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.c_str()); return; }
+		if (!writeRegPolFile(tmpPath.text(), entries, err)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.c_str()); return -1; }
 		std::string branch = gpoBranchDir(domain, guid, hive == 0);
 		bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(h.polPath.c_str()) }) == 0;
 		int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(h.polPath.c_str()) });
 		runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
-		if (rc != 0) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Konnte %s nicht schreiben.", h.polPath.c_str()); return; }
+		if (rc != 0) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Konnte %s nicht schreiben.", h.polPath.c_str()); return -1; }
 		if (!existed) inheritSysvolPermissions(branch, h.polPath, false);
 
 		// Registry-Erweiterung eintragen und Version des Zweigs erhoehen.
@@ -6349,7 +6396,8 @@ public:
 
 		h.file = readRegPolAsRoot(h.polPath);
 		h.lookup = buildRegLookup(h.file);
-		reselect(row);
+		reselect(nextRow >= 0 ? nextRow : row);
+		return nextRow;
 	}
 
 	void selectTreeItem(FXTreeItem* it) {
