@@ -105,6 +105,14 @@ bestätigen" und Reiter "Links" (550), sowie
 "Domänen/Organisationseinheiten", "Standorte" und "Alle" (1203). Die
 DLL selbst liegt nicht im Repository.
 
+Die Symbole unter `res/gpedit` stammen aus derselben DLL (Bitmaps 1 und
+1229, Magenta als Transparenz in echtes Alpha umgesetzt): Ordner,
+Gruppenrichtlinienobjekt, GPO mit verweigertem Zugriff (für verwaiste
+oder nicht lesbare Verknüpfungen), Computer- und Benutzerkonfiguration,
+Standort, Domäne, lokaler Computer sowie Übergeordneter Ordner und Neues
+Gruppenrichtlinienobjekt. Die Symbole unter `res/dsa` (Neuer
+Benutzer/Gruppe/OU, Suchen, Zu Gruppe hinzufügen) sind noch vorläufig.
+
 ## Gruppenrichtlinienfenster
 
 Nachbau des Gruppenrichtlinienobjekt-Editors: Baum mit Computer- und

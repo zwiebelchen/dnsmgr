@@ -5910,9 +5910,9 @@ public:
 	}
 
 	void buildTree() {
-		FXTreeItem* root = add(NULL, (gpoName + " [" + serverFqdn(domain) + "]").text(), resico_network, GN_FOLDER, true);
+		FXTreeItem* root = add(NULL, (gpoName + " [" + serverFqdn(domain) + "]").text(), resico_gpedit_gpo, GN_FOLDER, true);
 
-		FXTreeItem* comp = add(root, "Computerkonfiguration", resico_server, GN_FOLDER, true);
+		FXTreeItem* comp = add(root, "Computerkonfiguration", resico_gpedit_computer_config, GN_FOLDER, true);
 		FXTreeItem* cSw = add(comp, "Softwareeinstellungen", resico_folder, GN_FOLDER, true);
 		add(cSw, "Softwareinstallation", resico_folder, GN_SOFTWARE, true);
 		FXTreeItem* cWin = add(comp, "Windows-Einstellungen", resico_folder, GN_FOLDER, true);
@@ -5939,7 +5939,7 @@ public:
 		add(cSec, "IP-Sicherheitsrichtlinien auf Active Directory", resico_key, GN_TODO, true);
 		FXTreeItem* admMachine = add(comp, "Administrative Vorlagen", resico_folder, GN_ADM, true);
 
-		FXTreeItem* usr = add(root, "Benutzerkonfiguration", resico_user, GN_FOLDER, false);
+		FXTreeItem* usr = add(root, "Benutzerkonfiguration", resico_gpedit_user_config, GN_FOLDER, false);
 		FXTreeItem* uSw = add(usr, "Softwareeinstellungen", resico_folder, GN_FOLDER, false);
 		add(uSw, "Softwareinstallation", resico_folder, GN_SOFTWARE, false);
 		FXTreeItem* uWin = add(usr, "Windows-Einstellungen", resico_folder, GN_FOLDER, false);
@@ -6709,7 +6709,7 @@ public:
 		new FXTabItem(tabs, "Allgemein", NULL);
 		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
 		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 16,0);
-		new FXLabel(head, "", sharedPngIcon(resico_network), LAYOUT_CENTER_Y);
+		new FXLabel(head, "", sharedPngIcon(resico_gpedit_gpo), LAYOUT_CENTER_Y);
 		new FXLabel(head, gpo.displayName.c_str(), NULL, LAYOUT_CENTER_Y);
 
 		FXGroupBox* sum = new FXGroupBox(page, "Zusammenfassung", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8);
@@ -6790,7 +6790,7 @@ public:
 				auto range = rec.equal_range("objectclass");
 				for (auto it = range.first; it != range.second; ++it) cls = lowerCopy(it->second);
 				std::string dn = ldifFirst(rec, "dn");
-				const unsigned char* icon = cls == "domaindns" ? resico_server : resico_folder;
+				const unsigned char* icon = cls == "domaindns" ? resico_gpedit_domain : cls == "site" ? resico_gpedit_site : resico_gpedit_folder;
 				found.push_back({ cls == "site" ? dnLeafName(dn) : canonicalNameOf(dn), icon });
 			}
 		};
@@ -6895,9 +6895,9 @@ public:
 		FXHorizontalFrame* top = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
 		new FXLabel(top, "Suchen &in:", NULL, LAYOUT_CENTER_Y);
 		pages[idx].lookIn = new FXListBox(top, this, ID_LOOKIN0 + idx, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
-		FXButton* up = new FXButton(top, "\tÜbergeordneter Ordner", new FXGIFIcon(getApp(), resico_mmc_up), this, ID_UP, BUTTON_TOOLBAR | FRAME_RAISED | LAYOUT_CENTER_Y, 0,0,0,0, 3,3,3,3);
+		FXButton* up = new FXButton(top, "\tÜbergeordneter Ordner", sharedPngIcon(resico_gpedit_up), this, ID_UP, BUTTON_TOOLBAR | FRAME_RAISED | LAYOUT_CENTER_Y, 0,0,0,0, 3,3,3,3);
 		if (!withUp) up->hide();
-		new FXButton(top, "\tNeues Gruppenrichtlinienobjekt erstellen", sharedPngIcon(resico_dsa_newgpo), this, ID_NEW_GPO, BUTTON_TOOLBAR | FRAME_RAISED | LAYOUT_CENTER_Y, 0,0,0,0, 3,3,3,3);
+		new FXButton(top, "\tNeues Gruppenrichtlinienobjekt erstellen", sharedPngIcon(resico_gpedit_new_gpo), this, ID_NEW_GPO, BUTTON_TOOLBAR | FRAME_RAISED | LAYOUT_CENTER_Y, 0,0,0,0, 3,3,3,3);
 		new FXLabel(page, description, NULL, JUSTIFY_LEFT);
 		FXPacker* lf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
 		pages[idx].list = new FXIconList(lf, this, ID_LIST0 + idx, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
@@ -6912,10 +6912,11 @@ public:
 
 	void addGpoRows(Page& pg, const std::string& gplink) {
 		FXString realmLower = domain.realm; realmLower.lower();
-		FXIcon* ic = sharedPngIcon(resico_network);
 		auto links = parseGpLink(gplink);
 		for (auto it = links.rbegin(); it != links.rend(); ++it) { // hoechste Prioritaet zuerst
 			const GpoSummary* g = gpoByGuid(it->guid);
+			// Nicht lesbares/verwaistes GPO: Symbol "Zugriff verweigert" wie im Original.
+			FXIcon* ic = sharedPngIcon(g ? resico_gpedit_gpo : resico_gpedit_gpo_denied);
 			pg.list->appendItem(FXString(g ? g->displayName.c_str() : it->guid.c_str()) + "\t" + realmLower, ic, ic);
 			pg.rows.push_back({ "", it->guid });
 		}
@@ -6943,14 +6944,14 @@ public:
 		for (size_t i = 0; i < chain.size(); i++) {
 			bool root = lowerCopy(chain[i]) == lowerCopy(base);
 			FXString label = FXString(std::string(i * 2, ' ').c_str()) + (root ? canonicalNameOf(chain[i]) : dnLeafName(chain[i]));
-			pg.lookIn->appendItem(label, sharedPngIcon(root ? resico_server : resico_folder));
+			pg.lookIn->appendItem(label, sharedPngIcon(root ? resico_gpedit_domain : resico_gpedit_folder));
 			pg.lookInDns.push_back(chain[i]);
 		}
 		pg.lookIn->setNumVisible(std::min((int)chain.size(), 10));
 		pg.lookIn->setCurrentItem((int)chain.size() - 1);
 
 		FXString realmLower = domain.realm; realmLower.lower();
-		FXIcon* folder = sharedPngIcon(resico_folder);
+		FXIcon* folder = sharedPngIcon(resico_gpedit_folder);
 		auto ous = ldapiSearch(domainsLocation, "one", "(objectClass=organizationalUnit)", { "ou" });
 		std::sort(ous.begin(), ous.end(), [](const std::multimap<std::string, std::string>& a, const std::multimap<std::string, std::string>& b) {
 			return germanLess(dnLeafName(ldifFirst(a, "dn")).text(), dnLeafName(ldifFirst(b, "dn")).text());
@@ -6970,7 +6971,7 @@ public:
 		auto sites = ldapiSearch("CN=Sites,CN=Configuration," + std::string(domain.baseDN.text()), "one", "(objectClass=site)", { "cn" });
 		for (auto& rec : sites) {
 			std::string dn = ldifFirst(rec, "dn");
-			pg.lookIn->appendItem(dnLeafName(dn), sharedPngIcon(resico_folder));
+			pg.lookIn->appendItem(dnLeafName(dn), sharedPngIcon(resico_gpedit_site));
 			pg.lookInDns.push_back(dn);
 		}
 		pg.lookIn->setNumVisible(std::max(1, std::min((int)sites.size(), 10)));
@@ -6989,11 +6990,11 @@ public:
 		Page& pg = pages[PAGE_ALL];
 		FXString realmLower = domain.realm; realmLower.lower();
 		pg.lookIn->clearItems();
-		pg.lookIn->appendItem(realmLower, sharedPngIcon(resico_server));
+		pg.lookIn->appendItem(realmLower, sharedPngIcon(resico_gpedit_domain));
 		pg.lookIn->setNumVisible(1);
 		pg.list->clearItems();
 		pg.rows.clear();
-		FXIcon* ic = sharedPngIcon(resico_network);
+		FXIcon* ic = sharedPngIcon(resico_gpedit_gpo);
 		for (auto& g : allGpos) {
 			pg.list->appendItem(g.displayName.c_str(), ic, ic);
 			pg.rows.push_back({ "", g.guid });
@@ -7757,7 +7758,7 @@ public:
 		new FXTabItem(tabs, "Gruppenrichtlinie", NULL);
 		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
 		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
-		new FXLabel(head, "", sharedPngIcon(resico_network), LAYOUT_CENTER_Y);
+		new FXLabel(head, "", sharedPngIcon(resico_gpedit_gpo), LAYOUT_CENTER_Y);
 		new FXLabel(head, "Aktuelle Gruppenrichtlinienobjekt-Verknüpfungen für " + displayName, NULL, LAYOUT_CENTER_Y | JUSTIFY_LEFT);
 		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
@@ -7799,10 +7800,10 @@ public:
 
 	void reloadLinks(int selectRow = 0) {
 		linkList->clearItems();
-		FXIcon* ic = sharedPngIcon(resico_network);
 		for (int row = 0; row < (int)links.size(); row++) {
 			const GpLinkEntry& l = links[linkIndexForRow(row)];
 			const GpoSummary* g = gpoByGuid(l.guid);
+			FXIcon* ic = sharedPngIcon(g ? resico_gpedit_gpo : resico_gpedit_gpo_denied);
 			FXString name = g ? FXString(g->displayName.c_str()) : FXString(l.guid.c_str());
 			linkList->appendItem(name + "\t" + ((l.options & GPLINK_OPT_ENFORCE) ? "\u2713" : "") +
 			                     "\t" + ((l.options & GPLINK_OPT_DISABLE) ? "\u2713" : ""), ic, ic);
@@ -7958,7 +7959,7 @@ public:
 		// Texte und Aufbau wie gpedit.dll, Dialog 1050.
 		FXDialogBox dlg(this, "Löschen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,0,0, 10,10,10,10);
 		FXHorizontalFrame* outer = new FXHorizontalFrame(&dlg, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 16,0);
-		new FXLabel(outer, "", sharedPngIcon(resico_network), LAYOUT_TOP);
+		new FXLabel(outer, "", sharedPngIcon(resico_gpedit_gpo), LAYOUT_TOP);
 		FXVerticalFrame* main = new FXVerticalFrame(outer, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
 		new FXLabel(main, "Wie möchten Sie mit \"" + name + "\" verfahren?", NULL, JUSTIFY_LEFT);
 		FXint choice = 0;
