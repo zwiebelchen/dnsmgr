@@ -3303,10 +3303,10 @@ public:
 		new FXTabItem(tabs, "Erklärung", NULL);
 		FXVerticalFrame* expl = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,4);
 		new FXLabel(expl, FXString("Erklärung für:  ") + pol.label.c_str(), NULL, JUSTIFY_LEFT);
-		navButtons(expl);
 		FXPacker* ef = new FXPacker(expl, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
 		FXText* explainText = new FXText(ef, NULL, 0, TEXT_READONLY | TEXT_WORDWRAP | LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		explainText->setText(pol.explainText.c_str());
+		navButtons(expl);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(outer, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);

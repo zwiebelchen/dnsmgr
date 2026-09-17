@@ -105,6 +105,29 @@ bestätigen" und Reiter "Links" (550), sowie
 "Domänen/Organisationseinheiten", "Standorte" und "Alle" (1203). Die
 DLL selbst liegt nicht im Repository.
 
+Weitere Abgleiche (alle deutsch, Windows 2000 SP4; die DLLs liegen
+nicht im Repository):
+
+- `dsadmin.dll`: Werkzeugleisten-Symbole (Bitmap 242) und Kurzinfos
+  (Texte 740-751), Snap-in- und Domänensymbol → `res/dsadmin`.
+- `wsecedit.dll`: Namen, Einheiten und Eingabetexte der Kennwort-,
+  Kontosperrungs-, Kerberos-, Überwachungs- und Ereignisprotokoll-
+  Richtlinien (inklusive Textwechsel bei 0, z.B. "Kennwort läuft nie
+  ab:"), die in der DLL stehenden Benutzerrechte und
+  Sicherheitsoptionen, Dialogtitel "Sicherheitsrichtlinienvorlage",
+  Dialoge für Dienste (195), Datei/Registrierung (197) und eingeschränkte
+  Gruppen (107) samt Platzhaltern, Spalten "Start"/"Überwachen".
+  Dialog 197 bestätigt die Zuordnung der Vererbungsmodi (0 übermitteln,
+  2 ersetzen, 1 Ersetzen nicht zulassen). Die übrigen
+  Sicherheitsoptionen und Benutzerrechte stehen nicht in der DLL (Windows
+  liest sie aus `sceregvl.inf` bzw. von der LSA) und bleiben unverändert.
+- `aclui.dll`: Aufbau des Berechtigungsdialogs (103) mit "Erweitert"-
+  Hinweis, Meldungen beim Entfernen geerbter Konten (Text 20) und bei
+  Verweigerungen (31), Rückfrage "Kopieren/Entfernen/Abbrechen" beim
+  Abschalten der Vererbung (109).
+- `gptext.dll`: Richtliniendialog mit den Reitern "Richtlinie" (200) und
+  "Erklärung" (225) sowie "Vorherige/Nächste Richtlinie".
+
 Die Symbole unter `res/gpedit` stammen aus derselben DLL (Bitmaps 1 und
 1229, Magenta als Transparenz in echtes Alpha umgesetzt): Ordner,
 Gruppenrichtlinienobjekt, GPO mit verweigertem Zugriff (für verwaiste
