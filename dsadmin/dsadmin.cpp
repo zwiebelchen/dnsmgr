@@ -6700,7 +6700,7 @@ public:
 	enum { ID_OK = FXDialogBox::ID_LAST, ID_APPLY, ID_DISABLE_PART, ID_SEARCH_LINKS };
 
 	GpoPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const GpoSummary& gpo_)
-		: FXDialogBox(owner, FXString(gpo_.displayName.c_str()) + " Eigenschaften", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,460,0),
+		: FXDialogBox(owner, FXString(gpo_.displayName.c_str()) + " Eigenschaften", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,580,0),
 		  domain(domain_), gpo(gpo_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
 		FXTabBook* tabs = new FXTabBook(main, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
@@ -7767,8 +7767,10 @@ public:
 		linkList->appendHeader("Kein Vorrang", NULL, 95);
 		linkList->appendHeader("Deaktiviert", NULL, 85);
 
-		new FXLabel(page, "Das Gruppenrichtlinienobjekt mit der höchsten Priorität steht an erster Stelle.\n"
-		                  "Die Liste wurde von " + serverFqdn(domain) + " erhalten.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		// Texte wie gpedit.dll, Dialog 1025 (dort zwei Textfelder).
+		new FXLabel(page, "Das Gruppenrichtlinienobjekt mit der höchsten Priorität steht an\n"
+		                  "erster Stelle.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		new FXLabel(page, "Die Liste wurde von " + serverFqdn(domain) + " erhalten.", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
 
 		FXMatrix* m = new FXMatrix(page, 4, MATRIX_BY_COLUMNS | LAYOUT_FILL_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,4,0, 6,6);
 		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X;

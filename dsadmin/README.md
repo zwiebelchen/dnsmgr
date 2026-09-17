@@ -92,6 +92,19 @@ Wie im Original drei Reiter:
 Gelesen wird über Sambas privilegierten ldapi-Socket (ohne
 Anmeldedaten), geschrieben per LDAP mit Administrator-Anmeldedaten.
 
+## Abgleich mit den Originaldateien
+
+Texte und Aufbau der Gruppenrichtlinien-Dialoge sind gegen die
+Ressourcen der deutschen `gpedit.dll` aus Windows 2000 SP4
+(5.00.2195.6998) abgeglichen: Gruppenrichtlinie-Reiter (Dialog 1025),
+"Optionen für ..." (1040), "Löschen" (1050) samt Rückfrage "Soll %s
+unwiderruflich gelöscht werden?", Eigenschaften eines GPOs mit
+"Zusammenfassung"/"Deaktivieren" (500) inklusive "Deaktivieren
+bestätigen" und Reiter "Links" (550), sowie
+"Gruppenrichtlinienobjekt-Verknüpfung hinzufügen" mit den Reitern
+"Domänen/Organisationseinheiten", "Standorte" und "Alle" (1203). Die
+DLL selbst liegt nicht im Repository.
+
 ## Gruppenrichtlinienfenster
 
 Nachbau des Gruppenrichtlinienobjekt-Editors: Baum mit Computer- und
