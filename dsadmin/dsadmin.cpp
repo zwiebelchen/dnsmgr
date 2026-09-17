@@ -4356,21 +4356,46 @@ struct SecPolicyDef {
 	int minV = 0, maxV = 0, defV = 0;
 	SecRegType regType = REGT_PLAIN;
 	std::vector<SecChoice> choices = {}; // SV_CHOICE
+	const char* prompt = nullptr;     // SV_NUMBER: Text vor dem Eingabefeld ("Kennwort läuft ab in:")
+	const char* zeroPrompt = nullptr; // ... stattdessen, solange der Wert 0 ist ("Kennwort läuft nie ab:")
 };
 
+// Bezeichnungen, Einheiten und Eingabetexte wortgleich aus wsecedit.dll
+// (Windows 2000 SP4, Texte 50-89, 272-277, 345-365, 57401-57417) --
+// auch da, wo das Original holpert ("Kennwörtern für alle ...").
 static const std::vector<SecPolicyDef> SEC_PASSWORD_POLICIES = {
-	{ "System Access", "PasswordHistorySize", "Kennwortchronik erzwingen", SV_NUMBER, "gespeicherte Kennwörter", 0, 24, 24 },
-	{ "System Access", "MaximumPasswordAge", "Maximales Kennwortalter", SV_NUMBER, "Tage", 0, 999, 42 },
-	{ "System Access", "MinimumPasswordAge", "Minimales Kennwortalter", SV_NUMBER, "Tage", 0, 998, 1 },
-	{ "System Access", "MinimumPasswordLength", "Minimale Kennwortlänge", SV_NUMBER, "Zeichen", 0, 14, 7 },
-	{ "System Access", "PasswordComplexity", "Kennwörter müssen den Komplexitätsvoraussetzungen entsprechen", SV_BOOL, "", 0, 1, 1 },
-	{ "System Access", "ClearTextPassword", "Kennwörter für alle Domänenbenutzer mit umkehrbarer Verschlüsselung speichern", SV_BOOL, "", 0, 1, 0 },
+	{ "System Access", "PasswordHistorySize", "Kennwortchronik erzwingen", SV_NUMBER, "Gespeicherte Kennwörter", 0, 24, 24, REGT_PLAIN, {},
+	  "Kennwortchronik behalten:", "Keine Kennwortchronik führen:" },
+	{ "System Access", "MaximumPasswordAge", "Maximales Kennwortalter", SV_NUMBER, "Tage", 0, 999, 42, REGT_PLAIN, {},
+	  "Kennwort läuft ab in:", "Kennwort läuft nie ab:" },
+	{ "System Access", "MinimumPasswordAge", "Minimales Kennwortalter", SV_NUMBER, "Tage", 0, 998, 1, REGT_PLAIN, {},
+	  "Kennwort kann geändert werden nach:", "Kennwort kann sofort geändert werden:" },
+	{ "System Access", "MinimumPasswordLength", "Minimale Kennwortlänge", SV_NUMBER, "Zeichen", 0, 14, 7, REGT_PLAIN, {},
+	  "Kennwort muss mindestens:", "Kein Kennwort erforderlich:" },
+	{ "System Access", "PasswordComplexity", "Kennwörter müssen den Komplexitätsanforderungen entsprechen.", SV_BOOL, "", 0, 1, 1 },
+	{ "System Access", "ClearTextPassword", "Kennwörtern für alle Domänenbenutzer mit umkehrbarer Verschlüsselung speichern", SV_BOOL, "", 0, 1, 0 },
 };
 
 static const std::vector<SecPolicyDef> SEC_LOCKOUT_POLICIES = {
-	{ "System Access", "LockoutDuration", "Kontosperrdauer", SV_NUMBER, "Minuten", 0, 99999, 30 },
-	{ "System Access", "LockoutBadCount", "Kontosperrungsschwelle", SV_NUMBER, "ungültige Anmeldeversuche", 0, 999, 5 },
+	{ "System Access", "LockoutDuration", "Kontosperrdauer", SV_NUMBER, "Minuten", 0, 99999, 30, REGT_PLAIN, {},
+	  "Konto ist gesperrt für:", "Konto ist gesperrt, bis Administrator Sperrung aufhebt:" },
+	{ "System Access", "LockoutBadCount", "Kontensperrungsschwelle", SV_NUMBER, "Ungültige Anmeldeversuche", 0, 999, 5, REGT_PLAIN, {},
+	  "Konto wird gesperrt nach:", "Konto wird nicht gesperrt:" },
 	{ "System Access", "ResetLockoutCount", "Kontosperrungszähler zurücksetzen nach", SV_NUMBER, "Minuten", 1, 99999, 30 },
+};
+
+// Kerberos-Richtlinie ([Kerberos Policy]) -- wirkt nur in GPOs, die mit
+// der Domaene verknuepft sind.
+static const std::vector<SecPolicyDef> SEC_KERBEROS_POLICIES = {
+	{ "Kerberos Policy", "TicketValidateClient", "Benutzeranmeldeeinschränkungen erzwingen", SV_BOOL, "", 0, 1, 1 },
+	{ "Kerberos Policy", "MaxServiceAge", "Max. Gültigkeitsdauer des Diensttickets", SV_NUMBER, "Minuten", 0, 99999, 600, REGT_PLAIN, {},
+	  "Das Ticket läuft ab in:", "Das Ticket läuft nicht ab:" },
+	{ "Kerberos Policy", "MaxTicketAge", "Max. Gültigkeitsdauer des Benutzertickets", SV_NUMBER, "Stunden", 0, 99999, 10, REGT_PLAIN, {},
+	  "Das Ticket läuft ab in:", "Das Ticket läuft nicht ab:" },
+	{ "Kerberos Policy", "MaxRenewAge", "Max. Zeitraum, in dem ein Benutzerticket erneuert werden kann", SV_NUMBER, "Tage", 0, 99999, 7, REGT_PLAIN, {},
+	  "Die Ticketerneuerung läuft ab in:", "Die Ticketerneuerung läuft nicht ab:" },
+	{ "Kerberos Policy", "MaxClockSkew", "Max. Toleranz für die Synchronisation des Computertakts", SV_NUMBER, "Minuten", 0, 99999, 5, REGT_PLAIN, {},
+	  "Maximale Toleranz:" },
 };
 
 static const std::vector<SecPolicyDef> SEC_AUDIT_POLICIES = {
@@ -4382,19 +4407,22 @@ static const std::vector<SecPolicyDef> SEC_AUDIT_POLICIES = {
 	{ "Event Audit", "AuditPrivilegeUse", "Rechteverwendung überwachen", SV_AUDIT },
 	{ "Event Audit", "AuditPolicyChange", "Richtlinienänderungen überwachen", SV_AUDIT },
 	{ "Event Audit", "AuditSystemEvents", "Systemereignisse überwachen", SV_AUDIT },
-	{ "Event Audit", "AuditDSAccess", "Verzeichnisdienstzugriff überwachen", SV_AUDIT },
+	{ "Event Audit", "AuditDSAccess", "Active Directory-Zugriff überwachen", SV_AUDIT },
 };
 
 static const std::vector<SecPolicyDef> SEC_EVENTLOG_POLICIES = {
-	{ "Application Log", "MaximumLogSize", "Maximale Anwendungsprotokollgröße", SV_NUMBER, "Kilobyte", 64, 4194240, 512 },
-	{ "Security Log", "MaximumLogSize", "Maximale Sicherheitsprotokollgröße", SV_NUMBER, "Kilobyte", 64, 4194240, 512 },
-	{ "System Log", "MaximumLogSize", "Maximale Systemprotokollgröße", SV_NUMBER, "Kilobyte", 64, 4194240, 512 },
-	{ "Application Log", "RestrictGuestAccess", "Lokalen Gastkontozugriff auf Anwendungsprotokoll verhindern", SV_BOOL, "", 0, 1, 1 },
-	{ "Security Log", "RestrictGuestAccess", "Lokalen Gastkontozugriff auf Sicherheitsprotokoll verhindern", SV_BOOL, "", 0, 1, 1 },
-	{ "System Log", "RestrictGuestAccess", "Lokalen Gastkontozugriff auf Systemprotokoll verhindern", SV_BOOL, "", 0, 1, 1 },
-	{ "Application Log", "RetentionDays", "Anwendungsprotokoll aufbewahren", SV_NUMBER, "Tage", 1, 365, 7 },
-	{ "Security Log", "RetentionDays", "Sicherheitsprotokoll aufbewahren", SV_NUMBER, "Tage", 1, 365, 7 },
-	{ "System Log", "RetentionDays", "Systemprotokoll aufbewahren", SV_NUMBER, "Tage", 1, 365, 7 },
+	{ "Application Log", "MaximumLogSize", "Maximale Größe des Anwendungsprotokolls", SV_NUMBER, "Kilobytes", 64, 4194240, 512 },
+	{ "Security Log", "MaximumLogSize", "Maximale Größe des Sicherheitsprotokolls", SV_NUMBER, "Kilobytes", 64, 4194240, 512 },
+	{ "System Log", "MaximumLogSize", "Maximale Größe des Systemprotokolls", SV_NUMBER, "Kilobytes", 64, 4194240, 512 },
+	{ "Application Log", "RestrictGuestAccess", "Gastkontozugriff auf Anwendungsprotokoll einschränken", SV_BOOL, "", 0, 1, 1 },
+	{ "Security Log", "RestrictGuestAccess", "Gastkontozugriff auf Sicherheitsprotokoll einschränken", SV_BOOL, "", 0, 1, 1 },
+	{ "System Log", "RestrictGuestAccess", "Gastkontozugriff auf Systemprotokoll einschränken", SV_BOOL, "", 0, 1, 1 },
+	{ "Application Log", "RetentionDays", "Anwendungsprotokoll aufbewahren für", SV_NUMBER, "Tage", 1, 365, 7, REGT_PLAIN, {},
+	  "Ereignisse überschreiben, die älter sind als:" },
+	{ "Security Log", "RetentionDays", "Sicherheitsprotokoll aufbewahren für", SV_NUMBER, "Tage", 1, 365, 7, REGT_PLAIN, {},
+	  "Ereignisse überschreiben, die älter sind als:" },
+	{ "System Log", "RetentionDays", "Systemprotokoll aufbewahren für", SV_NUMBER, "Tage", 1, 365, 7, REGT_PLAIN, {},
+	  "Ereignisse überschreiben, die älter sind als:" },
 	{ "Application Log", "AuditLogRetentionPeriod", "Aufbewahrungsmethode des Anwendungsprotokolls", SV_RETENTION, "", 0, 2, 1 },
 	{ "Security Log", "AuditLogRetentionPeriod", "Aufbewahrungsmethode des Sicherheitsprotokolls", SV_RETENTION, "", 0, 2, 1 },
 	{ "System Log", "AuditLogRetentionPeriod", "Aufbewahrungsmethode des Systemprotokolls", SV_RETENTION, "", 0, 2, 1 },
@@ -4421,11 +4449,12 @@ static const std::vector<SecPolicyDef> SEC_OPTIONS = {
 	{ "Registry Values", REG_LSA "SubmitControl", "Server-Operatoren das Zuweisen von Aufgaben ermöglichen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
 	{ "Registry Values", REG_LSA "AuditBaseObjects", "Zugriff auf globale Systemobjekte prüfen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
 	{ "Registry Values", REG_LSA "FullPrivilegeAuditing", "Zugriff auf Sicherungs- und Wiederherstellungsrechte prüfen", SV_BOOL, "", 0, 1, 0, REGT_BINARY },
-	{ "System Access", "ForceLogoffWhenHourExpire", "Clientverbindungen automatisch trennen, wenn die Anmeldezeit überschritten wird", SV_BOOL, "", 0, 1, 1, REGT_PLAIN },
+	{ "System Access", "ForceLogoffWhenHourExpire", "Benutzer nach Ablauf der Anmeldezeit automatisch abmelden", SV_BOOL, "", 0, 1, 1, REGT_PLAIN },
 	{ "Registry Values", REG_POLSYS "ShutdownWithoutLogon", "Herunterfahren des Systems ohne Anmeldung zulassen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
 	{ "Registry Values", REG_WINLOGON "AllocateDASD", "Formatieren und Auswerfen von Wechselmedien zulassen", SV_CHOICE, "", 0, 0, 0, REGT_SZ,
 	  { { 0, "Administratoren" }, { 1, "Administratoren und Hauptbenutzer" }, { 2, "Administratoren und interaktive Benutzer" } } },
-	{ "Registry Values", REG_LANMANSRV "AutoDisconnect", "Leerlaufzeit vor Trennung der Sitzung", SV_NUMBER, "Minuten", 0, 99999, 15, REGT_DWORD },
+	{ "Registry Values", REG_LANMANSRV "AutoDisconnect", "Leerlaufzeit vor Trennung der Sitzung", SV_NUMBER, "Minuten", 0, 99999, 15, REGT_DWORD, {},
+	  "Verbindung trennen bei einer Leerlaufzeit über:", "Verbindungen der Clients nicht trennen:" },
 	{ "Registry Values", REG_LANMANSRV "RequireSecuritySignature", "Serverkommunikation digital signieren (immer)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
 	{ "Registry Values", REG_LANMANSRV "EnableSecuritySignature", "Serverkommunikation digital signieren (wenn möglich)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
 	{ "Registry Values", REG_LANMANWKS "RequireSecuritySignature", "Clientkommunikation digital signieren (immer)", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
@@ -4438,12 +4467,14 @@ static const std::vector<SecPolicyDef> SEC_OPTIONS = {
 	    { 2, "Nur NTLM-Antworten senden" }, { 3, "Nur NTLMv2-Antworten senden" } } },
 	{ "Registry Values", REG_POLSYS "LegalNoticeText", "Nachricht für Benutzer, die sich anmelden wollen", SV_TEXT, "", 0, 0, 0, REGT_SZ },
 	{ "Registry Values", REG_POLSYS "LegalNoticeCaption", "Nachrichtentitel für Benutzer, die sich anmelden wollen", SV_TEXT, "", 0, 0, 0, REGT_SZ },
-	{ "Registry Values", REG_WINLOGON "CachedLogonsCount", "Anzahl zwischenzuspeichernder vorheriger Anmeldungen (für den Fall, dass der Domänencontroller nicht verfügbar ist)", SV_NUMBER, "Anmeldungen", 0, 50, 10, REGT_SZ },
+	{ "Registry Values", REG_WINLOGON "CachedLogonsCount", "Anzahl zwischenzuspeichernder vorheriger Anmeldungen (für den Fall, dass der Domänencontroller nicht verfügbar ist)", SV_NUMBER, "Anmeldungen", 0, 50, 10, REGT_SZ, {},
+	  "Zwischenspeichern:", "Anmeldungen nicht zwischenspeichern:" },
 	{ "Registry Values", "MACHINE\\System\\CurrentControlSet\\Control\\Print\\Providers\\LanMan Print Services\\Servers\\AddPrinterDrivers", "Installation von Druckertreibern durch Benutzer verhindern", SV_BOOL, "", 0, 1, 1, REGT_DWORD },
-	{ "Registry Values", REG_WINLOGON "PasswordExpiryWarning", "Benutzer auffordern, das Kennwort vor Ablauf zu ändern", SV_NUMBER, "Tage", 0, 999, 14, REGT_DWORD },
+	{ "Registry Values", REG_WINLOGON "PasswordExpiryWarning", "Benutzer auffordern, das Kennwort vor Ablauf zu ändern", SV_NUMBER, "Tage", 0, 999, 14, REGT_DWORD, {},
+	  "Die Aufforderung wird nach folgender Anzahl von Tagen, vor Ablauf des Kennworts gestartet:" },
 	{ "Registry Values", REG_RECOVERY "SecurityLevel", "Wiederherstellungskonsole: Automatische administrative Anmeldung zulassen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
 	{ "Registry Values", REG_RECOVERY "SetCommand", "Wiederherstellungskonsole: Kopieren von Disketten und Zugriff auf alle Laufwerke und Ordner zulassen", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
-	{ "System Access", "NewAdministratorName", "Administratorkonto umbenennen", SV_TEXT, "", 0, 0, 0, REGT_QUOTED },
+	{ "System Access", "NewAdministratorName", "Administrator umbenennen", SV_TEXT, "", 0, 0, 0, REGT_QUOTED },
 	{ "System Access", "NewGuestName", "Gastkonto umbenennen", SV_TEXT, "", 0, 0, 0, REGT_QUOTED },
 	{ "Registry Values", REG_WINLOGON "AllocateCDRoms", "Zugriff auf CD-ROM-Laufwerke auf lokal angemeldete Benutzer beschränken", SV_BOOL, "", 0, 1, 0, REGT_SZ },
 	{ "Registry Values", REG_WINLOGON "AllocateFloppies", "Zugriff auf Diskettenlaufwerke auf lokal angemeldete Benutzer beschränken", SV_BOOL, "", 0, 1, 0, REGT_SZ },
@@ -4462,10 +4493,12 @@ static const std::vector<SecPolicyDef> SEC_OPTIONS = {
 	{ "Registry Values", REG_WINLOGON "ForceUnlockLogon", "Domänencontroller-Authentifizierung zum Aufheben der Sperrung erforderlich", SV_BOOL, "", 0, 1, 0, REGT_DWORD },
 };
 
-static const char* RETENTION_LABELS[3] = {
-	"Ereignisse bei Bedarf überschreiben",
-	"Ereignisse nach Tagen überschreiben",
-	"Ereignisse nicht überschreiben (Protokoll manuell löschen)"
+// Liste (Texte 198-200) und Dialog (190) benennen die Werte verschieden.
+static const char* RETENTION_LABELS[3] = { "Bei Bedarf", "Nach Tagen", "Manuell" };
+static const char* RETENTION_DIALOG_LABELS[3] = {
+	"Ereignisse bei &Bedarf überschreiben",
+	"Ereignisse auf &Tagen basierend überschreiben",
+	"Ereignisse nicht überschreiben (&Protokoll manuell aufräumen)"
 };
 
 // Liest den Wert einer Richtlinie aus der Vorlage -- Zahlen als
@@ -4532,6 +4565,7 @@ private:
 	FXCheckButton* defineCheck = nullptr;
 	std::vector<FXWindow*> controls;
 	FXSpinner* spinner = nullptr;
+	FXLabel* promptLabel = nullptr;
 	FXTextField* textField = nullptr;
 	FXListBox* choiceBox = nullptr;
 	FXint choice = 0;
@@ -4540,10 +4574,10 @@ private:
 protected:
 	SecPolicyEditDialog() {}
 public:
-	enum { ID_DEFINE = FXDialogBox::ID_LAST };
+	enum { ID_DEFINE = FXDialogBox::ID_LAST, ID_SPIN };
 
 	SecPolicyEditDialog(FXWindow* owner, const SecPolicyDef& def_, bool defined, const std::string& value)
-		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0),
+		: FXDialogBox(owner, "Sicherheitsrichtlinienvorlage", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0),
 		  def(&def_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
 		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
@@ -4551,7 +4585,12 @@ public:
 		new FXLabel(head, wrapLabel(def->label, 50), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
-		defineCheck = new FXCheckButton(main, "Diese Richtlinieneinstellung &definieren:", this, ID_DEFINE);
+		// Wortlaut je Dialogart wie in wsecedit.dll (Dialoge 180-183, 190).
+		const char* defineText = def->kind == SV_AUDIT ? "&Diese Richtlinieneinstellungen in der Vorlage definieren"
+		                       : (def->kind == SV_TEXT || def->kind == SV_RETENTION || def->kind == SV_CHOICE)
+		                         ? "&Diese Richtlinieneinstellung in der Vorlage definieren:"
+		                         : "&Diese Richtlinieneinstellung in der Vorlage definieren";
+		defineCheck = new FXCheckButton(main, defineText, this, ID_DEFINE);
 		defineCheck->setCheck(defined);
 		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
 
@@ -4560,19 +4599,25 @@ public:
 		choice = initial;
 		switch (def->kind) {
 			case SV_NUMBER: {
+				if (def->prompt) {
+					promptLabel = new FXLabel(body, def->prompt, NULL, JUSTIFY_LEFT);
+					controls.push_back(promptLabel);
+				}
 				FXHorizontalFrame* row = new FXHorizontalFrame(body, 0, 0,0,0,0, 0,0,0,0);
-				spinner = new FXSpinner(row, 8, NULL, 0, SPIN_NORMAL | FRAME_SUNKEN | FRAME_THICK);
+				spinner = new FXSpinner(row, 8, this, ID_SPIN, SPIN_NORMAL | FRAME_SUNKEN | FRAME_THICK);
 				spinner->setRange(def->minV, def->maxV);
 				spinner->setValue(std::max(def->minV, std::min(def->maxV, initial)));
 				if (def->minV == 64) spinner->setIncrement(64);
 				FXLabel* unit = new FXLabel(row, def->unit, NULL, LAYOUT_CENTER_Y);
-				controls = { spinner, unit };
+				controls.push_back(spinner);
+				controls.push_back(unit);
+				updatePrompt();
 				break;
 			}
 			case SV_BOOL: {
 				choiceTarget = new FXDataTarget(choice);
 				controls.push_back(new FXRadioButton(body, "&Aktiviert", choiceTarget, FXDataTarget::ID_OPTION + 1));
-				controls.push_back(new FXRadioButton(body, "D&eaktiviert", choiceTarget, FXDataTarget::ID_OPTION + 0));
+				controls.push_back(new FXRadioButton(body, "Dea&ktiviert", choiceTarget, FXDataTarget::ID_OPTION + 0));
 				break;
 			}
 			case SV_AUDIT: {
@@ -4588,7 +4633,7 @@ public:
 			case SV_RETENTION: {
 				choiceTarget = new FXDataTarget(choice);
 				for (int i : { 1, 0, 2 })
-					controls.push_back(new FXRadioButton(body, RETENTION_LABELS[i], choiceTarget, FXDataTarget::ID_OPTION + i));
+					controls.push_back(new FXRadioButton(body, RETENTION_DIALOG_LABELS[i], choiceTarget, FXDataTarget::ID_OPTION + i));
 				break;
 			}
 			case SV_TEXT: {
@@ -4638,6 +4683,12 @@ public:
 		}
 	}
 	long onDefine(FXObject*, FXSelector, void*) { updateEnabled(); return 1; }
+	// Wie im Original wechselt der Text bei 0 ("Kennwort läuft nie ab:").
+	void updatePrompt() {
+		if (!promptLabel || !spinner) return;
+		promptLabel->setText((spinner->getValue() == 0 && def->zeroPrompt) ? def->zeroPrompt : def->prompt);
+	}
+	long onSpin(FXObject*, FXSelector, void*) { updatePrompt(); return 1; }
 
 	bool isDefined() const { return defineCheck->getCheck(); }
 	std::string getValue() const {
@@ -4656,6 +4707,8 @@ public:
 };
 FXDEFMAP(SecPolicyEditDialog) SecPolicyEditDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, SecPolicyEditDialog::ID_DEFINE, SecPolicyEditDialog::onDefine),
+	FXMAPFUNC(SEL_CHANGED, SecPolicyEditDialog::ID_SPIN, SecPolicyEditDialog::onSpin),
+	FXMAPFUNC(SEL_COMMAND, SecPolicyEditDialog::ID_SPIN, SecPolicyEditDialog::onSpin),
 };
 FXIMPLEMENT(SecPolicyEditDialog, FXDialogBox, SecPolicyEditDialogMap, ARRAYNUMBER(SecPolicyEditDialogMap))
 
@@ -4775,10 +4828,10 @@ static const std::vector<UserRightDef> USER_RIGHTS = {
 	{ "SeTcbPrivilege", "Als Teil des Betriebssystems handeln" },
 	{ "SeSystemtimePrivilege", "Ändern der Systemzeit" },
 	{ "SeIncreaseBasePriorityPrivilege", "Anheben der Zeitplanungspriorität" },
-	{ "SeBatchLogonRight", "Anmelden als Batchauftrag" },
-	{ "SeDenyBatchLogonRight", "Anmelden als Batchauftrag verweigern" },
-	{ "SeServiceLogonRight", "Anmelden als Dienst" },
-	{ "SeDenyServiceLogonRight", "Anmelden als Dienst verweigern" },
+	{ "SeBatchLogonRight", "Anmelden als Stapelverarbeitungsauftrag" },
+	{ "SeDenyBatchLogonRight", "Anmeldung als Batchauftrag verweigern" },
+	{ "SeServiceLogonRight", "Als Dienst anmelden" },
+	{ "SeDenyServiceLogonRight", "Anmeldung als Dienst verweigern" },
 	{ "SeMachineAccountPrivilege", "Arbeitsstationen zur Domäne hinzufügen" },
 	{ "SeNetworkLogonRight", "Auf diesen Computer vom Netzwerk aus zugreifen" },
 	{ "SeChangeNotifyPrivilege", "Auslassen der durchsuchenden Überprüfung" },
@@ -4797,7 +4850,7 @@ static const std::vector<UserRightDef> USER_RIGHTS = {
 	{ "SeShutdownPrivilege", "Herunterfahren des Systems" },
 	{ "SeLoadDriverPrivilege", "Laden und Entfernen von Gerätetreibern" },
 	{ "SeInteractiveLogonRight", "Lokal anmelden" },
-	{ "SeDenyInteractiveLogonRight", "Lokal anmelden verweigern" },
+	{ "SeDenyInteractiveLogonRight", "Lokale Anmeldung verweigern" },
 	{ "SeLockMemoryPrivilege", "Sperren von Seiten im Speicher" },
 	{ "SeSyncAgentPrivilege", "Synchronisieren von Verzeichnisdienstdaten" },
 	{ "SeTakeOwnershipPrivilege", "Übernehmen des Besitzes von Dateien und Objekten" },
@@ -4820,6 +4873,7 @@ private:
 	std::vector<std::string> tokens;
 	const std::vector<GroupEntry>* principals = nullptr;
 	FXString pickerTitle;
+	FXString emptyText;   // Platzhalter, solange die Liste leer ist
 protected:
 	AccountListPanel() {}
 public:
@@ -4835,9 +4889,11 @@ public:
 		new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
 		reload();
 	}
+	void setEmptyText(const FXString& t) { emptyText = t; reload(); }
 	void reload() {
 		list->clearItems();
 		for (auto& t : tokens) list->appendItem(accountTokenDisplay(t, *principals));
+		if (tokens.empty() && !emptyText.empty()) list->appendItem(emptyText);
 	}
 	long onAdd(FXObject*, FXSelector, void*) {
 		DomainInfo domain = detectDomain();
@@ -4858,7 +4914,7 @@ public:
 	}
 	long onUpdRemove(FXObject* sender, FXSelector, void*) {
 		bool any = false;
-		for (FXint i = 0; i < list->getNumItems() && !any; i++) any = list->isItemSelected(i);
+		for (FXint i = 0; i < list->getNumItems() && i < (FXint)tokens.size() && !any; i++) any = list->isItemSelected(i);
 		sender->handle(this, FXSEL(SEL_COMMAND, any ? ID_ENABLE : ID_DISABLE), NULL);
 		return 1;
 	}
@@ -4884,13 +4940,13 @@ public:
 	enum { ID_DEFINE = FXDialogBox::ID_LAST };
 	UserRightDialog(FXWindow* owner, const UserRightDef& def, bool defined, const std::vector<std::string>& tokens,
 	                const std::vector<GroupEntry>& principals)
-		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,400) {
+		: FXDialogBox(owner, "Sicherheitsrichtlinienvorlage", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,400) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
 		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
 		new FXLabel(head, "", sharedPngIcon(resico_key), LAYOUT_TOP);
 		new FXLabel(head, SecPolicyEditDialog::wrapLabel(def.label, 50), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-		defineCheck = new FXCheckButton(main, "Diese Richtlinieneinstellungen &definieren:", this, ID_DEFINE);
+		defineCheck = new FXCheckButton(main, "&Diese Richtlinieneinstellungen in der Vorlage definieren:", this, ID_DEFINE);
 		defineCheck->setCheck(defined);
 		panel = new AccountListPanel(main, principals, tokens, "Benutzer oder Gruppen auswählen");
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 6,0);
@@ -4929,13 +4985,15 @@ public:
 	RestrictedGroupDialog(FXWindow* owner, const FXString& groupDisplay, const std::vector<std::string>& membersInit,
 	                      const std::vector<std::string>& memberOfInit, const std::vector<GroupEntry>& principals,
 	                      const std::vector<GroupEntry>& groups)
-		: FXDialogBox(owner, "Konfigurieren der Mitgliedschaft für " + groupDisplay, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,480) {
+		: FXDialogBox(owner, "Mitgliedschaft konfigurieren für " + groupDisplay, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,480) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
-		new FXLabel(main, "Mitglieder dieser Gruppe:");
+		new FXLabel(main, "&Mitglieder dieser Gruppe:");
 		members = new AccountListPanel(main, principals, membersInit, "Benutzer oder Gruppen auswählen");
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-		new FXLabel(main, "Diese Gruppe ist Mitglied von:");
+		new FXLabel(main, "&Diese Gruppe ist Mitglied von:");
 		memberOf = new AccountListPanel(main, groups, memberOfInit, "Gruppen auswählen");
+		members->setEmptyText("<Diese Gruppe sollte keine Mitglieder enthalten>");
+		memberOf->setEmptyText("<Die übergeordneten Gruppen dieser Gruppe sollten nicht geändert werden>");
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 6,0);
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
@@ -5620,7 +5678,7 @@ public:
 	enum { ID_DEFINE = FXDialogBox::ID_LAST, ID_SECURITY };
 	ServicePolicyDialog(FXWindow* owner, const FXString& serviceName_, const ServicePolicy& sp,
 	                    const std::vector<GroupEntry>& principals_)
-		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0),
+		: FXDialogBox(owner, "Sicherheitsrichtlinienvorlage", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0),
 		  mode(sp.defined && sp.startMode >= 2 && sp.startMode <= 4 ? sp.startMode : 2), modeTarget(mode),
 		  serviceName(serviceName_), sddl(sp.sddl.empty() ? SERVICE_DEFAULT_SDDL : sp.sddl), principals(&principals_) {
 		const FXString& serviceName = serviceName_;
@@ -5629,16 +5687,16 @@ public:
 		new FXLabel(head, "", sharedPngIcon(resico_server), LAYOUT_TOP);
 		new FXLabel(head, serviceName, NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-		defineCheck = new FXCheckButton(main, "Diese Richtlinieneinstellung &definieren", this, ID_DEFINE);
+		defineCheck = new FXCheckButton(main, "&Diese Richtlinieneinstellung in der Vorlage definieren", this, ID_DEFINE);
 		defineCheck->setCheck(sp.defined);
 		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
-		controls.push_back(new FXLabel(body, "Startmodus für Dienst auswählen:"));
+		controls.push_back(new FXLabel(body, "Startmodus des Diensts:"));
 		controls.push_back(new FXRadioButton(body, "&Automatisch", &modeTarget, FXDataTarget::ID_OPTION + 2));
 		controls.push_back(new FXRadioButton(body, "&Manuell", &modeTarget, FXDataTarget::ID_OPTION + 3));
-		controls.push_back(new FXRadioButton(body, "D&eaktiviert", &modeTarget, FXDataTarget::ID_OPTION + 4));
+		controls.push_back(new FXRadioButton(body, "Dea&ktiviert", &modeTarget, FXDataTarget::ID_OPTION + 4));
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
-		controls.push_back(new FXButton(btnf, "&Sicherheit bearbeiten...", NULL, this, ID_SECURITY, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3));
+		controls.push_back(new FXButton(btnf, "Sicherheit &bearbeiten...", NULL, this, ID_SECURITY, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3));
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
@@ -5760,7 +5818,7 @@ protected:
 public:
 	enum { ID_CONFIGURE = FXDialogBox::ID_LAST, ID_PERMISSIONS };
 	ObjectPolicyDialog(FXWindow* owner, SecObjectKind kind_, const ObjectPolicy& op, const std::vector<GroupEntry>& principals_)
-		: FXDialogBox(owner, "Sicherheitsrichtlinieneinstellung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,540,0),
+		: FXDialogBox(owner, "Sicherheitsrichtlinienvorlage", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,540,0),
 		  kind(kind_), objectName(op.path.c_str()), sddl(op.sddl.empty() ? defaultObjectSddl(kind_) : op.sddl), principals(&principals_),
 		  configure(op.mode == OBJMODE_IGNORE ? 0 : 1), propagate(op.mode == OBJMODE_OVERWRITE ? OBJMODE_OVERWRITE : OBJMODE_INHERIT),
 		  configureTarget(configure, this, ID_CONFIGURE), propagateTarget(propagate) {
@@ -5771,20 +5829,20 @@ public:
 		new FXLabel(head, SecPolicyEditDialog::wrapLabel(op.path.c_str(), 55), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
-		new FXRadioButton(main, reg ? "Diesen Schlüssel &konfigurieren" : "Diese Datei bzw. diesen Ordner &konfigurieren",
+		new FXRadioButton(main, reg ? "&Diesen Schlüssel konfigurieren und anschließend" : "Datei oder Ordner &konfigurieren und anschließend",
 		                  &configureTarget, FXDataTarget::ID_OPTION + 1, RADIOBUTTON_NORMAL | JUSTIFY_LEFT);
 		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
-		configControls.push_back(new FXRadioButton(body, reg ? "Vererbbare Berechtigungen an alle &Unterschlüssel weitergeben"
-		                                                     : "Vererbbare Berechtigungen an alle &Unterordner und Dateien weitergeben",
+		configControls.push_back(new FXRadioButton(body, reg ? "&vererbbare Berechtigungen an alle Unterschlüssel übermitteln"
+		                                                     : "&vererbbare Berechtigungen an alle Unterordner und Dateien übermitteln",
 		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_INHERIT, RADIOBUTTON_NORMAL | JUSTIFY_LEFT));
-		configControls.push_back(new FXRadioButton(body, reg ? "Vorhandene Berechtigungen für alle Unterschlüssel durch\nvererbbare Berechtigungen &ersetzen"
-		                                                     : "Vorhandene Berechtigungen für alle Unterordner und Dateien\ndurch vererbbare Berechtigungen &ersetzen",
+		configControls.push_back(new FXRadioButton(body, reg ? "&vorhandene Berechtigungen für alle Unterschlüssel mit\nvererbbaren Berechtigungen ersetzen"
+		                                                     : "v&orhandene Berechtigungen für alle Unterordner und Dateien\nmit vererbaren Berechtigungen ersetzen",
 		                                           &propagateTarget, FXDataTarget::ID_OPTION + OBJMODE_OVERWRITE, RADIOBUTTON_NORMAL | JUSTIFY_LEFT));
-		new FXRadioButton(main, reg ? "Diesen Schlüssel &nicht konfigurieren" : "Diese Datei bzw. diesen Ordner &nicht konfigurieren",
+		new FXRadioButton(main, reg ? "&Ändern der Berechtigungen auf diesen Schlüssel nicht zulassen" : "&Ersetzen der Datei- oder Ordnerberechtigungen nicht zulassen",
 		                  &configureTarget, FXDataTarget::ID_OPTION + 0, RADIOBUTTON_NORMAL | JUSTIFY_LEFT);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
-		configControls.push_back(new FXButton(btnf, "&Berechtigungen bearbeiten...", NULL, this, ID_PERMISSIONS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3));
+		configControls.push_back(new FXButton(btnf, "Sicherheit &bearbeiten...", NULL, this, ID_PERMISSIONS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3));
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
@@ -5921,6 +5979,7 @@ public:
 		FXTreeItem* kto = add(cSec, "Kontorichtlinien", resico_key, GN_FOLDER, true);
 		add(kto, "Kennwortrichtlinien", resico_key, GN_SECPOL, true, &SEC_PASSWORD_POLICIES);
 		add(kto, "Kontosperrungsrichtlinien", resico_key, GN_SECPOL, true, &SEC_LOCKOUT_POLICIES);
+		add(kto, "Kerberos-Richtlinie", resico_key, GN_SECPOL, true, &SEC_KERBEROS_POLICIES);
 		FXTreeItem* lok = add(cSec, "Lokale Richtlinien", resico_key, GN_FOLDER, true);
 		add(lok, "Überwachungsrichtlinien", resico_key, GN_SECPOL, true, &SEC_AUDIT_POLICIES);
 		add(lok, "Zuweisen von Benutzerrechten", resico_key, GN_RIGHTS, true);
@@ -6040,14 +6099,14 @@ public:
 			}
 			case GN_REGKEYS:
 			case GN_FILES: {
-				setHeaders({ { "Objektname", 360 }, { "Berechtigung", 140 }, { "Überwachung", 140 } });
+				setHeaders({ { "Objektname", 360 }, { "Berechtigung", 160 }, { "Überwachen", 120 } });
 				inf = loadGptTmpl(domain, guid);
 				SecObjectKind k = node.kind == GN_REGKEYS ? SECOBJ_REGISTRY : SECOBJ_FILE;
 				rowObjects = listObjectPolicies(inf, k);
 				FXIcon* ic = sharedPngIcon(k == SECOBJ_REGISTRY ? resico_key : resico_folder);
 				for (auto& op : rowObjects) {
-					const char* perm = op.mode == OBJMODE_IGNORE ? "Ignoriert" : op.mode == OBJMODE_OVERWRITE ? "Ersetzen" : "Vererben";
-					const char* audit = op.sddl.find("S:") != std::string::npos ? "Konfiguriert" : "Nicht konfiguriert";
+					const char* perm = op.mode == OBJMODE_IGNORE ? "Ignorieren" : op.mode == OBJMODE_OVERWRITE ? "Ersetzen" : "Automatische Vererbung";
+					const char* audit = op.sddl.find("S:") != std::string::npos ? "Konfiguriert" : "Nicht definiert";
 					list->appendItem(FXString(op.path.c_str()) + "\t" + perm + "\t" + audit, ic, ic);
 				}
 				status->setText(k == SECOBJ_REGISTRY ? " Rechtsklick in die Liste: Schlüssel hinzufügen, bearbeiten oder löschen."
@@ -6265,7 +6324,7 @@ public:
 
 	// ---- SvcPanelDelegate: Systemdienste ------------------------------
 	virtual std::vector<std::pair<FXString, FXint> > svcColumns() {
-		return { { "Dienstname", 260 }, { "Starttyp", 140 }, { "Berechtigung", 140 } };
+		return { { "Dienstname", 260 }, { "Start", 140 }, { "Berechtigung", 140 } };
 	}
 	virtual FXString svcRowText(const svc::ServiceInfo& info) {
 		ServicePolicy sp = findServicePolicy(inf, info.displayName());
@@ -6318,9 +6377,11 @@ public:
 		FXString path = reg ? "MACHINE\\SOFTWARE\\" : "%SystemRoot%\\";
 		// Eine Linux-Maschine hat weder Registrierung noch Windows-Pfade zum
 		// Durchsuchen -- der Pfad wird wie auf dem Client angegeben.
-		if (!FXInputDialog::getString(path, this, reg ? "Schlüssel hinzufügen" : "Datei hinzufügen",
-		        reg ? "Registrierungsschlüssel auf den Clients (MACHINE\\..., USERS\\... oder CLASSES_ROOT\\...):"
-		            : "Datei oder Ordner auf den Clients (z.B. %SystemRoot%\\system32 oder C:\\Daten):")) return 1;
+		// Titel und Eingabeaufforderung wie wsecedit.dll (Dialog 177, Texte
+		// 57359/57360); Pfadbeispiele ergaenzt, da nichts zu durchsuchen ist.
+		if (!FXInputDialog::getString(path, this, reg ? "Registrierungsschlüssel auswählen" : "Datei oder Ordner hinzufügen",
+		        reg ? "Ausgewählter Schlüssel (MACHINE\\..., USERS\\... oder CLASSES_ROOT\\...):"
+		            : "Diese Datei oder diesen Ordner zur Vorlage hinzufügen:\n(z.B. %SystemRoot%\\system32 oder C:\\Daten)")) return 1;
 		std::string p = trimStr(path.text());
 		if (reg) {
 			p = normalizeRegistryPath(p);
