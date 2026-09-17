@@ -150,10 +150,21 @@ nicht im Repository):
   `ipPhone`, Anmerkung `info`) und "Organisation" (135: `title`,
   `department`, `company`, Vorgesetzte(r) `manager` mit Ändern/Anzeigen/
   Löschen, Mitarbeiter aus `directReports`) -- Reiterfolge wie im
-  Original. "Benutzer kann das Kennwort nicht ändern" (eine Berechtigung,
-  kein Bit), "Anmeldezeiten...", "Anmelden..." und die
-  "Andere..."-Knöpfe sind noch ohne Funktion.
-- `appmgr.dll`: Spalten der Softwareinstallation ("Bereitstellungszustand",
+  Original. Dazu: "Andere..." für die Mehrfachwerte (`otherTelephone`, `url`,
+  `otherHomePhone`, `otherPager`, `otherMobile`,
+  `otherFacsimileTelephoneNumber`, `otherIpPhone`), "Anmeldezeiten..."
+  als Wochenraster (`logonHours`, 21 Bytes, Bit 0 = Sonntag 0 Uhr UTC,
+  angezeigt in Ortszeit), "Anmelden..." (`userWorkstations`) und
+  "Benutzer kann das Kennwort nicht ändern" -- in AD kein
+  `userAccountControl`-Bit, sondern wie bei Windows 2000 zwei
+  Verweigerungs-ACEs für das erweiterte Recht "Kennwort ändern"
+  (`ab721a53-...`) an SELF und Jeder, gesetzt und entfernt über
+  `samba-tool dsacl`. Die Dialoge für Anmeldezeiten, Anmelden und
+  "Andere..." stehen nicht in `dsprop.dll` (sondern in `loghours.dll`
+  bzw. `dsuiext.dll`) und sind daher noch nicht wortgleich.
+- `appmgr.dll`: nach der Paketauswahl der Dialog "Software
+  bereitstellen" (Veröffentlicht/Zugewiesen; in der Computerkonfiguration
+  nur Zugewiesen), Spalten der Softwareinstallation ("Bereitstellungszustand",
   "Quelle" aus `msiFileList`) und der Dialog "Software entfernen" (211).
 
 Die Symbole unter `res/gpedit` stammen aus derselben DLL (Bitmaps 1 und
@@ -172,7 +183,14 @@ Doppelklick bearbeitet.
 
 - **Softwareinstallation** (Computer/Benutzer): Pakete mit
   Bereitstellungsstatus, Rechtsklick für Neu → Paket... und Entfernen...
-- **Skripts**, **Ordnerumleitung**: öffnen die bestehenden Dialoge.
+- **Skripts** (nach `gptext.dll`): unter "Skripts (Start/Herunterfahren)"
+  bzw. "(Anmelden/Abmelden)" je Ereignis ein Eintrag; Doppelklick öffnet
+  "Skripts zum Anmelden für <GPO>" mit Nach oben/unten,
+  Hinzufügen/Bearbeiten/Entfernen und "Dateien anzeigen...".
+  Gespeichert in `<Zweig>\Scripts\scripts.ini` (UTF-16, `0CmdLine=`,
+  `0Parameters=`); Skriptdateien liegen in `Scripts\<Ereignis>` --
+  "Durchsuchen..." kopiert eine Datei von außerhalb dorthin und trägt nur
+  den Dateinamen ein, wie im Original.
 - **Administrative Vorlagen**: Kategorien direkt im Baum (siehe unten).
 - **Sicherheitseinstellungen** in `Machine/Microsoft/Windows
   NT/SecEdit/GptTmpl.inf` (UTF-16LE mit BOM; Abschnitte und Schlüssel,
@@ -447,13 +465,22 @@ aufrufen, selbst wenn die Einstellungen vorhanden sind.
   Start/Herunterfahren für die Computerkonfiguration, je eine
   `scripts.ini` pro Zweig (UTF-16LE mit BOM, durchnummerierte
   `CmdLine`/`Parameters`-Paare).
-- **Ordnerumleitung** (nach [MS-GPFR], "Version Zero" -- die einzige
-  Version, die Windows 2000 beherrscht): Eigene Dateien, Eigene
-  Bilder, Startmenü, Anwendungsdaten und Desktop. Der Zielpfad selbst
-  läuft ganz normal über die `User Shell Folders`-Werte in der
-  `Registry.pol`; zusätzlich wird eine `fdeploy.ini` geschrieben,
-  bewusst nur mit dem sichersten Standard-Flag (0), da die genaue
-  Bit-Bedeutung öffentlich nicht vollständig dokumentiert ist.
+- **Ordnerumleitung** (nach [MS-GPFR] "Version Zero", der einzigen
+  Version, die Windows 2000 kennt, und der Oberfläche aus `fde.dll`):
+  Ordnerknoten Anwendungsdaten, Desktop, Eigene Dateien (mit Eigene
+  Bilder) und Startmenü. Eigenschaften mit den Reitern "Ziel" (keine
+  Richtlinie / Standard mit einem Zielpfad für alle / Erweitert mit
+  Pfaden je Sicherheitsgruppe / bei Eigene Bilder "Dem Ordner Eigene
+  Dateien folgen") und "Einstellungen" (exklusive Zugriffsrechte, Inhalt
+  verschieben, Verhalten beim Entfernen der Richtlinie, Eigene Bilder
+  unterordnen). Gespeichert in `User\Documents & Settings\fdeploy.ini`:
+  `[FolderStatus]` mit den Flags hexadezimal (0x01 verschieben, 0x02
+  folgen, 0x08 erweitert, 0x10 exklusiv, 0x20 beim Entfernen
+  zurückleiten) und je Ordner ein Abschnitt `SID=Pfad` (Standard:
+  `S-1-1-0`). Die frühere Fassung schrieb `[Folder Status]` ohne
+  Pfadabschnitte und leitete stattdessen über "User Shell
+  Folders"-Werte in der `Registry.pol` um -- diese Werte werden beim
+  nächsten Speichern entfernt.
 
 ## Kodierung der ADM-Dateien
 

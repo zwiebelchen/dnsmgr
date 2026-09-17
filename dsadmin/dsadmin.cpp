@@ -2729,7 +2729,7 @@ private:
 	bool allowed[7][24];
 	int selR0 = -1, selC0 = -1, selR1 = -1, selC1 = -1;
 	bool dragging = false;
-	static const int LEFT = 80, TOP = 22, CELL = 16;
+	static const int LEFT = 96, TOP = 22, CELL = 16;
 protected:
 	LogonHoursGrid() {}
 public:
@@ -2831,7 +2831,7 @@ public:
 		FXHorizontalFrame* main = new FXHorizontalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 12,0);
 		FXVerticalFrame* left = new FXVerticalFrame(main, 0, 0,0,0,0, 0,0,0,0, 0,6);
 		grid = new LogonHoursGrid(left);
-		FXHorizontalFrame* legend = new FXHorizontalFrame(left, LAYOUT_FILL_X, 0,0,0,0, 80,0,4,0, 16,0);
+		FXHorizontalFrame* legend = new FXHorizontalFrame(left, LAYOUT_FILL_X, 0,0,0,0, 96,0,4,0, 16,0);
 		new FXLabel(legend, "Blau: Anmelden zugelassen, weiß: Anmelden verweigert", NULL, JUSTIFY_LEFT);
 		FXVerticalFrame* right = new FXVerticalFrame(main, LAYOUT_FILL_Y | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,0,0, 0,4);
 		new FXButton(right, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
