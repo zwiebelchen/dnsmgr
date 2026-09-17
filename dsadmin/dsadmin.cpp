@@ -5501,25 +5501,55 @@ static bool gpoLinkedToDomainRoot(const DomainInfo& domain, const std::string& g
 	return false;
 }
 
-static void syncDomainAccountPolicy(InfFile& inf, FXString& note) {
+// Kontorichtlinien der Domaene (Kennwort, Kontosperrung) wirken fuer
+// Domaenenkonten nur aus GPOs, die mit der Domaene selbst verknuepft sind
+// -- ein Windows-DC schreibt sie von dort ins Domaenenobjekt. Samba tut
+// das nicht; deshalb rechnen wir die wirksamen Werte hier nach: alle
+// aktiven Verknuepfungen an der Domaenenwurzel von niedriger zu hoher
+// Prioritaet (in gPLink vorne nach hinten), spaetere Definitionen
+// ueberschreiben fruehere, nicht definierte Werte bleiben, wie sie sind.
+// Aufgerufen nach jeder Aenderung, die das Ergebnis beeinflussen kann:
+// Kontorichtlinie in einem solchen GPO, Verknuepfen/Entfernen/Reihenfolge/
+// Deaktivieren an der Domaenenwurzel, Computerkonfiguration deaktiviert.
+static bool recomputeDomainAccountPolicy(const DomainInfo& domain, FXString& note) {
 	PasswordPolicy p = getPasswordPolicy();
-	auto num = [&](const char* key, int& target) {
+	bool any = false;
+	std::string plaintext;
+	for (auto& l : parseGpLink(ldapiReadAttr(domain.baseDN.text(), "gPLink"))) {
+		if (l.options & GPLINK_OPT_DISABLE) continue;
+		std::string gpoDn = "CN=" + l.guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
+		long flags = 0;
+		try { flags = std::stol(ldapiReadAttr(gpoDn, "flags")); } catch (...) {}
+		if (flags & 2) continue; // Computerkonfiguration deaktiviert
+		InfFile inf = loadGptTmpl(domain, l.guid);
+		auto num = [&](const char* key, int& target) {
+			std::string v;
+			if (!inf.get("System Access", key, v)) return;
+			try { target = std::stoi(v); any = true; } catch (...) {}
+		};
 		std::string v;
-		if (!inf.get("System Access", key, v)) return;
-		try { target = std::stoi(v); } catch (...) {}
-	};
-	std::string cplx;
-	if (inf.get("System Access", "PasswordComplexity", cplx)) p.complexity = (cplx == "1");
-	num("PasswordHistorySize", p.historyLength);
-	num("MinimumPasswordLength", p.minPwdLength);
-	num("MinimumPasswordAge", p.minPwdAgeDays);
-	num("MaximumPasswordAge", p.maxPwdAgeDays);
-	num("LockoutDuration", p.lockoutDurationMins);
-	num("LockoutBadCount", p.lockoutThreshold);
-	num("ResetLockoutCount", p.lockoutWindowMins);
+		if (inf.get("System Access", "PasswordComplexity", v)) { p.complexity = trimStr(v) == "1"; any = true; }
+		if (inf.get("System Access", "ClearTextPassword", v)) { plaintext = trimStr(v) == "1" ? "on" : "off"; any = true; }
+		num("PasswordHistorySize", p.historyLength);
+		num("MinimumPasswordLength", p.minPwdLength);
+		num("MinimumPasswordAge", p.minPwdAgeDays);
+		num("MaximumPasswordAge", p.maxPwdAgeDays);
+		num("LockoutDuration", p.lockoutDurationMins);
+		num("LockoutBadCount", p.lockoutThreshold);
+		num("ResetLockoutCount", p.lockoutWindowMins);
+	}
+	if (!any) return true;
 	FXString errorMsg;
-	if (!setPasswordPolicy(p, errorMsg))
+	if (!setPasswordPolicy(p, errorMsg)) {
 		note = "Die Kontorichtlinie der Domäne konnte nicht angepasst werden:\n\n" + errorMsg;
+		return false;
+	}
+	if (!plaintext.empty()) {
+		std::string out;
+		runAsRootCaptured({ FXString("samba-tool"), FXString("domain"), FXString("passwordsettings"), FXString("set"),
+		                    FXString(("--store-plaintext=" + plaintext).c_str()) }, out);
+	}
+	return true;
 }
 
 static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::string& guid, InfFile& inf,
@@ -5555,8 +5585,7 @@ static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::st
 
 	if (accountPolicyTouched && gpoLinkedToDomainRoot(domain, guid)) {
 		FXString note;
-		syncDomainAccountPolicy(inf, note);
-		if (!note.empty()) FXMessageBox::warning(owner, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
+		if (!recomputeDomainAccountPolicy(domain, note)) FXMessageBox::warning(owner, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
 	}
 	return true;
 }
@@ -7301,6 +7330,13 @@ public:
 			case GN_SECPOL: {
 				setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 200 } });
 				inf = loadGptTmpl(domain, guid);
+				// Haeufiger Stolperstein: Kennwort- und Sperrrichtlinien in einem
+				// GPO an einer Organisationseinheit gelten nur fuer lokale Konten
+				// der Computer dort, nicht fuer Domaenenkonten.
+				if ((node.defs == &SEC_PASSWORD_POLICIES || node.defs == &SEC_LOCKOUT_POLICIES || node.defs == &SEC_KERBEROS_POLICIES) &&
+				    !gpoLinkedToDomainRoot(domain, guid))
+					status->setText(" Hinweis: Dieses Gruppenrichtlinienobjekt ist nicht mit der Domäne verknüpft. "
+					                "Kontorichtlinien gelten hier nur für lokale Konten der Computer, nicht für Domänenkonten.");
 				FXIcon* ic = sharedPngIcon(resico_key);
 				// Wie im Original alphabetisch nach Bezeichnung.
 				for (size_t i = 0; i < node.defs->size(); i++) rowDefs.push_back((int)i);
@@ -8170,6 +8206,12 @@ public:
 			return false;
 		}
 		gpo.flags = wantedFlags();
+		// "Computerkonfiguration deaktivieren" nimmt das GPO aus der
+		// Kontorichtlinie der Domaene heraus (bzw. wieder hinein).
+		if (gpoLinkedToDomainRoot(domain, gpo.guid)) {
+			FXString note;
+			if (!recomputeDomainAccountPolicy(domain, note)) FXMessageBox::warning(this, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
+		}
 		return true;
 	}
 	long onUpdApply(FXObject* sender, FXSelector, void*) {
@@ -9173,6 +9215,11 @@ public:
 
 	void refreshLinksFromDirectory(int selectRow = 0) {
 		links = parseGpLink(ldapiReadAttr(fullDN, "gPLink"));
+		// Alle Aufrufer haben gerade Verknuepfungen geaendert.
+		if (isDomainRoot) {
+			FXString note;
+			if (!recomputeDomainAccountPolicy(domain, note)) FXMessageBox::warning(this, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
+		}
 		allGpos = listGposLdapi(domain.baseDN);
 		reloadLinks(selectRow);
 	}
