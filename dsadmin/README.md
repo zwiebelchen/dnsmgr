@@ -255,8 +255,16 @@ Doppelklick bearbeitet.
   Internet Explorer-Wartung, Remoteinstallationsdienste.
 
 Die Zweige heißen bei den provisionierten Standard-GPOs `MACHINE`/`USER`,
-bei neu angelegten `Machine`/`User`; geschrieben wird immer in das
-vorhandene Verzeichnis.
+bei neu angelegten `Machine`/`User`, und Windows legt auch Unterordner und
+Dateien in wechselnder Schreibweise an (`microsoft/windows nt`,
+`registry.pol`). Linux unterscheidet das, deshalb löst dsadmin jeden
+SYSVOL-Pfad Stufe für Stufe ohne Rücksicht auf Groß-/Kleinschreibung
+auf (als root gelesen), schreibt immer in das Vorhandene und legt nur
+wirklich Fehlendes an -- mit `mkdir -p`, geerbten SYSVOL-Rechten und
+der Ausgabe des Befehls in der Fehlermeldung, falls es scheitert.
+Vorher scheiterte das Speichern z.B. mit "Verzeichnis konnte nicht
+angelegt werden: .../Machine/Microsoft", wenn der Zweigordner eines GPOs
+fehlte oder anders geschrieben war.
 
 ## Berechtigungsdialog
 
