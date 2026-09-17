@@ -5234,7 +5234,7 @@ static const std::vector<SimplePermission>& simplePermissions(SecObjectKind kind
 	static const std::vector<SimplePermission> service = {
 		{ "Vollzugriff", 0xF01FF },
 		{ "Lesen", 0x2018D },
-		{ "Starten, beenden und anhalten", 0x70 },
+		{ "Starten, anhalten und unterbrechen", 0x70 },
 		{ "Schreiben", 0x20002 },
 		{ "Löschen", 0x10000 },
 	};
@@ -5245,7 +5245,8 @@ static const std::vector<SimplePermission>& simplePermissions(SecObjectKind kind
 	static const std::vector<SimplePermission> file = {
 		{ "Vollzugriff", 0x1F01FF },
 		{ "Ändern", 0x1301BF },
-		{ "Lesen, Ausführen", 0x1200A9 },
+		{ "Lesen und Ausführen", 0x1200A9 },
+		{ "Ordnerinhalt auflisten", 0x1200A9 },
 		{ "Lesen", 0x120089 },
 		{ "Schreiben", 0x100116 },
 	};
@@ -5281,6 +5282,43 @@ static std::string domainSidFromPrincipals(const std::vector<GroupEntry>& princi
 	return "";
 }
 
+// Rueckfrage beim Abschalten der Vererbung (aclui.dll, Dialog 109).
+class InheritanceOffDialog : public FXDialogBox {
+	FXDECLARE(InheritanceOffDialog)
+private:
+	int result = 0;
+protected:
+	InheritanceOffDialog() {}
+public:
+	enum { CANCEL = 0, COPY = 1, REMOVE = 2 };
+	enum { ID_COPY = FXDialogBox::ID_LAST, ID_REMOVE };
+	InheritanceOffDialog(FXWindow* owner)
+		: FXDialogBox(owner, "Sicherheitseinstellungen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,0,0, 12,12,12,12) {
+		FXVerticalFrame* col = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		new FXLabel(col, "Sie haben die Übermittlung von vererbbaren Berechtigungen an dieses Objekt\n"
+		                 "deaktiviert. Wie möchten Sie verfahren?", NULL, JUSTIFY_LEFT);
+		new FXLabel(col, "- Klicken Sie auf \"Kopieren\", um die bisher vererbten Berechtigungen auf\n"
+		                 "  dieses Objekt zu kopieren.", NULL, JUSTIFY_LEFT);
+		new FXLabel(col, "- Klicken Sie auf \"Entfernen\", um die vererbten Berechtigungen zu entfernen\n"
+		                 "  und nur die Berechtigungen beizubehalten, die speziell für dieses Objekt\n"
+		                 "  angegeben wurden.", NULL, JUSTIFY_LEFT);
+		new FXLabel(col, "- Klicken Sie auf \"Abbrechen\", um den Vorgang abzubrechen.", NULL, JUSTIFY_LEFT);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(col, LAYOUT_CENTER_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,8,0, 8,0);
+		new FXButton(btns, "&Kopieren", NULL, this, ID_COPY, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+		new FXButton(btns, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
+	}
+	long onCopy(FXObject*, FXSelector, void*) { result = COPY; return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL); }
+	long onRemove(FXObject*, FXSelector, void*) { result = REMOVE; return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL); }
+	int ask() { result = CANCEL; return execute(PLACEMENT_OWNER) ? result : CANCEL; }
+	virtual ~InheritanceOffDialog() {}
+};
+FXDEFMAP(InheritanceOffDialog) InheritanceOffDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, InheritanceOffDialog::ID_COPY, InheritanceOffDialog::onCopy),
+	FXMAPFUNC(SEL_COMMAND, InheritanceOffDialog::ID_REMOVE, InheritanceOffDialog::onRemove),
+};
+FXIMPLEMENT(InheritanceOffDialog, FXDialogBox, InheritanceOffDialogMap, ARRAYNUMBER(InheritanceOffDialogMap))
+
 // ---------------------------------------------------------------------
 // Dialog "Sicherheit für ..." -- oben die Konten, unten die einfachen
 // Berechtigungen mit Zulassen/Verweigern. Geerbte Eintraege werden
@@ -5308,16 +5346,17 @@ private:
 	FXIconList* nameList = nullptr;
 	std::vector<FXCheckButton*> allowChecks, denyChecks;
 	FXCheckButton* inheritCheck = nullptr;
+	FXLabel* advancedHint = nullptr;
 
 protected:
 	SecurityDialog() {}
 public:
-	enum { ID_NAMES = FXDialogBox::ID_LAST, ID_ADD, ID_REMOVE, ID_INHERIT, ID_ALLOW_FIRST = ID_INHERIT + 1,
+	enum { ID_NAMES = FXDialogBox::ID_LAST, ID_ADD, ID_REMOVE, ID_OK, ID_INHERIT, ID_ALLOW_FIRST = ID_INHERIT + 1,
 	       ID_ALLOW_LAST = ID_ALLOW_FIRST + 15, ID_DENY_FIRST, ID_DENY_LAST = ID_DENY_FIRST + 15 };
 
 	SecurityDialog(FXWindow* owner, const FXString& objectName, SecObjectKind kind_, const std::string& sddl,
 	               const std::vector<GroupEntry>& principals_)
-		: FXDialogBox(owner, "Sicherheit für " + objectName, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0),
+		: FXDialogBox(owner, "Sicherheitseinstellungen für " + objectName, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0),
 		  kind(kind_), principals(&principals_) {
 		domainSid = domainSidFromPrincipals(principals_);
 		desc = parseSddl(sddl, domainSid);
@@ -5325,7 +5364,6 @@ public:
 		buildEntries();
 
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
-		new FXLabel(main, "&Name");
 		FXHorizontalFrame* top = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 8,0);
 		FXPacker* lf = new FXPacker(top, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,130, 0,0,0,0);
 		nameList = new FXIconList(lf, this, ID_NAMES, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
@@ -5345,14 +5383,20 @@ public:
 			denyChecks.push_back(new FXCheckButton(m, "", this, ID_DENY_FIRST + (int)i, CHECKBUTTON_NORMAL | LAYOUT_CENTER_X));
 		}
 
+		// "Erweitert" gibt es hier (noch) nicht; der Hinweis erscheint wie im
+		// Original, sobald ein Konto Rechte hat, die keine der einfachen
+		// Berechtigungen abbildet.
+		FXHorizontalFrame* adv = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 8,0);
+		(new FXButton(adv, "Er&weitert...", NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_TOP, 0,0,0,0, 8,8,3,3))->disable();
+		advancedHint = new FXLabel(adv, "Klicken Sie auf \"Erweitert\", um zusätzliche\nBerechtigungen anzuzeigen.", NULL, JUSTIFY_LEFT | LAYOUT_TOP);
 		if (kind != SECOBJ_SERVICE) {
-			inheritCheck = new FXCheckButton(main, "Vererbbare übergeordnete Berechtigungen &übernehmen", this, ID_INHERIT);
+			inheritCheck = new FXCheckButton(main, "&Vererbbare übergeordnete Berechtigungen übernehmen", this, ID_INHERIT);
 			inheritCheck->setCheck(desc.daclFlags.find('P') == std::string::npos);
 		}
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 
 		reloadNames(0);
@@ -5411,6 +5455,23 @@ public:
 	void refreshChecks() {
 		int idx = currentEntry();
 		const auto& perms = simplePermissions(kind);
+		if (advancedHint) {
+			bool special = false;
+			if (idx >= 0) {
+				uint32_t covered = 0;
+				for (auto& p : perms) covered |= p.mask;
+				const Entry& e = entries[idx];
+				special = ((e.allow | e.deny | e.inheritedAllow | e.inheritedDeny) & ~covered) != 0;
+				// Rechte, die keine einfache Berechtigung vollstaendig abdeckt
+				for (uint32_t m : { e.allow, e.deny }) {
+					uint32_t full = 0;
+					for (auto& p : perms) if ((m & p.mask) == p.mask) full |= p.mask;
+					if (m & ~full) special = true;
+				}
+			}
+			if (special) advancedHint->show(); else advancedHint->hide();
+			advancedHint->getParent()->recalc();
+		}
 		for (size_t i = 0; i < perms.size(); i++) {
 			if (idx < 0) {
 				allowChecks[i]->setCheck(FALSE); allowChecks[i]->disable();
@@ -5505,9 +5566,13 @@ public:
 		if (idx < 0) return 1;
 		Entry& e = entries[idx];
 		if (e.inheritedAllow || e.inheritedDeny) {
-			FXMessageBox::error(this, MBOX_OK, "Sicherheit",
-				"Dieses Objekt kann nicht entfernt werden, da es Berechtigungen vom\n"
-				"übergeordneten Objekt erbt. Deaktivieren Sie zuerst die Vererbung.");
+			// Wortlaut aclui.dll, Text 20.
+			FXString n = displayName(e.sid);
+			FXMessageBox::error(this, MBOX_OK, "Sicherheitseinstellungen",
+				"\"%s\" kann nicht entfernt werden, da dieses Objekt übergeordnete Berechtigungen\n"
+				"übernimmt. Wenn Sie \"%s\" entfernen möchten, müssen Sie verhindern, dass diesem\n"
+				"Objekt Berechtigungen vererbt werden. Deaktivieren Sie die Option zur Übernahme\n"
+				"von Berechtigungen, und versuchen Sie dann, \"%s\" zu entfernen.", n.text(), n.text(), n.text());
 			return 1;
 		}
 		std::string sid = e.sid;
@@ -5517,6 +5582,17 @@ public:
 		entries.erase(entries.begin() + idx);
 		reloadNames(idx);
 		return 1;
+	}
+
+	// Warnung wie aclui.dll, Text 31, sobald eine Verweigerung neu gesetzt wurde.
+	long onOk(FXObject*, FXSelector, void*) {
+		bool newDeny = false;
+		for (auto& e : entries) if (e.dirty && e.deny) newDeny = true;
+		if (newDeny && FXMessageBox::warning(this, MBOX_YES_NO, "Sicherheitseinstellungen",
+		        "Vorsicht! Zugriffsverweigerungen haben Vorrang vor Zugriffsgenehmigungen. Dies kann\n"
+		        "unbeabsichtigte Auswirkungen für die Gruppenmitgliedschaften haben.\n\n"
+		        "Möchten Sie den Vorgang fortsetzen?") != MBOX_CLICKED_YES) return 1;
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
 
 	long onUpdRemove(FXObject* sender, FXSelector, void*) {
@@ -5531,9 +5607,11 @@ public:
 		if (!inherit) {
 			// Wie im Original: geerbte Eintraege beim Abschalten der Vererbung
 			// als eigene uebernehmen, statt die Berechtigungen zu verlieren.
-			if (FXMessageBox::question(this, MBOX_YES_NO, "Sicherheit",
-			        "Die geerbten Berechtigungen als explizite Berechtigungen übernehmen?\n\n"
-			        "\"Nein\" entfernt die geerbten Berechtigungen.") == MBOX_CLICKED_YES) {
+			// Rueckfrage wie aclui.dll, Dialog 109: Kopieren / Entfernen / Abbrechen.
+			InheritanceOffDialog ask(this);
+			int choice = ask.ask();
+			if (choice == InheritanceOffDialog::CANCEL) { inheritCheck->setCheck(TRUE); return 1; }
+			if (choice == InheritanceOffDialog::COPY) {
 				for (auto& a : desc.aces) {
 					size_t p = a.flags.find("ID");
 					if (p != std::string::npos) a.flags.erase(p, 2);
@@ -5590,6 +5668,7 @@ FXDEFMAP(SecurityDialog) SecurityDialogMap[] = {
 	FXMAPFUNC(SEL_CHANGED, SecurityDialog::ID_NAMES, SecurityDialog::onNameSelected),
 	FXMAPFUNC(SEL_SELECTED, SecurityDialog::ID_NAMES, SecurityDialog::onNameSelected),
 	FXMAPFUNC(SEL_COMMAND, SecurityDialog::ID_ADD, SecurityDialog::onAdd),
+	FXMAPFUNC(SEL_COMMAND, SecurityDialog::ID_OK, SecurityDialog::onOk),
 	FXMAPFUNC(SEL_COMMAND, SecurityDialog::ID_REMOVE, SecurityDialog::onRemove),
 	FXMAPFUNC(SEL_UPDATE, SecurityDialog::ID_REMOVE, SecurityDialog::onUpdRemove),
 	FXMAPFUNC(SEL_COMMAND, SecurityDialog::ID_INHERIT, SecurityDialog::onInherit),
