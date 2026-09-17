@@ -1276,115 +1276,6 @@ static bool writeScriptsIni(const std::string& path, const std::map<std::string,
 	return true;
 }
 
-// ---------------------------------------------------------------------
-// Ordnerumleitung -- der eigentliche Zielpfad wird (wie bei
-// Administrativen Vorlagen) ganz gewoehnlich per Registry.pol
-// uebertragen: die Windows-Shell liest den Ordnerort aus den
-// "User Shell Folders"-Registrierungswerten, unabhaengig von der
-// Gruppenrichtlinien-Erweiterung selbst. Zusaetzlich schreibt eine
-// echte Windows-2000-Gruppenrichtlinie eine "fdeploy.ini" (nach
-// [MS-GPFR], "Version Zero" -- die einzige Version, die Windows 2000
-// beherrscht) mit Verhaltens-Flags je Ordner; wir schreiben hier
-// bewusst nur den sichersten Standardwert (0, keine Zwangsrechte),
-// da die genaue Flag-Bit-Bedeutung oeffentlich nicht vollstaendig
-// dokumentiert ist -- die eigentliche Umleitung funktioniert bereits
-// unabhaengig davon ueber die Registrierungswerte.
-// ---------------------------------------------------------------------
-static const char* GPFR_CSE_GUID = "{25537BA6-77A8-11D2-9B6C-0000F8080861}";
-static const char* GPFR_TOOL_GUID_USER = "{88E729D6-BDC1-11D1-BD2A-00C04FB9603F}";
-static const char* USER_SHELL_FOLDERS_KEY = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
-
-struct FolderRedirEntry { std::string fdeployKey; std::string regValueName; FXString label; };
-static const std::vector<FolderRedirEntry> FOLDER_REDIR_TARGETS = {
-	{ "My Documents", "Personal", "Eigene Dateien (My Documents):" },
-	{ "My Pictures", "My Pictures", "Eigene Bilder (My Pictures):" },
-	{ "Start Menu", "Start Menu", "Startmenü:" },
-	{ "Application Data", "AppData", "Anwendungsdaten:" },
-	{ "Desktop", "Desktop", "Desktop:" },
-};
-
-// Liest die aktuell umgeleiteten Pfade aus der bestehenden User-
-// Registry.pol (leere Zeichenkette = nicht umgeleitet).
-static std::map<std::string, FXString> getFolderRedirectionPaths(const std::string& userPolPath) {
-	std::map<std::string, FXString> out;
-	RegPolFile file = parseRegPolFile(userPolPath);
-	RegLookup lk = buildRegLookup(file);
-	for (auto& t : FOLDER_REDIR_TARGETS) {
-		auto it = lk.values.find({ lowerCopy(USER_SHELL_FOLDERS_KEY), lowerCopy(t.regValueName) });
-		if (it != lk.values.end() && it->second.type == REG_TYPE_SZ) {
-			out[t.fdeployKey] = FXString(std::string((const char*)it->second.data.data(), it->second.data.size()).c_str());
-		} else {
-			out[t.fdeployKey] = "";
-		}
-	}
-	return out;
-}
-
-// Schreibt die Umleitungspfade -- leerer Pfad entfernt eine zuvor
-// gesetzte Umleitung wieder (aktives Loeschen wie beim ADM-Editor,
-// damit ein Client den Wert tatsaechlich zuruecknimmt).
-static bool setFolderRedirectionPaths(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid,
-                                       const std::map<std::string, FXString>& newPaths, FXString& errorMsg) {
-	FXString realmLower = domain.realm; realmLower.lower();
-	std::string userScopeDir = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(gpoGuid.text()) + "/" + SYSVOL_USER_DIR;
-	std::string userPolPath = userScopeDir + "/Registry.pol";
-
-	RegPolFile origFile = parseRegPolFile(userPolPath);
-	RegLookup origLookup = buildRegLookup(origFile);
-	std::vector<RegPolEntry> finalEntries = origFile.entries;
-	auto removeEntry = [&](const std::string& valuename) {
-		std::string lv = lowerCopy(valuename);
-		finalEntries.erase(std::remove_if(finalEntries.begin(), finalEntries.end(), [&](const RegPolEntry& e) {
-			return lowerCopy(e.key) == lowerCopy(USER_SHELL_FOLDERS_KEY) && lowerCopy(e.valuename) == lv;
-		}), finalEntries.end());
-	};
-	for (auto& t : FOLDER_REDIR_TARGETS) {
-		auto it = newPaths.find(t.fdeployKey);
-		if (it == newPaths.end()) continue;
-		FXString path = it->second; path.trim();
-		removeEntry(t.regValueName);
-		bool wasConfigured = origLookup.values.count({ lowerCopy(USER_SHELL_FOLDERS_KEY), lowerCopy(t.regValueName) }) > 0;
-		if (!path.empty()) {
-			finalEntries.push_back(makeRegSzEntry(USER_SHELL_FOLDERS_KEY, t.regValueName, path.text()));
-		} else if (wasConfigured) {
-			finalEntries.push_back(makeDeleteValueEntry(USER_SHELL_FOLDERS_KEY, t.regValueName));
-		}
-	}
-
-	std::string writeErr;
-	FXString tmpPath = "/tmp/ice2k-folderredir-regpol.tmp";
-	if (!writeRegPolFile(tmpPath.text(), finalEntries, writeErr)) { errorMsg = writeErr.c_str(); return false; }
-	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(userScopeDir.c_str()) });
-	int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(userPolPath.c_str()) });
-	runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
-	if (rc != 0) { errorMsg = "Konnte Registry.pol nicht schreiben."; return false; }
-
-	// fdeploy.ini -- eine Zeile je tatsaechlich umgeleitetem Ordner.
-	std::string fdeployUtf8 = "[Folder Status]\r\n";
-	for (auto& t : FOLDER_REDIR_TARGETS) {
-		auto it = newPaths.find(t.fdeployKey);
-		if (it == newPaths.end()) continue;
-		FXString path = it->second; path.trim();
-		if (!path.empty()) fdeployUtf8 += t.fdeployKey + "=0\r\n";
-	}
-	std::string encoded = utf8ToUtf16leWithBom(fdeployUtf8);
-	FXString fdeployTmp = "/tmp/ice2k-fdeploy.tmp";
-	std::ofstream out(fdeployTmp.text(), std::ios::binary);
-	out.write(encoded.data(), (std::streamsize)encoded.size());
-	out.close();
-	std::string fdeployDestDir = userScopeDir + "/Documents & Settings";
-	std::string fdeployDest = fdeployDestDir + "/fdeploy.ini";
-	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(fdeployDestDir.c_str()) });
-	rc = runAsRoot({ FXString("cp"), fdeployTmp, FXString(fdeployDest.c_str()) });
-	runAsRoot({ FXString("rm"), FXString("-f"), fdeployTmp });
-	if (rc != 0) { errorMsg = "Konnte fdeploy.ini nicht schreiben."; return false; }
-
-	std::string log;
-	std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
-	ensureExtensionRegistered(owner, domain.realm, gpoObjectDn, false, GPFR_CSE_GUID, GPFR_TOOL_GUID_USER, log, errorMsg);
-	return true;
-}
-
 // Legt "CN=Class Store" und "CN=Packages,CN=Class Store" unter dem
 // angegebenen skopierten GPO-DN an, falls sie noch nicht existieren.
 static bool ensureClassStoreAndPackages(FXWindow* owner, const FXString& realm, const std::string& scopedGpoDn, std::string& log, FXString& errorMsg) {
@@ -4403,42 +4294,6 @@ FXDEFMAP(ScriptsDialog) ScriptsDialogMap[] = {
 };
 FXIMPLEMENT(ScriptsDialog, FXDialogBox, ScriptsDialogMap, ARRAYNUMBER(ScriptsDialogMap))
 
-// ---------------------------------------------------------------------
-// Dialog "Ordnerumleitung" -- fuenf Textfelder (leer = keine
-// Umleitung), vorbelegt mit den aktuell in der Registry.pol
-// gesetzten Zielpfaden.
-// ---------------------------------------------------------------------
-class FolderRedirectionDialog : public FXDialogBox {
-	FXDECLARE(FolderRedirectionDialog)
-private:
-	std::map<std::string, FXTextField*> fields;
-protected:
-	FolderRedirectionDialog() {}
-public:
-	FolderRedirectionDialog(FXWindow* owner, const std::map<std::string, FXString>& current)
-		: FXDialogBox(owner, "Ordnerumleitung", DECOR_TITLE | DECOR_BORDER, 0,0,460,0) {
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		new FXLabel(main, "UNC-Zielpfad je Ordner (leer lassen = keine Umleitung):");
-		for (auto& t : FOLDER_REDIR_TARGETS) {
-			new FXLabel(main, t.label);
-			FXTextField* f = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-			auto it = current.find(t.fdeployKey);
-			if (it != current.end()) f->setText(it->second);
-			fields[t.fdeployKey] = f;
-		}
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-	}
-	std::map<std::string, FXString> getPaths() const {
-		std::map<std::string, FXString> out;
-		for (auto& kv : fields) out[kv.first] = kv.second->getText();
-		return out;
-	}
-	virtual ~FolderRedirectionDialog() {}
-};
-FXIMPLEMENT(FolderRedirectionDialog, FXDialogBox, NULL, 0)
 
 
 // =====================================================================
@@ -6315,6 +6170,406 @@ FXDEFMAP(ObjectPolicyDialog) ObjectPolicyDialogMap[] = {
 FXIMPLEMENT(ObjectPolicyDialog, FXDialogBox, ObjectPolicyDialogMap, ARRAYNUMBER(ObjectPolicyDialogMap))
 
 // ---------------------------------------------------------------------
+// Ordnerumleitung nach [MS-GPFR] "Version Zero" (die einzige Version, die
+// Windows 2000 kennt) und der Oberflaeche aus fde.dll.
+//
+// User\Documents & Settings\fdeploy.ini:
+//   [FolderStatus]
+//   My Documents=11          -- Flags hexadezimal
+//   [My Documents]
+//   S-1-1-0=\\server\freigabe\%USERNAME%\Eigene Dateien
+// Flags: 0x01 Inhalt verschieben, 0x02 dem uebergeordneten Ordner folgen
+// (nur Eigene Bilder), 0x04 keine Umleitung angegeben, 0x08 erweitert
+// (je Sicherheitsgruppe), 0x10 exklusive Zugriffsrechte, 0x20 beim
+// Entfernen der Richtlinie zuruecksetzen.
+// ---------------------------------------------------------------------
+static const int FR_MOVE = 0x01, FR_FOLLOW_PARENT = 0x02, FR_NOT_SPECIFIED = 0x04,
+                 FR_ADVANCED = 0x08, FR_EXCLUSIVE = 0x10, FR_RELOCATE_ON_REMOVE = 0x20;
+
+struct RedirFolderDef { const char* key; const char* label; const char* shellValue; };
+// Anzeigenamen aus fde.dll (Texte 602-606).
+static const RedirFolderDef REDIR_FOLDERS[] = {
+	{ "Application Data", "Anwendungsdaten", "AppData" },
+	{ "Desktop", "Desktop", "Desktop" },
+	{ "My Documents", "Eigene Dateien", "Personal" },
+	{ "My Pictures", "Eigene Bilder", "My Pictures" },
+	{ "Start Menu", "Startmenü", "Start Menu" },
+};
+
+struct RedirPolicy {
+	bool present = false;   // Eintrag unter [FolderStatus] vorhanden
+	int flags = 0;
+	std::vector<std::pair<std::string, std::string>> targets; // SID -> Pfad
+};
+
+static std::string fdeployPath(const DomainInfo& domain, const std::string& guid) {
+	return gpoBranchDir(domain, guid, false) + "/Documents & Settings/fdeploy.ini";
+}
+
+static std::map<std::string, RedirPolicy> loadRedirPolicies(const DomainInfo& domain, const std::string& guid) {
+	std::map<std::string, RedirPolicy> out;
+	std::string raw;
+	if (runAsRootCaptured({ FXString("cat"), FXString(fdeployPath(domain, guid).c_str()) }, raw) != 0) return out;
+	InfFile inf = parseInf(raw);
+	auto* status = inf.find("FolderStatus");
+	if (!status) status = inf.find("Folder Status"); // aeltere ice2k-Fassung
+	if (!status) return out;
+	for (auto& kv : *status) {
+		for (auto& f : REDIR_FOLDERS) {
+			if (lowerCopy(kv.first) != lowerCopy(f.key)) continue;
+			RedirPolicy p;
+			p.present = true;
+			try { p.flags = (int)std::stoul(kv.second, nullptr, 16); } catch (...) {}
+			if (auto* sec = inf.find(f.key))
+				for (auto& t : *sec) if (t.second != INF_BARE_LINE) p.targets.push_back({ t.first, t.second });
+			out[f.key] = p;
+		}
+	}
+	return out;
+}
+
+// Schreibt fdeploy.ini, nimmt die Umleitungswerte des frueheren Umwegs
+// ueber "User Shell Folders" aus der Registry.pol wieder heraus (ohne
+// Loeschmarke -- die Umleitung uebernimmt jetzt die Erweiterung selbst),
+// traegt die Erweiterung ein und erhoeht die Version.
+static bool saveRedirPolicies(FXWindow* owner, const DomainInfo& domain, const std::string& guid,
+                              const std::map<std::string, RedirPolicy>& policies, FXString& errorMsg) {
+	std::string text = "[FolderStatus]\r\n";
+	for (auto& f : REDIR_FOLDERS) {
+		auto it = policies.find(f.key);
+		if (it == policies.end() || !it->second.present) continue;
+		char hex[16];
+		snprintf(hex, sizeof(hex), "%x", it->second.flags);
+		text += std::string(f.key) + "=" + hex + "\r\n";
+	}
+	for (auto& f : REDIR_FOLDERS) {
+		auto it = policies.find(f.key);
+		if (it == policies.end() || !it->second.present || it->second.targets.empty()) continue;
+		if (it->second.flags & (FR_FOLLOW_PARENT | FR_NOT_SPECIFIED)) continue; // laut Spezifikation ohne Abschnitt
+		text += "[" + std::string(f.key) + "]\r\n";
+		for (auto& t : it->second.targets) text += t.first + "=" + t.second + "\r\n";
+	}
+	std::string encoded = utf8ToUtf16leWithBom(text);
+
+	std::string branch = gpoBranchDir(domain, guid, false);
+	std::string dir = branch + "/Documents & Settings";
+	std::string path = dir + "/fdeploy.ini";
+	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(branch.c_str()) }) != 0) {
+		runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(branch.c_str()) });
+		inheritSysvolPermissions(gpoSysvolBase(domain, guid), branch, true);
+	}
+	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(dir.c_str()) }) != 0) {
+		runAsRoot({ FXString("mkdir"), FXString(dir.c_str()) });
+		inheritSysvolPermissions(branch, dir, true);
+	}
+	FXString tmp = "/tmp/ice2k-fdeploy.tmp";
+	{
+		std::ofstream o(tmp.text(), std::ios::binary);
+		o.write(encoded.data(), (std::streamsize)encoded.size());
+	}
+	bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(path.c_str()) }) == 0;
+	int rc = runAsRoot({ FXString("cp"), tmp, FXString(path.c_str()) });
+	runAsRoot({ FXString("rm"), FXString("-f"), tmp });
+	if (rc != 0) { errorMsg = "fdeploy.ini konnte nicht geschrieben werden."; return false; }
+	if (!existed) inheritSysvolPermissions(dir, path, false);
+
+	// Alten Umweg aufraeumen.
+	std::string polPath = branch + "/Registry.pol";
+	RegPolFile pol = readRegPolAsRoot(polPath);
+	size_t before = pol.entries.size();
+	pol.entries.erase(std::remove_if(pol.entries.begin(), pol.entries.end(), [](const RegPolEntry& e) {
+		return lowerCopy(e.key) == lowerCopy("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders");
+	}), pol.entries.end());
+	if (pol.entries.size() != before) {
+		std::string err;
+		FXString ptmp = "/tmp/ice2k-regpol-fr.tmp";
+		if (writeRegPolFile(ptmp.text(), pol.entries, err)) {
+			runAsRoot({ FXString("cp"), ptmp, FXString(polPath.c_str()) });
+			runAsRoot({ FXString("rm"), FXString("-f"), ptmp });
+		}
+	}
+
+	std::string gpoDn = "CN=" + guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
+	std::string log;
+	return ensureExtensionRegistered(owner, domain.realm, gpoDn, false,
+	                                 "{25537BA6-77A8-11D2-9B6C-0000F8080861}", "{88E729D6-BDC1-11D1-BD2A-00C04FB9603F}", log, errorMsg);
+}
+
+// Dialog "Gruppe und Pfad angeben" (fde.dll, Dialog 1007).
+class RedirGroupPathDialog : public FXDialogBox {
+	FXDECLARE(RedirGroupPathDialog)
+private:
+	const std::vector<GroupEntry>* groups = nullptr;
+	FXTextField* groupField = nullptr, *pathField = nullptr;
+	std::string sid;
+protected:
+	RedirGroupPathDialog() {}
+public:
+	enum { ID_BROWSE = FXDialogBox::ID_LAST, ID_OK };
+	RedirGroupPathDialog(FXWindow* owner, const std::vector<GroupEntry>& groups_, const std::string& sid_, const std::string& path)
+		: FXDialogBox(owner, "Gruppe und Pfad angeben", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0), groups(&groups_), sid(sid_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,8);
+		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_users), LAYOUT_TOP);
+		new FXLabel(head, "Sie können den Zielordner für eine Sicherheitsgruppe wählen.", NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		FXGroupBox* g1 = new FXGroupBox(main, "Sicherheitsgruppen-&Mitgliedschaft", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		groupField = new FXTextField(g1, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
+		if (!sid.empty()) groupField->setText(accountTokenDisplay("*" + sid, *groups));
+		new FXButton(g1, "&Durchsuchen...", NULL, this, ID_BROWSE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_RIGHT, 0,0,0,0, 8,8,3,3);
+		FXGroupBox* g2 = new FXGroupBox(main, "&Zielordner", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		pathField = new FXTextField(g2, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		pathField->setText(path.c_str());
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	long onBrowse(FXObject*, FXSelector, void*) {
+		DomainInfo domain = detectDomain();
+		GroupPickerDialog dlg(this, domain.realm, *groups, "Gruppe auswählen", resico_users);
+		if (!dlg.execute(PLACEMENT_OWNER) || dlg.getResult().empty()) return 1;
+		sid = (*groups)[dlg.getResult()[0]].sid;
+		groupField->setText(accountTokenDisplay("*" + sid, *groups));
+		return 1;
+	}
+	long onOk(FXObject*, FXSelector, void*) {
+		if (sid.empty() || trimStr(pathField->getText().text()).empty()) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "Die angegebenen Gruppen- und/oder Pfadinformationen sind ungültig.\n"
+			                                             "Sie müssen einen Wert für die Gruppe und den Pfad angegeben.");
+			return 1;
+		}
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	const std::string& getSid() const { return sid; }
+	std::string getPath() const { return trimStr(pathField->getText().text()); }
+	virtual ~RedirGroupPathDialog() {}
+};
+FXDEFMAP(RedirGroupPathDialog) RedirGroupPathDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, RedirGroupPathDialog::ID_BROWSE, RedirGroupPathDialog::onBrowse),
+	FXMAPFUNC(SEL_COMMAND, RedirGroupPathDialog::ID_OK, RedirGroupPathDialog::onOk),
+};
+FXIMPLEMENT(RedirGroupPathDialog, FXDialogBox, RedirGroupPathDialogMap, ARRAYNUMBER(RedirGroupPathDialogMap))
+
+// Eigenschaften eines umgeleiteten Ordners: Reiter "Ziel" (fde.dll,
+// Dialog 6001) und "Einstellungen" (1010).
+class RedirFolderDialog : public FXDialogBox {
+	FXDECLARE(RedirFolderDialog)
+private:
+	const RedirFolderDef* folder = nullptr;
+	RedirPolicy policy;
+	const std::vector<GroupEntry>* groups = nullptr;
+	bool isPictures = false, isDocuments = false;
+
+	enum { MODE_NONE = 0, MODE_BASIC = 1, MODE_ADVANCED = 2, MODE_FOLLOW = 3 };
+	std::vector<int> modeForItem;
+	FXListBox* modeBox = nullptr;
+	FXLabel* modeText = nullptr;
+	FXGroupBox* basicBox = nullptr, *advBox = nullptr;
+	FXTextField* basicPath = nullptr;
+	FXIconList* advList = nullptr;
+	FXCheckButton* exclusive = nullptr, *move = nullptr;
+	FXint removal = 0; FXDataTarget* removalTarget = nullptr;
+	FXint pictures = 0; FXDataTarget* picturesTarget = nullptr;
+	std::vector<FXWindow*> settingsControls;
+	int picturesFlags = FR_FOLLOW_PARENT; // Einstellung fuer "Eigene Bilder" (nur bei Eigene Dateien)
+protected:
+	RedirFolderDialog() {}
+public:
+	enum { ID_MODE = FXDialogBox::ID_LAST, ID_ADV_ADD, ID_ADV_EDIT, ID_ADV_REMOVE, ID_OK };
+
+	RedirFolderDialog(FXWindow* owner, const RedirFolderDef& folder_, const RedirPolicy& policy_, int picturesFlags_,
+	                  const std::vector<GroupEntry>& groups_)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + folder_.label, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,480,500),
+		  folder(&folder_), policy(policy_), groups(&groups_), picturesFlags(picturesFlags_) {
+		isPictures = std::string(folder->key) == "My Pictures";
+		isDocuments = std::string(folder->key) == "My Documents";
+		FXVerticalFrame* outer = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(outer, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		// ---- Ziel ----
+		new FXTabItem(tabs, "Ziel", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_folder), LAYOUT_CENTER_Y);
+		new FXLabel(head, FXString("Sie können den Pfad des Ordners \"") + folder->label + "\" angeben.", NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		FXHorizontalFrame* mrow = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXLabel(mrow, "&Einstellung:", NULL, LAYOUT_CENTER_Y);
+		modeBox = new FXListBox(mrow, this, ID_MODE, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		modeBox->appendItem("Es wurden keine Administratorrichtlinien angegeben."); modeForItem.push_back(MODE_NONE);
+		if (isPictures) { modeBox->appendItem("Dem Ordner Eigene Dateien folgen"); modeForItem.push_back(MODE_FOLLOW); }
+		modeBox->appendItem("Standard - Leitet alle Ordner auf den gleichen Pfad um."); modeForItem.push_back(MODE_BASIC);
+		modeBox->appendItem("Erweitert - Gibt Pfade für verschiedene Benutzergruppen an."); modeForItem.push_back(MODE_ADVANCED);
+		modeBox->setNumVisible((int)modeForItem.size());
+		modeText = new FXLabel(page, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+
+		basicBox = new FXGroupBox(page, "&Zielordner", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,6,8, 0,4);
+		basicPath = new FXTextField(basicBox, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		advBox = new FXGroupBox(page, "Sicherheitsgruppen-&Mitgliedschaft", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,6,8, 0,4);
+		FXPacker* lf = new FXPacker(advBox, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		advList = new FXIconList(lf, NULL, 0, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		advList->appendHeader("Gruppe", NULL, 150);
+		advList->appendHeader("Pfad", NULL, 250);
+		FXHorizontalFrame* ab = new FXHorizontalFrame(advBox, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 6,0);
+		new FXButton(ab, "&Hinzufügen...", NULL, this, ID_ADV_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(ab, "Be&arbeiten...", NULL, this, ID_ADV_EDIT, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(ab, "E&ntfernen", NULL, this, ID_ADV_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+
+		// ---- Einstellungen ----
+		new FXTabItem(tabs, "Einstellungen", NULL);
+		FXVerticalFrame* sp = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
+		FXHorizontalFrame* sh = new FXHorizontalFrame(sp, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(sh, "", sharedPngIcon(resico_folder), LAYOUT_CENTER_Y);
+		new FXLabel(sh, FXString("Wählen Sie die Umleitungseinstellungen für ") + folder->label + ".", NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		exclusive = new FXCheckButton(sp, FXString("Dem Benutzer e&xklusive Zugriffsrechte für ") + folder->label + " erteilen");
+		move = new FXCheckButton(sp, FXString("&Inhalt von ") + folder->label + " an den neuen Ort verschieben");
+		settingsControls = { exclusive, move };
+		FXGroupBox* rem = new FXGroupBox(sp, "Entfernen der Richtlinie", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		removalTarget = new FXDataTarget(removal);
+		settingsControls.push_back(new FXRadioButton(rem, "Or&dner nach Entfernen der Richtlinie am neuen Ort belassen", removalTarget, FXDataTarget::ID_OPTION + 0));
+		settingsControls.push_back(new FXRadioButton(rem, "Ordner &nach Entfernen der Richtlinie zurück an den Ort des lokalen\nBenutzerprofils umleiten", removalTarget, FXDataTarget::ID_OPTION + 1, RADIOBUTTON_NORMAL | JUSTIFY_LEFT));
+		if (isDocuments) {
+			FXGroupBox* pic = new FXGroupBox(sp, "Einstellungen für den Ordner \"Eigene Bilder\"", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+			pictures = (picturesFlags & FR_FOLLOW_PARENT) ? 0 : 1;
+			picturesTarget = new FXDataTarget(pictures);
+			settingsControls.push_back(new FXRadioButton(pic, "&Ordner \"Eigene Bilder\" dem Ordner \"Eigene Dateien\" unterordnen", picturesTarget, FXDataTarget::ID_OPTION + 0));
+			settingsControls.push_back(new FXRadioButton(pic, "&Keine administrative Richtlinie für den Ordner \"Eigene Bilder\"", picturesTarget, FXDataTarget::ID_OPTION + 1));
+		}
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(outer, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+
+		// Anfangszustand aus der Richtlinie
+		int mode = MODE_NONE;
+		if (policy.present && !(policy.flags & FR_NOT_SPECIFIED)) {
+			if (policy.flags & FR_FOLLOW_PARENT) mode = MODE_FOLLOW;
+			else if (policy.flags & FR_ADVANCED) mode = MODE_ADVANCED;
+			else mode = MODE_BASIC;
+		}
+		for (size_t i = 0; i < modeForItem.size(); i++) if (modeForItem[i] == mode) modeBox->setCurrentItem((int)i);
+		// Neue Richtlinie: wie im Original exklusive Rechte und Verschieben vorbelegt.
+		int f = (mode == MODE_NONE || mode == MODE_FOLLOW) ? (FR_EXCLUSIVE | FR_MOVE) : policy.flags;
+		exclusive->setCheck((f & FR_EXCLUSIVE) != 0);
+		move->setCheck((f & FR_MOVE) != 0);
+		removal = (f & FR_RELOCATE_ON_REMOVE) ? 1 : 0;
+		if (mode == MODE_BASIC) {
+			for (auto& t : policy.targets) if (t.first == "S-1-1-0" || t.first == "s-1-1-0") basicPath->setText(t.second.c_str());
+			if (basicPath->getText().empty() && !policy.targets.empty()) basicPath->setText(policy.targets[0].second.c_str());
+		}
+		reloadAdv();
+		updateMode();
+	}
+
+	int currentMode() const {
+		int i = modeBox->getCurrentItem();
+		return (i >= 0 && i < (int)modeForItem.size()) ? modeForItem[i] : MODE_NONE;
+	}
+
+	void updateMode() {
+		int mode = currentMode();
+		// Beschreibungen aus fde.dll (Texte 307-310)
+		const char* text = mode == MODE_NONE ? "Das Gruppenrichtlinienobjekt hat keine Auswirkung auf den Ort dieses Ordners."
+		                 : mode == MODE_FOLLOW ? "Empfohlene Einstellung. Mit dieser Option wird der Ordner \"Eigene Bilder\"\nein Unterordner vom Ordner \"Eigene Dateien\"."
+		                 : mode == MODE_BASIC ? "Dieser Ordner wird auf den angegebenen Pfad umgeleitet.\nZ. B.: \\\\Server\\Freigabe\\%Benutzername%."
+		                 : "Dieser Ordner wird zu verschiedenen Pfaden umgeleitet, die auf der\nSicherheitsgruppenmitgliedschaft der Benutzer basieren.\nZ. B.: \\\\Server\\Freigabe\\%Benutzername%.";
+		modeText->setText(text);
+		if (mode == MODE_BASIC) basicBox->show(); else basicBox->hide();
+		if (mode == MODE_ADVANCED) advBox->show(); else advBox->hide();
+		bool settings = mode == MODE_BASIC || mode == MODE_ADVANCED;
+		for (auto* w : settingsControls) { if (settings) w->enable(); else w->disable(); }
+		basicBox->getParent()->recalc();
+	}
+	long onMode(FXObject*, FXSelector, void*) { updateMode(); return 1; }
+
+	void reloadAdv() {
+		advList->clearItems();
+		FXIcon* ic = sharedPngIcon(resico_users);
+		for (auto& t : policy.targets) advList->appendItem(accountTokenDisplay("*" + t.first, *groups) + "\t" + t.second.c_str(), ic, ic);
+	}
+	long onAdvAdd(FXObject*, FXSelector, void*) {
+		RedirGroupPathDialog dlg(this, *groups, "", "");
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		for (auto& t : policy.targets) {
+			if (lowerCopy(t.first) == lowerCopy(dlg.getSid())) {
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "Es existiert bereits ein anderer Eintrag, der den Pfad der Gruppe %s angibt.",
+				                    accountTokenDisplay("*" + dlg.getSid(), *groups).text());
+				return 1;
+			}
+		}
+		policy.targets.push_back({ dlg.getSid(), dlg.getPath() });
+		reloadAdv();
+		return 1;
+	}
+	long onAdvEdit(FXObject*, FXSelector, void*) {
+		int i = advList->getCurrentItem();
+		if (i < 0 || i >= (int)policy.targets.size()) return 1;
+		RedirGroupPathDialog dlg(this, *groups, policy.targets[i].first, policy.targets[i].second);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		policy.targets[i] = { dlg.getSid(), dlg.getPath() };
+		reloadAdv();
+		return 1;
+	}
+	long onAdvRemove(FXObject*, FXSelector, void*) {
+		int i = advList->getCurrentItem();
+		if (i < 0 || i >= (int)policy.targets.size()) return 1;
+		policy.targets.erase(policy.targets.begin() + i);
+		reloadAdv();
+		return 1;
+	}
+
+	long onOk(FXObject*, FXSelector, void*) {
+		int mode = currentMode();
+		RedirPolicy p;
+		if (mode == MODE_NONE) {
+			p.present = false;
+		} else if (mode == MODE_FOLLOW) {
+			p.present = true;
+			p.flags = FR_FOLLOW_PARENT;
+		} else {
+			p.present = true;
+			p.flags = (exclusive->getCheck() ? FR_EXCLUSIVE : 0) | (move->getCheck() ? FR_MOVE : 0) | (removal ? FR_RELOCATE_ON_REMOVE : 0);
+			if (mode == MODE_BASIC) {
+				std::string path = trimStr(basicPath->getText().text());
+				if (path.empty()) {
+					FXMessageBox::error(this, MBOX_OK, "Fehler", "Sie müssen einen gültigen Pfad für den Zielort angeben.");
+					return 1;
+				}
+				if (path.compare(0, 2, "\\\\") != 0 &&
+				    FXMessageBox::question(this, MBOX_YES_NO, "Warnung",
+				        "Der Zielpfad ist kein UNC-Pfad.\n\nDie Ordnerumleitung wird fehlschlagen, falls dies kein\n"
+				        "gültiger, lokaler Pfad auf dem Client ist.\n\nSind Sie sicher, dass dieser Pfad verwendet werden soll?") != MBOX_CLICKED_YES)
+					return 1;
+				p.targets = { { "S-1-1-0", path } };
+			} else {
+				if (policy.targets.empty()) {
+					FXMessageBox::error(this, MBOX_OK, "Fehler", "Sie müssen einen gültigen Pfad für den Zielort angeben.");
+					return 1;
+				}
+				p.flags |= FR_ADVANCED;
+				p.targets = policy.targets;
+			}
+		}
+		policy = p;
+		if (isDocuments) picturesFlags = pictures == 0 ? FR_FOLLOW_PARENT : 0;
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+
+	const RedirPolicy& getPolicy() const { return policy; }
+	// Eigene Dateien: FR_FOLLOW_PARENT = Eigene Bilder folgt, 0 = keine Richtlinie
+	int getPicturesFlags() const { return picturesFlags; }
+	virtual ~RedirFolderDialog() { delete removalTarget; delete picturesTarget; }
+};
+FXDEFMAP(RedirFolderDialog) RedirFolderDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, RedirFolderDialog::ID_MODE, RedirFolderDialog::onMode),
+	FXMAPFUNC(SEL_COMMAND, RedirFolderDialog::ID_ADV_ADD, RedirFolderDialog::onAdvAdd),
+	FXMAPFUNC(SEL_COMMAND, RedirFolderDialog::ID_ADV_EDIT, RedirFolderDialog::onAdvEdit),
+	FXMAPFUNC(SEL_COMMAND, RedirFolderDialog::ID_ADV_REMOVE, RedirFolderDialog::onAdvRemove),
+	FXMAPFUNC(SEL_COMMAND, RedirFolderDialog::ID_OK, RedirFolderDialog::onOk),
+};
+FXIMPLEMENT(RedirFolderDialog, FXDialogBox, RedirFolderDialogMap, ARRAYNUMBER(RedirFolderDialogMap))
+
+// ---------------------------------------------------------------------
 // Fenster "Gruppenrichtlinie" -- Nachbau des Gruppenrichtlinienobjekt-
 // Editors: links der Baum mit Computer- und Benutzerkonfiguration,
 // rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
@@ -6322,11 +6577,12 @@ FXIMPLEMENT(ObjectPolicyDialog, FXDialogBox, ObjectPolicyDialogMap, ARRAYNUMBER(
 class GpoEditorWindow : public FXDialogBox, public SvcPanelDelegate {
 	FXDECLARE(GpoEditorWindow)
 private:
-	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_SERVICES, GN_REGKEYS, GN_FILES, GN_ADM, GN_ADMCAT, GN_FOLDERREDIR, GN_TODO };
+	enum NodeKind { GN_FOLDER, GN_SOFTWARE, GN_SCRIPTS, GN_SECPOL, GN_RIGHTS, GN_RESTRICTED, GN_SERVICES, GN_REGKEYS, GN_FILES, GN_ADM, GN_ADMCAT, GN_FOLDERREDIR, GN_REDIRFOLDER, GN_TODO };
 	struct Node {
 		NodeKind kind = GN_FOLDER;
 		bool machine = true;
 		const std::vector<SecPolicyDef>* defs = nullptr;
+		const RedirFolderDef* redir = nullptr;
 	};
 
 	DomainInfo domain;
@@ -6453,7 +6709,16 @@ public:
 		FXTreeItem* uPk = add(uSec, "Richtlinien öffentlicher Schlüssel", resico_folder, GN_FOLDER, false);
 		add(uPk, "Organisationsvertrauen", resico_folder, GN_TODO, false);
 		add(uWin, "Remoteinstallationsdienste", resico_folder, GN_TODO, false);
-		add(uWin, "Ordnerumleitung", resico_folder, GN_FOLDERREDIR, false);
+		// Ordnerumleitung mit den Ordnern wie im Original (Eigene Bilder
+		// unterhalb von Eigene Dateien).
+		FXTreeItem* redirRoot = add(uWin, "Ordnerumleitung", resico_folder, GN_FOLDERREDIR, false);
+		FXTreeItem* docsItem = nullptr;
+		for (auto& f : REDIR_FOLDERS) {
+			bool pics = std::string(f.key) == "My Pictures";
+			FXTreeItem* it = add(pics && docsItem ? docsItem : redirRoot, f.label, resico_folder, GN_REDIRFOLDER, false);
+			nodes[it].redir = &f;
+			if (std::string(f.key) == "My Documents") docsItem = it;
+		}
 		FXTreeItem* admUser = add(usr, "Administrative Vorlagen", resico_folder, GN_ADM, false);
 		if (haveAdmFiles()) {
 			getApp()->beginWaitCursor();
@@ -6609,14 +6874,16 @@ public:
 				else { list->appendItem("Anmelden", ic, ic); list->appendItem("Abmelden", ic, ic); }
 				break;
 			}
-			case GN_FOLDERREDIR: {
-				setHeaders({ { "Name", 320 } });
-				FXIcon* ic = sharedPngIcon(resico_folder);
-				for (auto& t : FOLDER_REDIR_TARGETS) {
-					FXString label = t.label;
-					if (label.right(1) == ":") label.trunc(label.length() - 1);
-					list->appendItem(label, ic, ic);
+			case GN_FOLDERREDIR:
+			case GN_REDIRFOLDER: {
+				setHeaders({ { "Name", 320 }, { "Einstellung", 380 } });
+				auto policies = loadRedirPolicies(domain, guid);
+				for (FXTreeItem* c = item->getFirst(); c; c = c->getNext()) {
+					list->appendItem(c->getText() + "\t" + redirSummary(policies, nodes[c].redir), c->getClosedIcon(), c->getClosedIcon());
+					rowChildren.push_back(c);
 				}
+				if (node.kind == GN_REDIRFOLDER)
+					status->setText(FXString(" ") + node.redir->label + ": " + redirSummary(policies, node.redir) + "  (Doppelklick im Baum: Eigenschaften)");
 				break;
 			}
 			case GN_ADM: {
@@ -6772,7 +7039,8 @@ public:
 				break;
 			}
 			case GN_FOLDERREDIR:
-				editFolderRedirection();
+			case GN_REDIRFOLDER:
+				if (idx < (int)rowChildren.size()) editRedirFolder(nodes[rowChildren[idx]].redir);
 				break;
 			default:
 				break;
@@ -7041,14 +7309,45 @@ public:
 		return 1;
 	}
 
-	void editFolderRedirection() {
-		if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann die Ordnerumleitung nicht geändert werden."); return; }
-		std::string userPolPath = gpoBranchDir(domain, guid, false) + "/Registry.pol";
-		FolderRedirectionDialog dlg(this, getFolderRedirectionPaths(userPolPath));
+	FXString redirSummary(const std::map<std::string, RedirPolicy>& policies, const RedirFolderDef* f) {
+		if (!f) return "";
+		auto it = policies.find(f->key);
+		if (it == policies.end() || !it->second.present || (it->second.flags & FR_NOT_SPECIFIED)) return "Keine Richtlinie angegeben";
+		if (it->second.flags & FR_FOLLOW_PARENT) return "Dem Ordner Eigene Dateien folgen";
+		if (it->second.flags & FR_ADVANCED) return "Erweitert (" + FXString(std::to_string(it->second.targets.size()).c_str()) + " Gruppen)";
+		return it->second.targets.empty() ? FXString("Standard") : FXString(("Standard: " + it->second.targets[0].second).c_str());
+	}
+
+	void editRedirFolder(const RedirFolderDef* f) {
+		if (!f || !requireRoot()) return;
+		auto policies = loadRedirPolicies(domain, guid);
+		ensurePrincipals();
+		std::vector<GroupEntry> groups;
+		for (auto& p : principals) if (p.icon == resico_users) groups.push_back(p);
+		RedirPolicy cur = policies.count(f->key) ? policies[f->key] : RedirPolicy();
+		int picFlags = policies.count("My Pictures") && policies["My Pictures"].present ? policies["My Pictures"].flags : 0;
+		RedirFolderDialog dlg(this, *f, cur, picFlags, groups);
 		if (!dlg.execute(PLACEMENT_OWNER)) return;
+		policies[f->key] = dlg.getPolicy();
+		if (std::string(f->key) == "My Documents" && dlg.getPolicy().present) {
+			// Einstellung "Eigene Bilder" auf dem Reiter "Einstellungen" von Eigene Dateien.
+			RedirPolicy& pics = policies["My Pictures"];
+			if (dlg.getPicturesFlags() & FR_FOLLOW_PARENT) { pics = RedirPolicy(); pics.present = true; pics.flags = FR_FOLLOW_PARENT; }
+			else if (pics.present && (pics.flags & FR_FOLLOW_PARENT)) pics = RedirPolicy();
+		}
 		FXString errorMsg;
-		if (!setFolderRedirectionPaths(this, domain, guid.c_str(), dlg.getPaths(), errorMsg))
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		getApp()->beginWaitCursor();
+		bool ok = saveRedirPolicies(this, domain, guid, policies, errorMsg);
+		getApp()->endWaitCursor();
+		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "Die Umleitungsinformationen konnten nicht in der Konfigurationsdatei gespeichert werden.\n\n%s", errorMsg.text());
+		showNode(shownItem);
+	}
+
+	long onTreeDoubleClick(FXObject*, FXSelector, void*) {
+		FXTreeItem* cur = tree->getCurrentItem();
+		auto nit = nodes.find(cur);
+		if (nit != nodes.end() && nit->second.kind == GN_REDIRFOLDER) { editRedirFolder(nit->second.redir); return 1; }
+		return 0;
 	}
 
 	// ---- Softwareinstallation: Kontextmenue --------------------------
@@ -7160,6 +7459,7 @@ public:
 };
 FXDEFMAP(GpoEditorWindow) GpoEditorWindowMap[] = {
 	FXMAPFUNC(SEL_CHANGED, GpoEditorWindow::ID_TREE, GpoEditorWindow::onTreeChanged),
+	FXMAPFUNC(SEL_DOUBLECLICKED, GpoEditorWindow::ID_TREE, GpoEditorWindow::onTreeDoubleClick),
 	FXMAPFUNC(SEL_DOUBLECLICKED, GpoEditorWindow::ID_LIST, GpoEditorWindow::onListDoubleClick),
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, GpoEditorWindow::ID_LIST, GpoEditorWindow::onListRightClick),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_NEW_PACKAGE, GpoEditorWindow::onNewPackage),
