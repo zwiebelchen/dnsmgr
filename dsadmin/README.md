@@ -141,9 +141,18 @@ nicht im Repository):
   Original Beginn des Folgetags) und UPN-Suffix; Gruppe "Allgemein"
   (156), "Verwaltet von" (234), OU "Allgemein" (226). Die Länderliste
   (Texte 4000 ff.) steht in `countries_w2k.h` -- in Großbuchstaben wie im
-  Original; das Paket `iso-codes` wird nicht mehr gebraucht. "Benutzer
-  kann das Kennwort nicht ändern" (eine Berechtigung, kein Bit),
-  "Anmeldezeiten..." und "Anmelden..." sind noch ohne Funktion.
+  Original; das Paket `iso-codes` wird nicht mehr gebraucht. Außerdem die
+  Benutzer-Reiter "Adresse" (134: `streetAddress` mit CRLF,
+  `postOfficeBox`, `l`, `st`, `postalCode`, Land), "Profil" (315:
+  `profilePath`, `scriptPath`, Basisordner als lokaler Pfad oder
+  verbundenes Laufwerk über `homeDirectory`/`homeDrive`), "Rufnummern"
+  (218: `homePhone`, `pager`, `mobile`, `facsimileTelephoneNumber`,
+  `ipPhone`, Anmerkung `info`) und "Organisation" (135: `title`,
+  `department`, `company`, Vorgesetzte(r) `manager` mit Ändern/Anzeigen/
+  Löschen, Mitarbeiter aus `directReports`) -- Reiterfolge wie im
+  Original. "Benutzer kann das Kennwort nicht ändern" (eine Berechtigung,
+  kein Bit), "Anmeldezeiten...", "Anmelden..." und die
+  "Andere..."-Knöpfe sind noch ohne Funktion.
 - `appmgr.dll`: Spalten der Softwareinstallation ("Bereitstellungszustand",
   "Quelle" aus `msiFileList`) und der Dialog "Software entfernen" (211).
 
