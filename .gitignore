@@ -1,4 +1,6 @@
 *.o
+# Von -MMD erzeugte Abhaengigkeitsdateien
+*.d
 
 # Von reswrap erzeugte Icon-Header (Makefile-Ziel res/foxres.h)
 */res/foxres.h
