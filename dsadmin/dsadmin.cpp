@@ -6312,11 +6312,11 @@ public:
 		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 12,0);
 		new FXLabel(head, "", sharedPngIcon(resico_users), LAYOUT_TOP);
 		new FXLabel(head, "Sie können den Zielordner für eine Sicherheitsgruppe wählen.", NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
-		FXGroupBox* g1 = new FXGroupBox(main, "Sicherheitsgruppen-&Mitgliedschaft", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		FXGroupBox* g1 = new FXGroupBox(main, "Sicherheitsgruppen-Mitgliedschaft", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
 		groupField = new FXTextField(g1, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
 		if (!sid.empty()) groupField->setText(accountTokenDisplay("*" + sid, *groups));
 		new FXButton(g1, "&Durchsuchen...", NULL, this, ID_BROWSE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_RIGHT, 0,0,0,0, 8,8,3,3);
-		FXGroupBox* g2 = new FXGroupBox(main, "&Zielordner", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
+		FXGroupBox* g2 = new FXGroupBox(main, "Zielordner", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
 		pathField = new FXTextField(g2, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
 		pathField->setText(path.c_str());
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,4,0, 6,0);
@@ -6379,7 +6379,7 @@ public:
 
 	RedirFolderDialog(FXWindow* owner, const RedirFolderDef& folder_, const RedirPolicy& policy_, int picturesFlags_,
 	                  const std::vector<GroupEntry>& groups_)
-		: FXDialogBox(owner, FXString("Eigenschaften von ") + folder_.label, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,480,500),
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + folder_.label, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,600,520),
 		  folder(&folder_), policy(policy_), groups(&groups_), picturesFlags(picturesFlags_) {
 		isPictures = std::string(folder->key) == "My Pictures";
 		isDocuments = std::string(folder->key) == "My Documents";
@@ -6402,9 +6402,9 @@ public:
 		modeBox->setNumVisible((int)modeForItem.size());
 		modeText = new FXLabel(page, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
 
-		basicBox = new FXGroupBox(page, "&Zielordner", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,6,8, 0,4);
+		basicBox = new FXGroupBox(page, "Zielordner", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,6,8, 0,4);
 		basicPath = new FXTextField(basicBox, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
-		advBox = new FXGroupBox(page, "Sicherheitsgruppen-&Mitgliedschaft", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,6,8, 0,4);
+		advBox = new FXGroupBox(page, "Sicherheitsgruppen-Mitgliedschaft", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 8,8,6,8, 0,4);
 		FXPacker* lf = new FXPacker(advBox, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
 		advList = new FXIconList(lf, NULL, 0, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		advList->appendHeader("Gruppe", NULL, 150);
@@ -6429,7 +6429,9 @@ public:
 		settingsControls.push_back(new FXRadioButton(rem, "Ordner &nach Entfernen der Richtlinie zurück an den Ort des lokalen\nBenutzerprofils umleiten", removalTarget, FXDataTarget::ID_OPTION + 1, RADIOBUTTON_NORMAL | JUSTIFY_LEFT));
 		if (isDocuments) {
 			FXGroupBox* pic = new FXGroupBox(sp, "Einstellungen für den Ordner \"Eigene Bilder\"", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8, 0,4);
-			pictures = (picturesFlags & FR_FOLLOW_PARENT) ? 0 : 1;
+			// -1 = fuer Eigene Bilder gibt es noch keinen Eintrag: dann wie im
+			// Original die empfohlene Einstellung "unterordnen" vorwaehlen.
+			pictures = (picturesFlags == -1 || (picturesFlags & FR_FOLLOW_PARENT)) ? 0 : 1;
 			picturesTarget = new FXDataTarget(pictures);
 			settingsControls.push_back(new FXRadioButton(pic, "&Ordner \"Eigene Bilder\" dem Ordner \"Eigene Dateien\" unterordnen", picturesTarget, FXDataTarget::ID_OPTION + 0));
 			settingsControls.push_back(new FXRadioButton(pic, "&Keine administrative Richtlinie für den Ordner \"Eigene Bilder\"", picturesTarget, FXDataTarget::ID_OPTION + 1));
@@ -7325,7 +7327,7 @@ public:
 		std::vector<GroupEntry> groups;
 		for (auto& p : principals) if (p.icon == resico_users) groups.push_back(p);
 		RedirPolicy cur = policies.count(f->key) ? policies[f->key] : RedirPolicy();
-		int picFlags = policies.count("My Pictures") && policies["My Pictures"].present ? policies["My Pictures"].flags : 0;
+		int picFlags = policies.count("My Pictures") && policies["My Pictures"].present ? policies["My Pictures"].flags : -1;
 		RedirFolderDialog dlg(this, *f, cur, picFlags, groups);
 		if (!dlg.execute(PLACEMENT_OWNER)) return;
 		policies[f->key] = dlg.getPolicy();
