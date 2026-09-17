@@ -3842,8 +3842,6 @@ class SoftwareInstallDialog : public FXDialogBox {
 	FXDECLARE(SoftwareInstallDialog)
 private:
 	FXTextField *localPathField, *uncPathField;
-	FXint modeVar = 0; // 0=Computer zuweisen, 1=Benutzer zuweisen, 2=Benutzer veroeffentlichen
-	FXDataTarget* modeTarget = NULL;
 protected:
 	SoftwareInstallDialog() {}
 public:
@@ -3875,7 +3873,7 @@ public:
 		return 1;
 	}
 	SoftwareInstallDialog(FXWindow* owner)
-		: FXDialogBox(owner, "Software installieren", DECOR_TITLE | DECOR_BORDER, 0,0,480,0) {
+		: FXDialogBox(owner, "Öffnen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,480,0) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
 		new FXLabel(main, "Lokaler Pfad zur .msi-Datei (zum Lesen der Paketangaben):");
 		FXHorizontalFrame* pf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
@@ -3883,13 +3881,6 @@ public:
 		new FXButton(pf, "&Durchsuchen...", NULL, this, ID_BROWSE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
 		new FXLabel(main, "UNC-Netzwerkpfad, unter dem Clients die Datei erreichen\n(z.B. \\\\server\\freigabe\\pfad\\datei.msi):");
 		uncPathField = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-
-		modeTarget = new FXDataTarget(modeVar);
-		FXGroupBox* group = new FXGroupBox(main, "Bereitstellungsart", GROUPBOX_NORMAL | FRAME_GROOVE | LAYOUT_FILL_X);
-		FXVerticalFrame* radioFrame = new FXVerticalFrame(group, LAYOUT_FILL_X);
-		new FXRadioButton(radioFrame, "Computer zuweisen (Installation beim Hochfahren)", modeTarget, FXDataTarget::ID_OPTION + 0);
-		new FXRadioButton(radioFrame, "Benutzer zuweisen (Installation bei Anmeldung)", modeTarget, FXDataTarget::ID_OPTION + 1);
-		new FXRadioButton(radioFrame, "Benutzer veröffentlichen (in Software-Katalog verfügbar)", modeTarget, FXDataTarget::ID_OPTION + 2);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
 		new FXFrame(btnf, LAYOUT_FILL_X);
@@ -3900,11 +3891,11 @@ public:
 		SoftwarePackageParams p;
 		p.localMsiPath = localPathField->getText().text();
 		p.msiUncPath = uncPathField->getText().text();
-		p.assignedPerMachine = (modeVar == 0);
-		p.published = (modeVar == 2);
+		p.assignedPerMachine = false;
+		p.published = false;
 		return p;
 	}
-	virtual ~SoftwareInstallDialog() { delete modeTarget; }
+	virtual ~SoftwareInstallDialog() {}
 };
 // Ohne diese Tabelle laeuft der Klick auf "Durchsuchen..." ins Leere:
 // FXIMPLEMENT stand hier mit einer leeren Map, onBrowse war damit toter
@@ -3913,6 +3904,53 @@ FXDEFMAP(SoftwareInstallDialog) SoftwareInstallDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, SoftwareInstallDialog::ID_BROWSE, SoftwareInstallDialog::onBrowse),
 };
 FXIMPLEMENT(SoftwareInstallDialog, FXDialogBox, SoftwareInstallDialogMap, ARRAYNUMBER(SoftwareInstallDialogMap))
+
+// Dialog "Software bereitstellen" (appmgr.dll, Dialog 102, Texte 625-627).
+// In der Computerkonfiguration gibt es nur "Zugewiesen".
+class DeploySoftwareDialog : public FXDialogBox {
+	FXDECLARE(DeploySoftwareDialog)
+private:
+	FXint method = 1; // 0 veroeffentlicht, 1 zugewiesen, 2 erweitert
+	FXDataTarget target;
+	FXLabel* description = nullptr;
+protected:
+	DeploySoftwareDialog() {}
+public:
+	enum { ID_METHOD = FXDialogBox::ID_LAST };
+	DeploySoftwareDialog(FXWindow* owner, bool machine)
+		: FXDialogBox(owner, "Software bereitstellen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0),
+		  method(machine ? 1 : 0), target(method, this, ID_METHOD) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
+		new FXLabel(main, "Wählen Sie die Bereitstellungsmethode aus:", NULL, JUSTIFY_LEFT);
+		FXVerticalFrame* radios = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 16,0,4,4, 0,6);
+		FXRadioButton* pub = new FXRadioButton(radios, "&Veröffentlicht", &target, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(radios, "&Zugewiesen", &target, FXDataTarget::ID_OPTION + 1);
+		// "Erweitert" oeffnet im Original die Paketeigenschaften, die es hier
+		// (noch) nicht gibt.
+		(new FXRadioButton(radios, "&Erweiterte Methode von \"Veröffentlicht\" oder \"Zugewiesen\"", &target, FXDataTarget::ID_OPTION + 2))->disable();
+		if (machine) pub->disable();
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		description = new FXLabel(main, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,6,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		onMethod(NULL, 0, NULL);
+	}
+	long onMethod(FXObject*, FXSelector, void*) {
+		description->setText(method == 0 ? "Wählen Sie diese Option, um die Anwendung ohne Änderungen zu\nveröffentlichen."
+		                   : method == 1 ? "Wählen Sie diese Option, um die Anwendung ohne Änderungen zuzuweisen."
+		                   : "Wählen Sie die Option, um die Optionen \"Veröffentlichen\" oder \"Zuweisen\"\nzu konfigurieren, und um Änderungen auf das Paket anzuwenden.");
+		return 1;
+	}
+	bool published() const { return method == 0; }
+	virtual ~DeploySoftwareDialog() {}
+};
+FXDEFMAP(DeploySoftwareDialog) DeploySoftwareDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, DeploySoftwareDialog::ID_METHOD, DeploySoftwareDialog::onMethod),
+};
+FXIMPLEMENT(DeploySoftwareDialog, FXDialogBox, DeploySoftwareDialogMap, ARRAYNUMBER(DeploySoftwareDialogMap))
+
 
 // ---------------------------------------------------------------------
 // Dialog zur Verwaltung der Softwarepakete eines GPOs -- getrennte
@@ -7508,10 +7546,12 @@ public:
 			FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
 			return 1;
 		}
-		// Der Knoten bestimmt den Zweig -- in der Computerkonfiguration
-		// gibt es nur "Zugewiesen".
+		// Der Knoten bestimmt den Zweig; die Bereitstellungsmethode wird wie
+		// im Original danach abgefragt.
+		DeploySoftwareDialog deploy(this, machine);
+		if (!deploy.execute(PLACEMENT_OWNER)) return 1;
 		params.assignedPerMachine = machine;
-		if (machine) params.published = false;
+		params.published = !machine && deploy.published();
 		std::string log;
 		FXString errorMsg;
 		getApp()->beginWaitCursor();
