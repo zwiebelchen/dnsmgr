@@ -2776,7 +2776,7 @@ public:
 	enum { ID_MEMBER_ADD = FXDialogBox::ID_LAST, ID_MEMBER_REMOVE, ID_SET_PRIMARY, ID_APPLY, ID_OK };
 
 	UserPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const DirObject& obj)
-		: FXDialogBox(owner, "Eigenschaften von " + obj.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,430,480),
+		: FXDialogBox(owner, "Eigenschaften von " + obj.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,480,520),
 		  domain(domain_), accountName(obj.accountName) {
 		userFullDN = obj.dn.empty() ? domain.baseDN : obj.dn + "," + domain.baseDN;
 
@@ -2941,7 +2941,9 @@ public:
 		FXPacker* lf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,110, 0,0,0,0);
 		FXScrollWindow* sw = new FXScrollWindow(lf, LAYOUT_FILL_X | LAYOUT_FILL_Y | HSCROLLING_OFF);
 		FXVerticalFrame* optFrame = new FXVerticalFrame(sw, LAYOUT_FILL_X, 0,0,0,0, 4,4,2,2, 0,0);
-		optFrame->setBackColor(getApp()->getBackColor());
+		// Weisse Liste mit Haekchen wie das CHECKLIST-Steuerelement des Originals.
+		optFrame->setBackColor(FXRGB(255,255,255));
+		sw->setBackColor(FXRGB(255,255,255));
 		origMustChange = ldifFirst(rec, "pwdLastSet") == "0";
 		mustChangeCheck = new FXCheckButton(optFrame, "Benutzer muss Kennwort bei nächster Anmeldung ändern");
 		mustChangeCheck->setCheck(origMustChange);
@@ -2957,8 +2959,10 @@ public:
 			{ "Konto kann nicht delegiert werden", 0x100000 },
 			{ "DES-Verschlüsselungstypen für dieses Konto verwenden", 0x200000 },
 		};
+		for (FXWindow* w = optFrame->getFirst(); w; w = w->getNext()) w->setBackColor(FXRGB(255,255,255));
 		for (auto& o : opts) {
 			FXCheckButton* cb = new FXCheckButton(optFrame, o.first);
+			cb->setBackColor(FXRGB(255,255,255));
 			cb->setCheck((origUac & o.second) != 0);
 			uacOptions.push_back({ cb, o.second });
 		}
