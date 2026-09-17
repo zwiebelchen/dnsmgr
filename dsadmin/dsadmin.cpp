@@ -4112,187 +4112,7 @@ public:
 };
 FXIMPLEMENT(SecuritySettingsDialog, FXDialogBox, NULL, 0)
 
-// ---------------------------------------------------------------------
-// Kleiner Dialog zum Hinzufuegen eines Skripts (Pfad + Parameter).
-// ---------------------------------------------------------------------
-class AddScriptDialog : public FXDialogBox {
-	FXDECLARE(AddScriptDialog)
-private:
-	FXTextField *cmdField, *paramField;
-protected:
-	AddScriptDialog() {}
-public:
-	AddScriptDialog(FXWindow* owner, const FXString& title)
-		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER, 0,0,420,0) {
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		new FXLabel(main, "Skriptname (z.B. \\\\server\\netlogon\\skript.bat):");
-		cmdField = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-		new FXLabel(main, "Skriptparameter:");
-		paramField = new FXTextField(main, 40, NULL, 0, FRAME_SUNKEN | LAYOUT_FILL_X);
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-	}
-	FXString getCmdLine() const { return cmdField->getText(); }
-	FXString getParameters() const { return paramField->getText(); }
-	virtual ~AddScriptDialog() {}
-};
-FXIMPLEMENT(AddScriptDialog, FXDialogBox, NULL, 0)
 
-// ---------------------------------------------------------------------
-// Dialog "Skripte" -- vier einfache Listen (Start/Herunterfahren fuer
-// Computer, Anmelden/Abmelden fuer Benutzer), je Zweig in einer
-// eigenen scripts.ini.
-// ---------------------------------------------------------------------
-class ScriptsDialog : public FXDialogBox {
-	FXDECLARE(ScriptsDialog)
-private:
-	DomainInfo domain;
-	FXString gpoGuid;
-	std::string machinePath, userPath;
-	FXList *startupList, *shutdownList, *logonList, *logoffList;
-protected:
-	ScriptsDialog() {}
-public:
-	enum { ID_ADD_STARTUP = FXDialogBox::ID_LAST, ID_REMOVE_STARTUP, ID_ADD_SHUTDOWN, ID_REMOVE_SHUTDOWN,
-	       ID_ADD_LOGON, ID_REMOVE_LOGON, ID_ADD_LOGOFF, ID_REMOVE_LOGOFF, ID_SAVE };
-	long onSave(FXObject*, FXSelector, void*) {
-		if (saveAll()) {
-			FXMessageBox::information(this, MBOX_OK, "Gespeichert", "Die Skripte wurden gespeichert.");
-		}
-		return 1;
-	}
-
-	void reload() {
-		auto machineSections = parseScriptsIni(machinePath);
-		startupList->clearItems();
-		for (auto& e : machineSections["Startup"]) startupList->appendItem(e.cmdLine + " " + e.parameters);
-		shutdownList->clearItems();
-		for (auto& e : machineSections["Shutdown"]) shutdownList->appendItem(e.cmdLine + " " + e.parameters);
-
-		auto userSections = parseScriptsIni(userPath);
-		logonList->clearItems();
-		for (auto& e : userSections["Logon"]) logonList->appendItem(e.cmdLine + " " + e.parameters);
-		logoffList->clearItems();
-		for (auto& e : userSections["Logoff"]) logoffList->appendItem(e.cmdLine + " " + e.parameters);
-	}
-
-	bool saveBranch(bool isMachine, const std::string& sectionName1, const std::vector<ScriptEntry>& entries1,
-	                 const std::string& sectionName2, const std::vector<ScriptEntry>& entries2) {
-		std::string path = isMachine ? machinePath : userPath;
-		auto sections = parseScriptsIni(path);
-		sections[sectionName1] = entries1;
-		sections[sectionName2] = entries2;
-		FXString errorMsg;
-		if (!writeScriptsIni(path, sections, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return false; }
-		std::string log;
-		std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
-		std::string toolGuid = isMachine ? GPSCR_TOOL_GUID_MACHINE : GPSCR_TOOL_GUID_USER;
-		ensureExtensionRegistered(this, domain.realm, gpoObjectDn, isMachine, GPSCR_CSE_GUID, toolGuid, log, errorMsg);
-		return true;
-	}
-
-	std::vector<ScriptEntry> listToEntries(FXList* list) {
-		(void)list;
-		return {};
-	}
-
-	long onAdd(FXList* list, const FXString& title) {
-		AddScriptDialog dlg(this, title);
-		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-		if (dlg.getCmdLine().trim().empty()) return 1;
-		list->appendItem(dlg.getCmdLine() + " " + dlg.getParameters());
-		return 1;
-	}
-	long onAddStartup(FXObject*, FXSelector, void*) { return onAdd(startupList, "Startskript hinzufügen"); }
-	long onAddShutdown(FXObject*, FXSelector, void*) { return onAdd(shutdownList, "Herunterfahrskript hinzufügen"); }
-	long onAddLogon(FXObject*, FXSelector, void*) { return onAdd(logonList, "Anmeldeskript hinzufügen"); }
-	long onAddLogoff(FXObject*, FXSelector, void*) { return onAdd(logoffList, "Abmeldeskript hinzufügen"); }
-	long onRemoveStartup(FXObject*, FXSelector, void*) { int i = startupList->getCurrentItem(); if (i >= 0) startupList->removeItem(i); return 1; }
-	long onRemoveShutdown(FXObject*, FXSelector, void*) { int i = shutdownList->getCurrentItem(); if (i >= 0) shutdownList->removeItem(i); return 1; }
-	long onRemoveLogon(FXObject*, FXSelector, void*) { int i = logonList->getCurrentItem(); if (i >= 0) logonList->removeItem(i); return 1; }
-	long onRemoveLogoff(FXObject*, FXSelector, void*) { int i = logoffList->getCurrentItem(); if (i >= 0) logoffList->removeItem(i); return 1; }
-
-	ScriptsDialog(FXWindow* owner, const DomainInfo& domain_, const FXString& gpoGuid_)
-		: FXDialogBox(owner, "Skripte", DECOR_ALL, 0,0,480,460),
-		  domain(domain_), gpoGuid(gpoGuid_) {
-		FXString realmLower = domain.realm; realmLower.lower();
-		std::string sysvolBase = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + std::string(gpoGuid.text());
-		machinePath = sysvolBase + "/" + SYSVOL_MACHINE_DIR + "/Scripts/scripts.ini";
-		userPath = sysvolBase + "/" + SYSVOL_USER_DIR + "/Scripts/scripts.ini";
-
-		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10);
-		FXTabBook* tabs = new FXTabBook(main, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
-
-		new FXTabItem(tabs, "Computerkonfiguration");
-		FXVerticalFrame* machinePage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
-		new FXLabel(machinePage, "Startskripte:");
-		startupList = new FXList(machinePage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
-		FXHorizontalFrame* sbtn = new FXHorizontalFrame(machinePage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
-		new FXButton(sbtn, "&Hinzufügen...", NULL, this, ID_ADD_STARTUP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(sbtn, "&Entfernen", NULL, this, ID_REMOVE_STARTUP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXLabel(machinePage, "Herunterfahrskripte:");
-		shutdownList = new FXList(machinePage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
-		FXHorizontalFrame* dbtn = new FXHorizontalFrame(machinePage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
-		new FXButton(dbtn, "H&inzufügen...", NULL, this, ID_ADD_SHUTDOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(dbtn, "E&ntfernen", NULL, this, ID_REMOVE_SHUTDOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-
-		new FXTabItem(tabs, "Benutzerkonfiguration");
-		FXVerticalFrame* userPage = new FXVerticalFrame(tabs, FRAME_THICK | FRAME_RAISED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
-		new FXLabel(userPage, "Anmeldeskripte:");
-		logonList = new FXList(userPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
-		FXHorizontalFrame* lonbtn = new FXHorizontalFrame(userPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
-		new FXButton(lonbtn, "Hin&zufügen...", NULL, this, ID_ADD_LOGON, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(lonbtn, "Ent&fernen", NULL, this, ID_REMOVE_LOGON, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXLabel(userPage, "Abmeldeskripte:");
-		logoffList = new FXList(userPage, NULL, 0, LISTBOX_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X, 0,0,0,80);
-		FXHorizontalFrame* lofbtn = new FXHorizontalFrame(userPage, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2);
-		new FXButton(lofbtn, "Hinz&ufügen...", NULL, this, ID_ADD_LOGOFF, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-		new FXButton(lofbtn, "Entf&ernen", NULL, this, ID_REMOVE_LOGOFF, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK);
-
-		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0);
-		new FXFrame(btnf, LAYOUT_FILL_X);
-		new FXButton(btnf, "&Speichern", NULL, this, ID_SAVE, BUTTON_NORMAL | BUTTON_DEFAULT | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 14,14,3,3);
-
-		reload();
-	}
-	// Parst eine Listeneintrag-Zeile ("cmd param param2") wieder in
-	// CmdLine/Parameters -- erstes Leerzeichen trennt.
-	static ScriptEntry parseListLine(const FXString& line) {
-		ScriptEntry e;
-		int sp = line.find(' ');
-		if (sp < 0) { e.cmdLine = line; return e; }
-		e.cmdLine = line.left(sp);
-		e.parameters = line.mid(sp + 1, line.length() - sp - 1);
-		return e;
-	}
-	std::vector<ScriptEntry> listEntries(FXList* list) {
-		std::vector<ScriptEntry> out;
-		for (int i = 0; i < list->getNumItems(); i++) out.push_back(parseListLine(list->getItemText(i)));
-		return out;
-	}
-	bool saveAll() {
-		bool ok = true;
-		ok &= saveBranch(true, "Startup", listEntries(startupList), "Shutdown", listEntries(shutdownList));
-		ok &= saveBranch(false, "Logon", listEntries(logonList), "Logoff", listEntries(logoffList));
-		return ok;
-	}
-	virtual ~ScriptsDialog() {}
-};
-FXDEFMAP(ScriptsDialog) ScriptsDialogMap[] = {
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_STARTUP, ScriptsDialog::onAddStartup),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_STARTUP, ScriptsDialog::onRemoveStartup),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_SHUTDOWN, ScriptsDialog::onAddShutdown),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_SHUTDOWN, ScriptsDialog::onRemoveShutdown),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_LOGON, ScriptsDialog::onAddLogon),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_LOGON, ScriptsDialog::onRemoveLogon),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_ADD_LOGOFF, ScriptsDialog::onAddLogoff),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_REMOVE_LOGOFF, ScriptsDialog::onRemoveLogoff),
-	FXMAPFUNC(SEL_COMMAND, ScriptsDialog::ID_SAVE, ScriptsDialog::onSave),
-};
-FXIMPLEMENT(ScriptsDialog, FXDialogBox, ScriptsDialogMap, ARRAYNUMBER(ScriptsDialogMap))
 
 
 
@@ -6572,6 +6392,278 @@ FXDEFMAP(RedirFolderDialog) RedirFolderDialogMap[] = {
 FXIMPLEMENT(RedirFolderDialog, FXDialogBox, RedirFolderDialogMap, ARRAYNUMBER(RedirFolderDialogMap))
 
 // ---------------------------------------------------------------------
+// Skripts nach gptext.dll: je Ereignis (Starten/Herunterfahren fuer den
+// Computer, Anmelden/Abmelden fuer Benutzer) ein Eigenschaftendialog
+// (Dialog 100) und "Hinzufügen eines Skripts" (150). Gespeichert wird in
+// <Zweig>\Scripts\scripts.ini ("0CmdLine=", "0Parameters="), die
+// Skriptdateien selbst liegen wie im Original in Scripts\<Ereignis>.
+// ---------------------------------------------------------------------
+struct ScriptEventDef { const char* section; const char* label; const char* verb; bool machine; };
+static const ScriptEventDef SCRIPT_EVENTS[] = {
+	{ "Startup", "Starten", "Starten", true },
+	{ "Shutdown", "Herunterfahren", "Herunterfahren", true },
+	{ "Logon", "Anmelden", "Anmelden", false },
+	{ "Logoff", "Abmelden", "Abmelden", false },
+};
+
+static std::string scriptsDir(const DomainInfo& domain, const std::string& guid, bool machine) {
+	return gpoBranchDir(domain, guid, machine) + "/Scripts";
+}
+
+static std::map<std::string, std::vector<ScriptEntry>> loadScriptsIniAsRoot(const std::string& path) {
+	std::string raw;
+	if (runAsRootCaptured({ FXString("cat"), FXString(path.c_str()) }, raw) != 0) return {};
+	const char* tmp = "/tmp/ice2k-scripts-read.ini";
+	{ std::ofstream o(tmp, std::ios::binary); o.write(raw.data(), (std::streamsize)raw.size()); }
+	auto out = parseScriptsIni(tmp);
+	unlink(tmp);
+	return out;
+}
+
+// Legt Scripts\ und Scripts\<Ereignis> mit den SYSVOL-Rechten an.
+static void ensureScriptsFolders(const DomainInfo& domain, const std::string& guid, bool machine, const char* section) {
+	std::string branch = gpoBranchDir(domain, guid, machine);
+	std::string dir = branch + "/Scripts";
+	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(branch.c_str()) }) != 0) {
+		runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(branch.c_str()) });
+		inheritSysvolPermissions(gpoSysvolBase(domain, guid), branch, true);
+	}
+	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(dir.c_str()) }) != 0) {
+		runAsRoot({ FXString("mkdir"), FXString(dir.c_str()) });
+		inheritSysvolPermissions(branch, dir, true);
+	}
+	std::string ev = dir + "/" + section;
+	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(ev.c_str()) }) != 0) {
+		runAsRoot({ FXString("mkdir"), FXString(ev.c_str()) });
+		inheritSysvolPermissions(dir, ev, true);
+	}
+}
+
+// Dialog "Hinzufügen eines Skripts" bzw. "Skript bearbeiten".
+class ScriptEntryDialog : public FXDialogBox {
+	FXDECLARE(ScriptEntryDialog)
+private:
+	FXTextField* nameField = nullptr, *paramField = nullptr;
+	std::string eventDir;
+protected:
+	ScriptEntryDialog() {}
+public:
+	enum { ID_BROWSE = FXDialogBox::ID_LAST };
+	ScriptEntryDialog(FXWindow* owner, const char* title, const ScriptEntry& e, const std::string& eventDir_)
+		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0), eventDir(eventDir_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,4);
+		new FXLabel(main, "Skript&name:", NULL, JUSTIFY_LEFT);
+		FXHorizontalFrame* r = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		nameField = new FXTextField(r, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		nameField->setText(e.cmdLine);
+		new FXButton(r, "&Durchsuchen...", NULL, this, ID_BROWSE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXLabel(main, "Skript&parameter:", NULL, JUSTIFY_LEFT);
+		paramField = new FXTextField(main, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		paramField->setText(e.parameters);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	// Wie im Original: Ein Skript aus dem GPO-Ordner wird nur mit seinem
+	// Dateinamen eingetragen. Liegt die Datei woanders, wird sie dorthin
+	// kopiert -- sonst muesste man sie von Hand ins SYSVOL legen.
+	long onBrowse(FXObject*, FXSelector, void*) {
+		FXFileDialog dlg(this, "Durchsuchen");
+		dlg.setPatternList("Skriptdateien (*.bat,*.cmd,*.vbs,*.js,*.exe)\nAlle Dateien (*)");
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		std::string file = dlg.getFilename().text();
+		std::string base = file.substr(file.find_last_of('/') + 1);
+		if (file.compare(0, eventDir.size() + 1, eventDir + "/") != 0) {
+			if (FXMessageBox::question(this, MBOX_YES_NO, "Skripts",
+			        "Die Datei liegt nicht im Skriptordner dieses Gruppenrichtlinienobjekts.\n"
+			        "Soll sie dorthin kopiert werden?") != MBOX_CLICKED_YES) {
+				nameField->setText(file.c_str());
+				return 1;
+			}
+			std::string dest = eventDir + "/" + base;
+			if (runAsRoot({ FXString("cp"), FXString(file.c_str()), FXString(dest.c_str()) }) != 0) {
+				FXMessageBox::error(this, MBOX_OK, "Skripts", "Die Datei konnte nicht kopiert werden.");
+				return 1;
+			}
+			inheritSysvolPermissions(eventDir, dest, false);
+		}
+		nameField->setText(base.c_str());
+		return 1;
+	}
+	ScriptEntry getEntry() const {
+		ScriptEntry e;
+		e.cmdLine = nameField->getText(); e.cmdLine.trim();
+		e.parameters = paramField->getText(); e.parameters.trim();
+		return e;
+	}
+	virtual ~ScriptEntryDialog() {}
+};
+FXDEFMAP(ScriptEntryDialog) ScriptEntryDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ScriptEntryDialog::ID_BROWSE, ScriptEntryDialog::onBrowse),
+};
+FXIMPLEMENT(ScriptEntryDialog, FXDialogBox, ScriptEntryDialogMap, ARRAYNUMBER(ScriptEntryDialogMap))
+
+// Dialog "Eigenschaften von Anmelden" usw.
+class ScriptEventDialog : public FXDialogBox {
+	FXDECLARE(ScriptEventDialog)
+private:
+	DomainInfo domain;
+	std::string guid;
+	const ScriptEventDef* ev = nullptr;
+	std::vector<ScriptEntry> entries, origEntries;
+	FXIconList* list = nullptr;
+protected:
+	ScriptEventDialog() {}
+public:
+	enum { ID_UP = FXDialogBox::ID_LAST, ID_DOWN, ID_ADD, ID_EDIT, ID_REMOVE, ID_SHOW_FILES, ID_OK, ID_APPLY };
+	ScriptEventDialog(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const std::string& gpoName, const ScriptEventDef& ev_)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + ev_.label, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,500,460),
+		  domain(domain_), guid(guid_), ev(&ev_) {
+		auto sections = loadScriptsIniAsRoot(scriptsDir(domain, guid, ev->machine) + "/scripts.ini");
+		entries = origEntries = sections[ev->section];
+
+		FXVerticalFrame* outer = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(outer, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXTabItem(tabs, "Skripts", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_folder), LAYOUT_CENTER_Y);
+		new FXLabel(head, FXString("Skripts zum ") + ev->verb + " für " + gpoName.c_str(), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXHorizontalFrame* mid = new FXHorizontalFrame(page, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 8,0);
+		FXPacker* lf = new FXPacker(mid, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXIconList(lf, this, 0, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		list->appendHeader("Name", NULL, 190);
+		list->appendHeader("Parameter", NULL, 130);
+		FXVerticalFrame* btns = new FXVerticalFrame(mid, LAYOUT_FILL_Y | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,16,0, 0,4);
+		new FXButton(btns, "Nach &oben", NULL, this, ID_UP, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(btns, "Nach &unten", NULL, this, ID_DOWN, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXFrame(btns, LAYOUT_FIX_HEIGHT, 0,0,0,20, 0,0,0,0);
+		new FXButton(btns, "Hin&zufügen...", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(btns, "Be&arbeiten...", NULL, this, ID_EDIT, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		new FXLabel(page, "Klicken Sie auf das Feld unten, um die Skriptdateien in diesem\nGruppenrichtlinienobjekt anzuzeigen.", NULL, JUSTIFY_LEFT);
+		new FXButton(page, "&Dateien anzeigen...", NULL, this, ID_SHOW_FILES, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_LEFT, 0,0,0,0, 8,8,3,3);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(outer, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		const FXuint bs = BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH;
+		new FXButton(btnf, "OK", NULL, this, ID_OK, bs | BUTTON_DEFAULT | BUTTON_INITIAL, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, bs, 0,0,88,0, 4,4,3,3);
+		(new FXButton(btnf, "Ü&bernehmen", NULL, this, ID_APPLY, bs, 0,0,88,0, 4,4,3,3))->disable();
+		reload(0);
+	}
+
+	std::string eventDir() const { return scriptsDir(domain, guid, ev->machine) + "/" + ev->section; }
+
+	void reload(int select) {
+		list->clearItems();
+		FXIcon* ic = sharedPngIcon(resico_key);
+		for (auto& e : entries) list->appendItem(e.cmdLine + "\t" + e.parameters, ic, ic);
+		if (!entries.empty()) {
+			select = std::max(0, std::min(select, (int)entries.size() - 1));
+			list->setCurrentItem(select); list->selectItem(select);
+		}
+	}
+	int current() const { int i = list->getCurrentItem(); return (i >= 0 && i < (int)entries.size()) ? i : -1; }
+	bool dirty() const {
+		if (entries.size() != origEntries.size()) return true;
+		for (size_t i = 0; i < entries.size(); i++)
+			if (entries[i].cmdLine != origEntries[i].cmdLine || entries[i].parameters != origEntries[i].parameters) return true;
+		return false;
+	}
+
+	long onUp(FXObject*, FXSelector, void*) { int i = current(); if (i > 0) { std::swap(entries[i], entries[i - 1]); reload(i - 1); } return 1; }
+	long onDown(FXObject*, FXSelector, void*) { int i = current(); if (i >= 0 && i + 1 < (int)entries.size()) { std::swap(entries[i], entries[i + 1]); reload(i + 1); } return 1; }
+	long onAdd(FXObject*, FXSelector, void*) {
+		if (!g_haveRoot) return 1;
+		ensureScriptsFolders(domain, guid, ev->machine, ev->section);
+		ScriptEntryDialog dlg(this, "Hinzufügen eines Skripts", ScriptEntry(), eventDir());
+		if (!dlg.execute(PLACEMENT_OWNER) || dlg.getEntry().cmdLine.empty()) return 1;
+		entries.push_back(dlg.getEntry());
+		reload((int)entries.size() - 1);
+		return 1;
+	}
+	long onEdit(FXObject*, FXSelector, void*) {
+		int i = current();
+		if (i < 0 || !g_haveRoot) return 1;
+		ensureScriptsFolders(domain, guid, ev->machine, ev->section);
+		ScriptEntryDialog dlg(this, "Skript bearbeiten", entries[i], eventDir());
+		if (!dlg.execute(PLACEMENT_OWNER) || dlg.getEntry().cmdLine.empty()) return 1;
+		entries[i] = dlg.getEntry();
+		reload(i);
+		return 1;
+	}
+	long onRemove(FXObject*, FXSelector, void*) { int i = current(); if (i >= 0) { entries.erase(entries.begin() + i); reload(i); } return 1; }
+	long onUpdNeedsSel(FXObject* sender, FXSelector, void*) {
+		sender->handle(this, FXSEL(SEL_COMMAND, current() >= 0 ? ID_ENABLE : ID_DISABLE), NULL);
+		return 1;
+	}
+
+	// Explorer gibt es hier nicht -- die Dateien des Skriptordners als Liste.
+	long onShowFiles(FXObject*, FXSelector, void*) {
+		std::string out;
+		runAsRootCaptured({ FXString("ls"), FXString("-1"), FXString(eventDir().c_str()) }, out);
+		FXDialogBox dlg(this, FXString(ev->section), DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE | DECOR_RESIZE, 0,0,420,300, 8,8,8,8);
+		FXVerticalFrame* v = new FXVerticalFrame(&dlg, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		std::string realmLower = lowerCopy(std::string(domain.realm.text()));
+		new FXLabel(v, ("\\\\" + realmLower + "\\SysVol\\" + realmLower + "\\Policies\\" + guid + "\\" +
+		                (ev->machine ? "Machine" : "User") + "\\Scripts\\" + ev->section).c_str(), NULL, JUSTIFY_LEFT);
+		FXPacker* lf = new FXPacker(v, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		FXIconList* files = new FXIconList(lf, NULL, 0, ICONLIST_DETAILED | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		files->appendHeader("Name", NULL, 380);
+		FXIcon* ic = sharedPngIcon(resico_key);
+		for (auto& l : splitLines(out)) if (!trimStr(l).empty() && l.find("No such file") == std::string::npos) files->appendItem(l.c_str(), ic, ic);
+		new FXButton(v, "Schließen", NULL, &dlg, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_RIGHT, 0,0,0,0, 12,12,3,3);
+		dlg.execute(PLACEMENT_OWNER);
+		return 1;
+	}
+
+	bool apply() {
+		if (!dirty()) return true;
+		std::string path = scriptsDir(domain, guid, ev->machine) + "/scripts.ini";
+		ensureScriptsFolders(domain, guid, ev->machine, ev->section);
+		auto sections = loadScriptsIniAsRoot(path);
+		sections[ev->section] = entries;
+		bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(path.c_str()) }) == 0;
+		FXString errorMsg;
+		if (!writeScriptsIni(path, sections, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return false; }
+		if (!existed) inheritSysvolPermissions(scriptsDir(domain, guid, ev->machine), path, false);
+		std::string gpoDn = "CN=" + guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
+		std::string log;
+		if (!ensureExtensionRegistered(this, domain.realm, gpoDn, ev->machine, GPSCR_CSE_GUID,
+		                               ev->machine ? GPSCR_TOOL_GUID_MACHINE : GPSCR_TOOL_GUID_USER, log, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			return false;
+		}
+		origEntries = entries;
+		return true;
+	}
+	long onUpdApply(FXObject* sender, FXSelector, void*) { sender->handle(this, FXSEL(SEL_COMMAND, dirty() ? ID_ENABLE : ID_DISABLE), NULL); return 1; }
+	long onApply(FXObject*, FXSelector, void*) { apply(); return 1; }
+	long onOk(FXObject*, FXSelector, void*) { if (!apply()) return 1; return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL); }
+	virtual ~ScriptEventDialog() {}
+};
+FXDEFMAP(ScriptEventDialog) ScriptEventDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_UP, ScriptEventDialog::onUp),
+	FXMAPFUNC(SEL_UPDATE, ScriptEventDialog::ID_UP, ScriptEventDialog::onUpdNeedsSel),
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_DOWN, ScriptEventDialog::onDown),
+	FXMAPFUNC(SEL_UPDATE, ScriptEventDialog::ID_DOWN, ScriptEventDialog::onUpdNeedsSel),
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_ADD, ScriptEventDialog::onAdd),
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_EDIT, ScriptEventDialog::onEdit),
+	FXMAPFUNC(SEL_UPDATE, ScriptEventDialog::ID_EDIT, ScriptEventDialog::onUpdNeedsSel),
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_REMOVE, ScriptEventDialog::onRemove),
+	FXMAPFUNC(SEL_UPDATE, ScriptEventDialog::ID_REMOVE, ScriptEventDialog::onUpdNeedsSel),
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_SHOW_FILES, ScriptEventDialog::onShowFiles),
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_OK, ScriptEventDialog::onOk),
+	FXMAPFUNC(SEL_COMMAND, ScriptEventDialog::ID_APPLY, ScriptEventDialog::onApply),
+	FXMAPFUNC(SEL_UPDATE, ScriptEventDialog::ID_APPLY, ScriptEventDialog::onUpdApply),
+};
+FXIMPLEMENT(ScriptEventDialog, FXDialogBox, ScriptEventDialogMap, ARRAYNUMBER(ScriptEventDialogMap))
+
+// ---------------------------------------------------------------------
 // Fenster "Gruppenrichtlinie" -- Nachbau des Gruppenrichtlinienobjekt-
 // Editors: links der Baum mit Computer- und Benutzerkonfiguration,
 // rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
@@ -6871,9 +6963,8 @@ public:
 			}
 			case GN_SCRIPTS: {
 				setHeaders({ { "Name", 320 } });
-				FXIcon* ic = sharedPngIcon(resico_folder);
-				if (node.machine) { list->appendItem("Starten", ic, ic); list->appendItem("Herunterfahren", ic, ic); }
-				else { list->appendItem("Anmelden", ic, ic); list->appendItem("Abmelden", ic, ic); }
+				FXIcon* ic = sharedPngIcon(resico_key);
+				for (auto& e : SCRIPT_EVENTS) if (e.machine == node.machine) list->appendItem(e.label, ic, ic);
 				break;
 			}
 			case GN_FOLDERREDIR:
@@ -7036,8 +7127,12 @@ public:
 				editObjectPolicy(idx);
 				break;
 			case GN_SCRIPTS: {
-				ScriptsDialog dlg(this, domain, guid.c_str());
-				dlg.execute(PLACEMENT_OWNER);
+				if (!requireRoot()) break;
+				int k = 0;
+				for (auto& e : SCRIPT_EVENTS) {
+					if (e.machine != node.machine) continue;
+					if (k++ == idx) { ScriptEventDialog dlg(this, domain, guid, gpoName.text(), e); dlg.execute(PLACEMENT_OWNER); }
+				}
 				break;
 			}
 			case GN_FOLDERREDIR:
