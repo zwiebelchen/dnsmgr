@@ -119,8 +119,14 @@ nicht im Repository):
   Gruppen (107) samt Platzhaltern, Spalten "Start"/"Überwachen".
   Dialog 197 bestätigt die Zuordnung der Vererbungsmodi (0 übermitteln,
   2 ersetzen, 1 Ersetzen nicht zulassen). Die übrigen
-  Sicherheitsoptionen und Benutzerrechte stehen nicht in der DLL (Windows
-  liest sie aus `sceregvl.inf` bzw. von der LSA) und bleiben unverändert.
+  Sicherheitsoptionen und Benutzerrechte stehen nicht in der DLL.
+- Sicherheitsoptionen unter `[Registry Values]`: wortgleich aus dem
+  Registrierungsschlüssel `HKLM\SOFTWARE\Microsoft\Windows
+  NT\CurrentVersion\SeCEdit\Reg Values` eines deutschen Windows 2000 SP4
+  (dort statt in `sceregvl.inf`, die es erst ab XP gibt): Anzeigename,
+  Anzeigetyp, Werttyp, Einheit und Auswahllisten, 36 Einträge.
+- `msprivs.dll`: Namen aller Rechte (Se...Privilege), in der Reihenfolge
+  der LSA-Rechtetabelle.
 - `aclui.dll`: Aufbau des Berechtigungsdialogs (103) mit "Erweitert"-
   Hinweis, Meldungen beim Entfernen geerbter Konten (Text 20) und bei
   Verweigerungen (31), Rückfrage "Kopieren/Entfernen/Abbrechen" beim
