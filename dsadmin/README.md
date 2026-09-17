@@ -212,11 +212,19 @@ Doppelklick bearbeitet.
   `{827D319E-6EAC-11D2-A4EA-00C04F79F83A}` im GPO registriert und die
   Version erhöht.
 
-  Kontorichtlinien wirken in AD nur aus GPOs, die mit der Domäne selbst
-  verknüpft sind; ein Windows-DC übernimmt sie dann ins Domänenobjekt.
-  Samba tut das nicht, deshalb gehen die definierten Kennwort- und
-  Sperrwerte eines mit der Domäne verknüpften GPOs zusätzlich an
-  `samba-tool domain passwordsettings`.
+  Kontorichtlinien (Kennwort, Kontosperrung) wirken für Domänenkonten
+  nur aus GPOs, die mit der Domäne selbst verknüpft sind; ein Windows-DC
+  übernimmt sie dann ins Domänenobjekt. In einem GPO an einer
+  Organisationseinheit gelten sie nur für die lokalen Konten der Computer
+  dort -- das Gruppenrichtlinienfenster weist in der Statuszeile darauf
+  hin. Samba übernimmt die Werte nicht selbst; dsadmin berechnet deshalb
+  die wirksame Richtlinie aus allen aktiven Verknüpfungen an der
+  Domänenwurzel (niedrige vor hoher Priorität, spätere Definitionen
+  gewinnen, GPOs mit deaktivierter Computerkonfiguration zählen nicht)
+  und setzt sie per `samba-tool domain passwordsettings` -- nach jeder
+  Änderung einer solchen Richtlinie, nach Verknüpfen, Entfernen,
+  Umsortieren oder Deaktivieren an der Domäne und nach "Konfigurations-
+  einstellungen des Computers deaktivieren".
 - **Systemdienste** (`[Service General Setting]`, Zeilen
   `"Name",Starttyp,"SDDL"` mit 2 = Automatisch, 3 = Manuell,
   4 = Deaktiviert): dieselbe Dienstliste wie im Programm "Dienste"
