@@ -18,6 +18,7 @@
 #include "regpol.h"
 #include "aas.h"
 #include "../common/svc/svcpanel.h"
+#include "countries_w2k.h"
 #include <algorithm>
 #include <map>
 #include <tuple>
@@ -1944,12 +1945,6 @@ public:
 FXIMPLEMENT(NewOUDialog, FXDialogBox, NULL, 0)
 
 
-static bool setUserEnabled(const FXString& username, bool enabled, FXString& errorMsg) {
-	std::string out;
-	int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString(enabled ? "enable" : "disable"), username }, out);
-	if (rc != 0) { errorMsg = condenseSambaToolError(out).c_str(); return false; }
-	return true;
-}
 
 static bool setUserPassword(const FXString& username, const FXString& password, FXString& errorMsg) {
 	std::string input = std::string(password.text()) + "\n" + password.text() + "\n";
@@ -2754,8 +2749,19 @@ private:
 	std::vector<AttrField> attrFields;
 
 	// Konto
-	FXCheckButton* disabledCheck = nullptr;
-	bool origDisabled = false;
+	// Konto (dsprop.dll, Dialog 136)
+	FXTextField* upnName = nullptr;
+	FXListBox* upnSuffix = nullptr;
+	std::string origUpn;
+	uint32_t origUac = 0;
+	struct UacOption { FXCheckButton* check; uint32_t bit; };
+	std::vector<UacOption> uacOptions;
+	FXCheckButton* mustChangeCheck = nullptr, *lockedCheck = nullptr;
+	bool origMustChange = false, origLocked = false;
+	FXint expiresNever = 1;
+	FXDataTarget* expiresTarget = nullptr;
+	FXTextField* expiresDate = nullptr;
+	std::string origExpiresText; // "" = nie, sonst TT.MM.JJJJ
 
 	// Mitglied von
 	FXIconList* memberList = nullptr;
@@ -2777,9 +2783,7 @@ public:
 		std::string raw;
 		runAsRootCaptured({ FXString("samba-tool"), FXString("user"), FXString("show"), accountName }, raw);
 		auto rec = parseLdifRecord(raw);
-		long uac = 0;
-		try { uac = std::stol(ldifFirst(rec, "userAccountControl")); } catch (...) {}
-		origDisabled = (uac & 0x2) != 0; // UF_ACCOUNTDISABLE
+		try { origUac = (uint32_t)std::stoul(ldifFirst(rec, "userAccountControl")); } catch (...) {}
 
 		FXString errorMsg;
 		allGroups = listAllGroupsDetailed();
@@ -2811,12 +2815,25 @@ public:
 	FXTextField* addAttrRow(FXComposite* parent, const char* label, const char* attr,
 	                        const std::multimap<std::string, std::string>& rec) {
 		FXHorizontalFrame* row = new FXHorizontalFrame(parent, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,96,0);
+		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
 		FXTextField* tf = new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
 		FXString v = ldifFirst(rec, attr).c_str();
 		tf->setText(v);
 		attrFields.push_back({ attr, tf, v });
 		return tf;
+	}
+
+	// Zeile mit "Andere..."-Knopf (weitere Rufnummern/Webseiten -- im
+	// Original otherTelephone/url; hier noch ohne Funktion).
+	void addOtherRow(FXComposite* parent, const char* label, const char* attr, const char* other,
+	                 const std::multimap<std::string, std::string>& rec) {
+		FXHorizontalFrame* row = new FXHorizontalFrame(parent, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
+		FXTextField* tf = new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		(new FXButton(row, other, NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,2,2))->disable();
+		FXString v = ldifFirst(rec, attr).c_str();
+		tf->setText(v);
+		attrFields.push_back({ attr, tf, v });
 	}
 
 	void buildGeneralTab(FXTabBook* tabs, const DirObject& obj, const std::multimap<std::string, std::string>& rec) {
@@ -2830,7 +2847,7 @@ public:
 
 		// Vorname und Initialen stehen im Original in einer Zeile.
 		FXHorizontalFrame* row = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-		new FXLabel(row, "&Vorname:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,96,0);
+		new FXLabel(row, "&Vorname:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
 		FXTextField* given = new FXTextField(row, 14, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
 		FXString gv = ldifFirst(rec, "givenName").c_str();
 		given->setText(gv);
@@ -2842,39 +2859,139 @@ public:
 		initials->setText(iv);
 		attrFields.push_back({ "initials", initials, iv });
 
+		// Beschriftungen und Reihenfolge wie dsprop.dll, Dialog 131.
 		addAttrRow(page, "&Nachname:", "sn", rec);
-		addAttrRow(page, "Anzei&gename:", "displayName", rec);
-		addAttrRow(page, "&Beschreibung:", "description", rec);
-		addAttrRow(page, "Bü&ro:", "physicalDeliveryOfficeName", rec);
+		addAttrRow(page, "&Anzeigename:", "displayName", rec);
+		addAttrRow(page, "Be&schreibung:", "description", rec);
+		addAttrRow(page, "Bür&o:", "physicalDeliveryOfficeName", rec);
 		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-		addAttrRow(page, "&Rufnummer:", "telephoneNumber", rec);
-		addAttrRow(page, "&E-Mail:", "mail", rec);
-		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-		addAttrRow(page, "&Webseite:", "wWWHomePage", rec);
+		addOtherRow(page, "&Rufnummer:", "telephoneNumber", "An&dere...", rec);
+		addAttrRow(page, "E-&Mail:", "mail", rec);
+		addOtherRow(page, "&Webseite:", "wWWHomePage", "And&ere...", rec);
 	}
 
 	// ---- Konto -------------------------------------------------------
-	void buildAccountTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
-		new FXTabItem(tabs, "Konto", NULL);
-		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,5);
+	// FILETIME (100ns seit 1601, UTC) <-> Datum. Wie im Original laeuft ein
+	// Konto "Am: TT.MM.JJJJ" zu Beginn des Folgetags (Ortszeit) ab.
+	static std::string filetimeToDate(const std::string& ft) {
+		long long v = 0;
+		try { v = std::stoll(ft); } catch (...) { return ""; }
+		if (v == 0 || v == 0x7FFFFFFFFFFFFFFFLL) return "";
+		time_t t = (time_t)(v / 10000000LL - 11644473600LL) - 1; // letzte Sekunde des Ablauftags
+		struct tm lt; localtime_r(&t, &lt);
+		char buf[16]; strftime(buf, sizeof(buf), "%d.%m.%Y", &lt);
+		return buf;
+	}
+	static bool dateToFiletime(const std::string& date, std::string& out) {
+		int dd, mm, yy;
+		if (sscanf(date.c_str(), "%d.%d.%d", &dd, &mm, &yy) != 3 || yy < 1970 || mm < 1 || mm > 12 || dd < 1 || dd > 31) return false;
+		struct tm lt = {};
+		lt.tm_mday = dd + 1; lt.tm_mon = mm - 1; lt.tm_year = yy - 1900; lt.tm_isdst = -1;
+		time_t t = mktime(&lt);
+		if (t == (time_t)-1) return false;
+		out = std::to_string(((long long)t + 11644473600LL) * 10000000LL);
+		return true;
+	}
 
-		FXString upn = ldifFirst(rec, "userPrincipalName").c_str();
+	void buildAccountTab(FXTabBook* tabs, const std::multimap<std::string, std::string>& rec) {
+		// Aufbau und Texte wie dsprop.dll, Dialog 136 (Texte 182, 197, 312,
+		// 1028-1030, 1039, 1040, 2008).
+		new FXTabItem(tabs, "Konto", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,4);
 		FXString lowerRealm = domain.realm; lowerRealm.lower();
-		if (upn.empty()) upn = accountName + "@" + lowerRealm;
-		new FXLabel(page, "Benutzeranmeldename:");
-		FXTextField* upnField = new FXTextField(page, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
-		upnField->setText(upn);
+
+		origUpn = ldifFirst(rec, "userPrincipalName");
+		std::string upnUser = origUpn, upnDomain = std::string("@") + lowerRealm.text();
+		size_t at = origUpn.rfind('@');
+		if (at != std::string::npos) { upnUser = origUpn.substr(0, at); upnDomain = origUpn.substr(at); }
+		new FXLabel(page, "Ben&utzeranmeldename:", NULL, JUSTIFY_LEFT);
+		FXHorizontalFrame* upnRow = new FXHorizontalFrame(page, LAYOUT_FILL_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,0,0, 6,0);
+		upnName = new FXTextField(upnRow, 18, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		upnName->setText(upnUser.c_str());
+		upnSuffix = new FXListBox(upnRow, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		upnSuffix->appendItem(("@" + std::string(lowerRealm.text())).c_str());
+		if (lowerCopy(upnDomain) != lowerCopy("@" + std::string(lowerRealm.text()))) upnSuffix->appendItem(upnDomain.c_str());
+		upnSuffix->setNumVisible(upnSuffix->getNumItems());
+		upnSuffix->setCurrentItem(upnSuffix->getNumItems() - 1);
 
 		std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
 		FXString netbios = smbConfValue(conf, "workgroup");
 		netbios.upper();
-		new FXLabel(page, "Benutzeranmeldename (Prä-Windows 2000):");
-		FXTextField* samField = new FXTextField(page, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
-		samField->setText(netbios + "\\" + accountName);
+		new FXLabel(page, "B&enutzeranmeldename (Windows NT 3.5x/4.0):", NULL, JUSTIFY_LEFT);
+		FXHorizontalFrame* ntRow = new FXHorizontalFrame(page, LAYOUT_FILL_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,0,0, 6,0);
+		FXTextField* nb = new FXTextField(ntRow, 18, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
+		nb->setText(netbios + "\\");
+		FXTextField* samField = new FXTextField(ntRow, 18, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
+		samField->setText(accountName);
 
-		FXGroupBox* opts = new FXGroupBox(page, "Kontooptionen", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8);
-		disabledCheck = new FXCheckButton(opts, "Konto ist &deaktiviert");
-		disabledCheck->setCheck(origDisabled);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2, 6,0);
+		(new FXButton(btns, "Anmelde&zeiten...", NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3))->disable();
+		(new FXButton(btns, "An&melden...", NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3))->disable();
+
+		// Gesperrt ist ein Konto, solange lockoutTime gesetzt ist; nur das
+		// Aufheben ist moeglich.
+		long long lockout = 0;
+		try { lockout = std::stoll(ldifFirst(rec, "lockoutTime")); } catch (...) {}
+		origLocked = lockout != 0;
+		lockedCheck = new FXCheckButton(page, "&Konto ist gesperrt");
+		lockedCheck->setCheck(origLocked);
+		if (!origLocked) lockedCheck->disable();
+
+		new FXLabel(page, "Konto&optionen:", NULL, JUSTIFY_LEFT);
+		FXPacker* lf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,110, 0,0,0,0);
+		FXScrollWindow* sw = new FXScrollWindow(lf, LAYOUT_FILL_X | LAYOUT_FILL_Y | HSCROLLING_OFF);
+		FXVerticalFrame* optFrame = new FXVerticalFrame(sw, LAYOUT_FILL_X, 0,0,0,0, 4,4,2,2, 0,0);
+		optFrame->setBackColor(getApp()->getBackColor());
+		origMustChange = ldifFirst(rec, "pwdLastSet") == "0";
+		mustChangeCheck = new FXCheckButton(optFrame, "Benutzer muss Kennwort bei nächster Anmeldung ändern");
+		mustChangeCheck->setCheck(origMustChange);
+		// "Kann das Kennwort nicht ändern" ist in AD eine Berechtigung (ACE),
+		// kein userAccountControl-Bit -- noch nicht umgesetzt.
+		(new FXCheckButton(optFrame, "Benutzer kann das Kennwort nicht ändern"))->disable();
+		const std::pair<const char*, uint32_t> opts[] = {
+			{ "Kennwort läuft nie ab", 0x10000 },
+			{ "Kennwort mit reversibler Verschlüsselung speichern", 0x80 },
+			{ "Konto ist deaktiviert", 0x2 },
+			{ "Benutzer muss sich mit einer Smartcard anmelden", 0x40000 },
+			{ "Konto wird für Delegierungszwecke vertraut", 0x80000 },
+			{ "Konto kann nicht delegiert werden", 0x100000 },
+			{ "DES-Verschlüsselungstypen für dieses Konto verwenden", 0x200000 },
+		};
+		for (auto& o : opts) {
+			FXCheckButton* cb = new FXCheckButton(optFrame, o.first);
+			cb->setCheck((origUac & o.second) != 0);
+			uacOptions.push_back({ cb, o.second });
+		}
+
+		FXGroupBox* exp = new FXGroupBox(page, "Ablaufdatum des Kontos", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,4,6, 0,2);
+		origExpiresText = filetimeToDate(ldifFirst(rec, "accountExpires"));
+		expiresNever = origExpiresText.empty() ? 1 : 0;
+		expiresTarget = new FXDataTarget(expiresNever);
+		new FXRadioButton(exp, "&Nie", expiresTarget, FXDataTarget::ID_OPTION + 1);
+		FXHorizontalFrame* amRow = new FXHorizontalFrame(exp, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXRadioButton(amRow, "&Am:", expiresTarget, FXDataTarget::ID_OPTION + 0, RADIOBUTTON_NORMAL | LAYOUT_CENTER_Y);
+		expiresDate = new FXTextField(amRow, 12, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		if (!origExpiresText.empty()) expiresDate->setText(origExpiresText.c_str());
+		else {
+			time_t now = time(NULL) + 30 * 86400;
+			struct tm lt; localtime_r(&now, &lt);
+			char buf[16]; strftime(buf, sizeof(buf), "%d.%m.%Y", &lt);
+			expiresDate->setText(buf);
+		}
+	}
+
+	uint32_t wantedUac() const {
+		uint32_t u = origUac;
+		for (auto& o : uacOptions) { if (o.check->getCheck()) u |= o.bit; else u &= ~o.bit; }
+		return u;
+	}
+	std::string wantedUpn() const {
+		std::string name = trimStr(upnName->getText().text());
+		if (name.empty()) return "";
+		return name + upnSuffix->getItemText(upnSuffix->getCurrentItem()).text();
+	}
+	std::string wantedExpiresText() const {
+		return expiresNever ? std::string() : trimStr(expiresDate->getText().text());
 	}
 
 	// ---- Mitglied von ------------------------------------------------
@@ -3000,7 +3117,9 @@ public:
 	// ---- Uebernehmen -------------------------------------------------
 	bool isDirty() const {
 		for (auto& f : attrFields) if (f.field->getText() != f.orig) return true;
-		if (disabledCheck->getCheck() != origDisabled) return true;
+		if (wantedUac() != origUac || wantedUpn() != origUpn) return true;
+		if ((bool)mustChangeCheck->getCheck() != origMustChange || (bool)lockedCheck->getCheck() != origLocked) return true;
+		if (wantedExpiresText() != origExpiresText) return true;
 		if (!sameDn(primaryDn, origPrimaryDn)) return true;
 		if (memberDns.size() != origMemberDns.size()) return true;
 		for (auto& dn : memberDns) if (!containsDn(origMemberDns, dn)) return true;
@@ -3039,13 +3158,43 @@ public:
 			for (auto& f : attrFields) { FXString v = f.field->getText(); v.trim(); f.field->setText(v); f.orig = v; }
 		}
 
-		// Konto
-		if (disabledCheck->getCheck() != origDisabled) {
-			if (!setUserEnabled(accountName, !disabledCheck->getCheck(), errorMsg)) {
+		// Konto -- Rueckfragen wie dsprop.dll (Text 1031)
+		if (mustChangeCheck->getCheck() && (wantedUac() & 0x10000)) {
+			FXMessageBox::information(this, MBOX_OK, "Active Directory",
+				"Sie haben die Option \"Kennwort läuft nie ab\" ausgewählt. Der Benutzer muss daher sein\n"
+				"Kennwort bei der nächsten Anmeldung nicht ändern.");
+			mustChangeCheck->setCheck(FALSE);
+		}
+		std::string acct;
+		if (wantedUac() != origUac) acct += "replace: userAccountControl\nuserAccountControl: " + std::to_string(wantedUac()) + "\n-\n";
+		if (wantedUpn() != origUpn) {
+			acct += "replace: userPrincipalName\n";
+			if (!wantedUpn().empty()) acct += ldifAttrLine("userPrincipalName", wantedUpn());
+			acct += "-\n";
+		}
+		if ((bool)mustChangeCheck->getCheck() != origMustChange)
+			acct += std::string("replace: pwdLastSet\npwdLastSet: ") + (mustChangeCheck->getCheck() ? "0" : "-1") + "\n-\n";
+		if (origLocked && !lockedCheck->getCheck()) acct += "replace: lockoutTime\nlockoutTime: 0\n-\n";
+		if (wantedExpiresText() != origExpiresText) {
+			std::string ft = "0";
+			if (!wantedExpiresText().empty() && !dateToFiletime(wantedExpiresText(), ft)) {
+				FXMessageBox::error(this, MBOX_OK, "Active Directory", "Bitte ein gültiges Ablaufdatum im Format TT.MM.JJJJ angeben.");
+				return false;
+			}
+			acct += "replace: accountExpires\naccountExpires: " + ft + "\n-\n";
+		}
+		if (!acct.empty()) {
+			std::string log;
+			if (!runLdapChange(this, domain.realm, "dn: " + std::string(userFullDN.text()) + "\nchangetype: modify\n" + acct, false, log, errorMsg)) {
 				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 				return false;
 			}
-			origDisabled = disabledCheck->getCheck();
+			origUac = wantedUac();
+			origUpn = wantedUpn();
+			origMustChange = mustChangeCheck->getCheck();
+			origLocked = lockedCheck->getCheck();
+			if (!origLocked) lockedCheck->disable();
+			origExpiresText = wantedExpiresText();
 		}
 
 		// Mitglied von -- Reihenfolge ist wichtig: erst hinzufuegen (eine
@@ -3115,7 +3264,7 @@ public:
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
 
-	virtual ~UserPropertiesDialog() {}
+	virtual ~UserPropertiesDialog() { delete expiresTarget; }
 };
 FXDEFMAP(UserPropertiesDialog) UserPropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MEMBER_ADD, UserPropertiesDialog::onMemberAdd),
@@ -4200,69 +4349,21 @@ static std::string gpoBranchDir(const DomainInfo& domain, const std::string& gui
 }
 
 // ---------------------------------------------------------------------
-// Laenderliste fuer "Land/Region" -- aus dem Debian-Paket iso-codes
-// (JSON), deutsche Namen direkt aus dessen .mo-Datei, unabhaengig von
-// der eingestellten Sprache des Prozesses.
+// Laenderliste fuer "Land/Region" -- aus dsprop.dll (siehe
+// countries_w2k.h), Reihenfolge und Schreibweise wie im Original.
 // ---------------------------------------------------------------------
 struct CountryEntry { std::string alpha2, name; int numeric = 0; };
 
-static std::map<std::string, std::string> readMoCatalog(const char* path) {
-	std::map<std::string, std::string> out;
-	std::string data = readFileUnprivileged(path);
-	if (data.size() < 28) return out;
-	auto u32 = [&](size_t off) -> uint32_t {
-		if (off + 4 > data.size()) return 0;
-		return (uint8_t)data[off] | ((uint8_t)data[off + 1] << 8) | ((uint8_t)data[off + 2] << 16) | ((uint32_t)(uint8_t)data[off + 3] << 24);
-	};
-	if (u32(0) != 0x950412de) return out; // nur Little-Endian-Kataloge
-	uint32_t n = u32(8), origTab = u32(12), transTab = u32(16);
-	for (uint32_t i = 0; i < n; i++) {
-		uint32_t ol = u32(origTab + i * 8), oo = u32(origTab + i * 8 + 4);
-		uint32_t tl = u32(transTab + i * 8), to = u32(transTab + i * 8 + 4);
-		if ((size_t)oo + ol > data.size() || (size_t)to + tl > data.size()) continue;
-		out[data.substr(oo, ol)] = data.substr(to, tl);
-	}
-	return out;
-}
-
 static const std::vector<CountryEntry>& countryList() {
 	static std::vector<CountryEntry> list;
-	static bool loaded = false;
-	if (loaded) return list;
-	loaded = true;
-	std::string json = readFileUnprivileged("/usr/share/iso-codes/json/iso_3166-1.json");
-	auto de = readMoCatalog("/usr/share/locale/de/LC_MESSAGES/iso_3166-1.mo");
-	auto field = [](const std::string& obj, const char* key) -> std::string {
-		std::string needle = std::string("\"") + key + "\"";
-		size_t p = obj.find(needle);
-		if (p == std::string::npos) return "";
-		p = obj.find('"', obj.find(':', p) + 1);
-		if (p == std::string::npos) return "";
-		std::string v;
-		for (size_t i = p + 1; i < obj.size() && obj[i] != '"'; i++) {
-			if (obj[i] == '\\' && i + 1 < obj.size()) i++;
-			v += obj[i];
-		}
-		return v;
-	};
-	size_t pos = 0;
-	while ((pos = json.find('{', pos + 1)) != std::string::npos) {
-		size_t end = json.find('}', pos);
-		if (end == std::string::npos) break;
-		std::string obj = json.substr(pos, end - pos);
-		CountryEntry c;
-		c.alpha2 = field(obj, "alpha_2");
-		c.name = field(obj, "name");
-		try { c.numeric = std::stoi(field(obj, "numeric")); } catch (...) {}
-		if (c.alpha2.empty() || c.name.empty()) continue;
-		auto t = de.find(c.name);
-		if (t != de.end() && !t->second.empty()) c.name = t->second;
-		list.push_back(c);
-		pos = end;
+	if (!list.empty()) return list;
+	for (auto& c : W2K_COUNTRIES) {
+		CountryEntry e;
+		e.alpha2 = c.alpha2;
+		e.name = c.name;
+		e.numeric = c.numeric;
+		list.push_back(e);
 	}
-	std::sort(list.begin(), list.end(), [](const CountryEntry& a, const CountryEntry& b) {
-		return germanLess(a.name, b.name);
-	});
 	return list;
 }
 
@@ -7342,16 +7443,17 @@ public:
 		mgrName = propLabeledField(this, "&Name:");
 		mgrName->setEditable(FALSE);
 		FXHorizontalFrame* btns = new FXHorizontalFrame(this, LAYOUT_FILL_X, 0,0,0,0, 140,0,0,4);
-		new FXButton(btns, "Ä&ndern...", NULL, this, ID_MGR_CHANGE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		new FXButton(btns, "&Eigenschaften", NULL, this, ID_MGR_PROPS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		new FXButton(btns, "&Löschen", NULL, this, ID_MGR_CLEAR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
-		mgrOffice = propLabeledField(this, "Büro:");
-		mgrStreet = propLabeledText(this, "Straße:");
-		mgrCity = propLabeledField(this, "Stadt:");
-		mgrState = propLabeledField(this, "Bundesland/Kanton:");
-		mgrCountry = propLabeledField(this, "Land/Region:");
-		mgrPhone = propLabeledField(this, "Rufnummer:");
-		mgrFax = propLabeledField(this, "Faxnummer:");
+		new FXButton(btns, "Än&dern...", NULL, this, ID_MGR_CHANGE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Anzeigen", NULL, this, ID_MGR_PROPS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "Lös&chen", NULL, this, ID_MGR_CLEAR, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		mgrOffice = propLabeledField(this, "Bür&o:");
+		mgrStreet = propLabeledText(this, "S&traße:");
+		mgrCity = propLabeledField(this, "&Stadt:");
+		mgrState = propLabeledField(this, "B&undesland/Kanton:");
+		mgrCountry = propLabeledField(this, "&Land/Region:");
+		new FXHorizontalSeparator(this, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		mgrPhone = propLabeledField(this, "&Rufnummer:");
+		mgrFax = propLabeledField(this, "&Faxnummer:");
 		for (FXTextField* f : { mgrOffice, mgrCity, mgrState, mgrCountry, mgrPhone, mgrFax }) f->setEditable(FALSE);
 		mgrStreet->setEditable(FALSE);
 		showManager();
@@ -7644,27 +7746,27 @@ public:
 		new FXLabel(head, cn, NULL, LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
-		// Wie im Original steht der Prä-Windows-2000-Name ueber seinem Feld.
-		new FXLabel(page, "Gruppenname (&Prä-Windows 2000):", NULL, JUSTIFY_LEFT);
-		samField = new FXTextField(page, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		samField = propLabeledField(page, "G&ruppenname (Windows NT 3.5x/4.0):", 230);
 		samField->setText(origSam.c_str());
-		descField = propLabeledField(page, "&Beschreibung:", 110);
+		descField = propLabeledField(page, "B&eschreibung:", 110);
 		descField->setText(origDesc.c_str());
-		mailField = propLabeledField(page, "&E-Mail:", 110);
+		mailField = propLabeledField(page, "E-&Mail:", 110);
 		mailField->setText(origMail.c_str());
 
 		FXHorizontalFrame* boxes = new FXHorizontalFrame(page, LAYOUT_FILL_X | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,4,4, 10,0);
 		FXGroupBox* scopeBox = new FXGroupBox(boxes, "Gruppenbereich", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8);
-		FXRadioButton* r1 = new FXRadioButton(scopeBox, "Lokal (in &Domäne)", &scopeTarget, FXDataTarget::ID_OPTION + 4);
+		FXRadioButton* r1 = new FXRadioButton(scopeBox, "&Lokale Domäne", &scopeTarget, FXDataTarget::ID_OPTION + 4);
 		FXRadioButton* r2 = new FXRadioButton(scopeBox, "&Global", &scopeTarget, FXDataTarget::ID_OPTION + 2);
 		FXRadioButton* r3 = new FXRadioButton(scopeBox, "&Universal", &scopeTarget, FXDataTarget::ID_OPTION + 8);
 		FXGroupBox* typeBox = new FXGroupBox(boxes, "Gruppentyp", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 8,8,6,8);
 		FXRadioButton* t1 = new FXRadioButton(typeBox, "&Sicherheit", &typeTarget, FXDataTarget::ID_OPTION + 1);
-		FXRadioButton* t2 = new FXRadioButton(typeBox, "&Verteilung", &typeTarget, FXDataTarget::ID_OPTION + 0);
+		FXRadioButton* t2 = new FXRadioButton(typeBox, "&Verteiler", &typeTarget, FXDataTarget::ID_OPTION + 0);
 		// Vordefinierte Gruppen (Builtin) haben einen festen Bereich und Typ.
 		if (builtin) for (FXWindow* w : { (FXWindow*)r1, (FXWindow*)r2, (FXWindow*)r3, (FXWindow*)t1, (FXWindow*)t2 }) w->disable();
 
-		infoText = propLabeledText(page, "&Anmerkungen:", 90, 110);
+		new FXLabel(page, "A&nmerkung:", NULL, JUSTIFY_LEFT);
+		FXPacker* nf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0,70, 0,0,0,0);
+		infoText = new FXText(nf, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		infoText->setText(origInfo.c_str());
 	}
 
@@ -7878,7 +7980,7 @@ public:
 		new FXLabel(head, displayName, NULL, LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
-		descField = labeledField(page, "&Beschreibung:");
+		descField = labeledField(page, "B&eschreibung:");
 		descField->setText(origDesc.c_str());
 
 		if (isDomainRoot) {
@@ -7896,13 +7998,13 @@ public:
 			return;
 		}
 
-		streetText = labeledText(page, "&Straße:");
+		streetText = labeledText(page, "S&traße:");
 		streetText->setText(crlfToLf(origStreet).c_str());
-		cityField = labeledField(page, "S&tadt:");
+		cityField = labeledField(page, "&Stadt:");
 		cityField->setText(origCity.c_str());
 		stateField = labeledField(page, "B&undesland/Kanton:");
 		stateField->setText(origState.c_str());
-		zipField = labeledField(page, "&PLZ:");
+		zipField = labeledField(page, "PL&Z:");
 		zipField->setText(origZip.c_str());
 
 		FXHorizontalFrame* row = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
