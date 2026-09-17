@@ -6739,7 +6739,7 @@ public:
 		new FXTabItem(tabs, "Links", NULL);
 		FXVerticalFrame* lpage = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
 		FXHorizontalFrame* lhead = new FXHorizontalFrame(lpage, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
-		new FXLabel(lhead, "", sharedPngIcon(resico_dsa_find), LAYOUT_TOP);
+		new FXLabel(lhead, "", sharedPngIcon(resico_dsadmin_find), LAYOUT_TOP);
 		new FXLabel(lhead, "Klicken Sie auf \"Suchen\", um nach Sites, Domänen und Organisationseinheiten\n"
 		                   "zu suchen, die dieses Gruppenrichtlinienobjekt verwenden. Dieser Vorgang\n"
 		                   "kann mehrere Minuten dauern.", NULL, JUSTIFY_LEFT);
@@ -8525,7 +8525,8 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	new FXMenuCommand(hilfemenu, "&Info...", NULL, this, ID_ABOUT);
 
 	// Werkzeugleiste wie im Original: MMC-Standardknoepfe, dann die des
-	// Snap-Ins. Die Snap-In-Symbole (res/dsa) sind vorlaeufig.
+	// Snap-Ins (Symbole und Kurzinfos aus dsadmin.dll, Bitmap 242 bzw.
+	// Texte 740-751).
 	toolbar = new FXToolBar(main, LAYOUT_SIDE_TOP | LAYOUT_FILL_X | FRAME_RAISED);
 	auto tbButton = [&](const char* tip, FXIcon* icon, FXSelector sel) {
 		new FXButton(toolbar, tip, icon, this, sel, BUTTON_TOOLBAR|FRAME_RAISED|LAYOUT_CENTER_Y,0,0,0,0,2,2,2,2);
@@ -8545,11 +8546,11 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	tbSeparator();
 	tbButton("\tHilfe", gif(resico_mmc_help), ID_ABOUT);
 	tbSeparator();
-	tbButton("\tNeuen Benutzer im aktuellen Container erstellen", png(resico_dsa_newuser), ID_NEW_USER);
-	tbButton("\tNeue Gruppe im aktuellen Container erstellen", png(resico_dsa_newgroup), ID_NEW_GROUP);
-	tbButton("\tNeue Organisationseinheit im aktuellen Container erstellen", png(resico_dsa_newou), ID_NEW_OU);
-	tbButton("\tObjekte in Active Directory suchen", png(resico_dsa_find), ID_FIND);
-	tbButton("\tAusgewählte Objekte zu einer Gruppe hinzufügen", png(resico_dsa_addtogroup), ID_ADD_TO_GROUP);
+	tbButton("\tNeuer Benutzer\tErstellt einen neuen Benutzer im aktuellen Container.", png(resico_dsadmin_newuser), ID_NEW_USER);
+	tbButton("\tNeue Gruppe\tErstellt eine neue Gruppe im aktuellen Container.", png(resico_dsadmin_newgroup), ID_NEW_GROUP);
+	tbButton("\tNeue Organisationseinheit\tErstellt eine neue Organisationseinheit im aktuellen Container.", png(resico_dsadmin_newou), ID_NEW_OU);
+	tbButton("\tSuchen\tSucht Objekt im Active Directory.", png(resico_dsadmin_find), ID_FIND);
+	tbButton("\tFügt ein Mitglied hinzu.\tFügt die ausgewählten Objekte einer von Ihnen gewählten Gruppe hinzu.", png(resico_dsadmin_addtogroup), ID_ADD_TO_GROUP);
 	new FXToolTip(getApp());
 
 	splitter = new FXSplitter(main, LAYOUT_FILL_X|LAYOUT_FILL_Y|SPLITTER_TRACKING);
@@ -8566,7 +8567,7 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 
 	statusLabel = new FXLabel(main, " ", NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 4,4,2,2);
 
-	icoRoot = new FXPNGIcon(getApp(), resico_network, IMAGE_NEAREST); icoRoot->create();
+	icoRoot = new FXPNGIcon(getApp(), resico_dsadmin_snapin, IMAGE_NEAREST); icoRoot->create();
 	icoFolder = new FXPNGIcon(getApp(), resico_folder, IMAGE_NEAREST); icoFolder->create();
 	icoUser = new FXPNGIcon(getApp(), resico_user, IMAGE_NEAREST); icoUser->create();
 	icoUsers = new FXPNGIcon(getApp(), resico_users, IMAGE_NEAREST); icoUsers->create();
@@ -8585,7 +8586,8 @@ void DsAdminWindow::loadTree() {
 	}
 	FXString rootLabel = "Active Directory-Benutzer und -Computer [" + domain.realm + "]";
 	FXTreeItem* rootIt = tree->appendItem(0, rootLabel, icoRoot, icoRoot);
-	domainRootItem = tree->appendItem(rootIt, domain.realm, icoServer, icoServer);
+	FXIcon* icoDomain = sharedPngIcon(resico_dsadmin_domain);
+	domainRootItem = tree->appendItem(rootIt, domain.realm, icoDomain, icoDomain);
 	itemToRelDN[domainRootItem] = "";
 
 	std::map<std::string, FXTreeItem*> itemByRelDN;
