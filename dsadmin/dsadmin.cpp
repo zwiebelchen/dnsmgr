@@ -3918,7 +3918,7 @@ protected:
 public:
 	enum { ID_METHOD = FXDialogBox::ID_LAST };
 	DeploySoftwareDialog(FXWindow* owner, bool machine)
-		: FXDialogBox(owner, "Software bereitstellen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0),
+		: FXDialogBox(owner, "Software bereitstellen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,520,0),
 		  method(machine ? 1 : 0), target(method, this, ID_METHOD) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
 		new FXLabel(main, "Wählen Sie die Bereitstellungsmethode aus:", NULL, JUSTIFY_LEFT);
