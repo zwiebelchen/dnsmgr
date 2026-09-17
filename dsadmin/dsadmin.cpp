@@ -2651,6 +2651,310 @@ static const std::vector<CountryEntry>& countryList() {
 	return list;
 }
 
+// ---------------------------------------------------------------------
+// "Andere..."-Dialog: weitere Werte eines mehrwertigen Attributs
+// (otherTelephone, url, otherMobile ...).
+// ---------------------------------------------------------------------
+class MultiValueDialog : public FXDialogBox {
+	FXDECLARE(MultiValueDialog)
+private:
+	std::vector<std::string> values;
+	FXTextField* input = nullptr;
+	FXList* list = nullptr;
+	int editing = -1;
+protected:
+	MultiValueDialog() {}
+public:
+	enum { ID_ADD = FXDialogBox::ID_LAST, ID_EDIT, ID_REMOVE };
+	MultiValueDialog(FXWindow* owner, const FXString& title, const std::vector<std::string>& initial)
+		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,380,300), values(initial) {
+		FXHorizontalFrame* main = new FXHorizontalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 10,0);
+		FXVerticalFrame* left = new FXVerticalFrame(main, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,4);
+		new FXLabel(left, "&Neuer Wert:", NULL, JUSTIFY_LEFT);
+		input = new FXTextField(left, 24, this, ID_ADD, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_ENTER_ONLY);
+		new FXLabel(left, "&Aktuelle Werte:", NULL, JUSTIFY_LEFT);
+		FXPacker* lf = new FXPacker(left, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXList(lf, NULL, 0, LIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		FXVerticalFrame* btns = new FXVerticalFrame(main, LAYOUT_FILL_Y | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,0,0, 0,4);
+		new FXButton(btns, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXButton(btns, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXFrame(btns, LAYOUT_FIX_HEIGHT, 0,0,0,20, 0,0,0,0);
+		new FXButton(btns, "&Hinzufügen", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXButton(btns, "&Bearbeiten", NULL, this, ID_EDIT, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		reload();
+	}
+	void reload() { list->clearItems(); for (auto& v : values) list->appendItem(v.c_str()); }
+	long onAdd(FXObject*, FXSelector, void*) {
+		std::string v = trimStr(input->getText().text());
+		if (v.empty()) return 1;
+		if (editing >= 0 && editing < (int)values.size()) values[editing] = v; else values.push_back(v);
+		editing = -1;
+		input->setText("");
+		reload();
+		return 1;
+	}
+	long onEdit(FXObject*, FXSelector, void*) {
+		int i = list->getCurrentItem();
+		if (i < 0 || i >= (int)values.size()) return 1;
+		editing = i;
+		input->setText(values[i].c_str());
+		input->setFocus();
+		return 1;
+	}
+	long onRemove(FXObject*, FXSelector, void*) {
+		int i = list->getCurrentItem();
+		if (i >= 0 && i < (int)values.size()) { values.erase(values.begin() + i); editing = -1; reload(); }
+		return 1;
+	}
+	const std::vector<std::string>& getValues() const { return values; }
+	virtual ~MultiValueDialog() {}
+};
+FXDEFMAP(MultiValueDialog) MultiValueDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, MultiValueDialog::ID_ADD, MultiValueDialog::onAdd),
+	FXMAPFUNC(SEL_COMMAND, MultiValueDialog::ID_EDIT, MultiValueDialog::onEdit),
+	FXMAPFUNC(SEL_COMMAND, MultiValueDialog::ID_REMOVE, MultiValueDialog::onRemove),
+};
+FXIMPLEMENT(MultiValueDialog, FXDialogBox, MultiValueDialogMap, ARRAYNUMBER(MultiValueDialogMap))
+
+// ---------------------------------------------------------------------
+// "Anmeldezeiten für: ..." -- 7 x 24 Raster. logonHours hat 21 Bytes,
+// Bit 0 = Sonntag 00:00-01:00 UTC, niederwertigstes Bit zuerst; angezeigt
+// wird wie im Original in Ortszeit. Klicken oder Ziehen markiert, die
+// Knoepfe setzen die Markierung auf zugelassen bzw. verweigert.
+// ---------------------------------------------------------------------
+class LogonHoursGrid : public FXFrame {
+	FXDECLARE(LogonHoursGrid)
+private:
+	bool allowed[7][24];
+	int selR0 = -1, selC0 = -1, selR1 = -1, selC1 = -1;
+	bool dragging = false;
+	static const int LEFT = 80, TOP = 22, CELL = 16;
+protected:
+	LogonHoursGrid() {}
+public:
+	LogonHoursGrid(FXComposite* p) : FXFrame(p, FRAME_NONE | LAYOUT_FIX_WIDTH | LAYOUT_FIX_HEIGHT, 0,0, LEFT + 24 * CELL + 2, TOP + 7 * CELL + 2) {
+		flags |= FLAG_ENABLED;
+		for (auto& r : allowed) for (bool& b : r) b = true;
+	}
+	void set(int r, int c, bool v) { allowed[r][c] = v; }
+	bool get(int r, int c) const { return allowed[r][c]; }
+	static const char* dayName(int r) {
+		static const char* names[] = { "Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag" };
+		return names[r];
+	}
+	long onPaint(FXObject*, FXSelector, void* ptr) {
+		FXDCWindow dc(this, (FXEvent*)ptr);
+		dc.setForeground(getBackColor());
+		dc.fillRectangle(0, 0, width, height);
+		dc.setFont(getApp()->getNormalFont());
+		dc.setForeground(FXRGB(0,0,0));
+		for (int c = 0; c <= 24; c += 6) {
+			FXString t = std::to_string(c).c_str();
+			dc.drawText(LEFT + c * CELL - (c == 24 ? 12 : 3), TOP - 6, t.text(), t.length());
+		}
+		int r0 = std::min(selR0, selR1), r1 = std::max(selR0, selR1), c0 = std::min(selC0, selC1), c1 = std::max(selC0, selC1);
+		for (int r = 0; r < 7; r++) {
+			dc.setForeground(FXRGB(0,0,0));
+			dc.drawText(2, TOP + r * CELL + CELL - 4, dayName(r), (FXint)strlen(dayName(r)));
+			for (int c = 0; c < 24; c++) {
+				bool sel = selR0 >= 0 && r >= r0 && r <= r1 && c >= c0 && c <= c1;
+				dc.setForeground(allowed[r][c] ? FXRGB(0, 0, 160) : FXRGB(255,255,255));
+				dc.fillRectangle(LEFT + c * CELL + 1, TOP + r * CELL + 1, CELL - 1, CELL - 1);
+				if (sel) {
+					dc.setForeground(allowed[r][c] ? FXRGB(255,255,255) : FXRGB(0,0,160));
+					dc.drawRectangle(LEFT + c * CELL + 3, TOP + r * CELL + 3, CELL - 6, CELL - 6);
+				}
+				dc.setForeground(FXRGB(128,128,128));
+				dc.drawRectangle(LEFT + c * CELL, TOP + r * CELL, CELL, CELL);
+			}
+		}
+		return 1;
+	}
+	bool cellAt(FXint x, FXint y, int& r, int& c) const {
+		if (x < LEFT || y < TOP) return false;
+		c = (x - LEFT) / CELL; r = (y - TOP) / CELL;
+		return r >= 0 && r < 7 && c >= 0 && c < 24;
+	}
+	long onLeftDown(FXObject*, FXSelector, void* ptr) {
+		FXEvent* ev = (FXEvent*)ptr;
+		int r, c;
+		if (cellAt(ev->win_x, ev->win_y, r, c)) { selR0 = selR1 = r; selC0 = selC1 = c; }
+		else if (ev->win_x < LEFT && ev->win_y >= TOP && (ev->win_y - TOP) / CELL < 7) { selR0 = selR1 = (ev->win_y - TOP) / CELL; selC0 = 0; selC1 = 23; }
+		else if (ev->win_y < TOP && ev->win_x >= LEFT && (ev->win_x - LEFT) / CELL < 24) { selC0 = selC1 = (ev->win_x - LEFT) / CELL; selR0 = 0; selR1 = 6; }
+		else if (ev->win_x < LEFT && ev->win_y < TOP) { selR0 = 0; selR1 = 6; selC0 = 0; selC1 = 23; }
+		dragging = true;
+		grab();
+		update();
+		return 1;
+	}
+	long onMotion(FXObject*, FXSelector, void* ptr) {
+		if (!dragging || selR0 < 0) return 0;
+		FXEvent* ev = (FXEvent*)ptr;
+		int r = std::max(0, std::min(6, (ev->win_y - TOP) / CELL)), c = std::max(0, std::min(23, (ev->win_x - LEFT) / CELL));
+		selR1 = r; selC1 = c;
+		update();
+		return 1;
+	}
+	long onLeftUp(FXObject*, FXSelector, void*) { dragging = false; ungrab(); return 1; }
+	void applyToSelection(bool v) {
+		if (selR0 < 0) return;
+		for (int r = std::min(selR0, selR1); r <= std::max(selR0, selR1); r++)
+			for (int c = std::min(selC0, selC1); c <= std::max(selC0, selC1); c++) allowed[r][c] = v;
+		update();
+	}
+	virtual ~LogonHoursGrid() {}
+};
+FXDEFMAP(LogonHoursGrid) LogonHoursGridMap[] = {
+	FXMAPFUNC(SEL_PAINT, 0, LogonHoursGrid::onPaint),
+	FXMAPFUNC(SEL_LEFTBUTTONPRESS, 0, LogonHoursGrid::onLeftDown),
+	FXMAPFUNC(SEL_LEFTBUTTONRELEASE, 0, LogonHoursGrid::onLeftUp),
+	FXMAPFUNC(SEL_MOTION, 0, LogonHoursGrid::onMotion),
+};
+FXIMPLEMENT(LogonHoursGrid, FXFrame, LogonHoursGridMap, ARRAYNUMBER(LogonHoursGridMap))
+
+class LogonHoursDialog : public FXDialogBox {
+	FXDECLARE(LogonHoursDialog)
+private:
+	LogonHoursGrid* grid = nullptr;
+	int offsetHours = 0; // Ortszeit - UTC
+protected:
+	LogonHoursDialog() {}
+public:
+	enum { ID_ALLOW = FXDialogBox::ID_LAST, ID_DENY };
+	// bytes: 21 Bytes oder leer (= immer zugelassen)
+	LogonHoursDialog(FXWindow* owner, const FXString& userName, const std::string& bytes)
+		: FXDialogBox(owner, "Anmeldezeiten für: " + userName, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,0,0, 12,12,12,12) {
+		time_t now = time(NULL);
+		struct tm lt; localtime_r(&now, &lt);
+		offsetHours = (int)(lt.tm_gmtoff / 3600);
+		FXHorizontalFrame* main = new FXHorizontalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 12,0);
+		FXVerticalFrame* left = new FXVerticalFrame(main, 0, 0,0,0,0, 0,0,0,0, 0,6);
+		grid = new LogonHoursGrid(left);
+		FXHorizontalFrame* legend = new FXHorizontalFrame(left, LAYOUT_FILL_X, 0,0,0,0, 80,0,4,0, 16,0);
+		new FXLabel(legend, "Blau: Anmelden zugelassen, weiß: Anmelden verweigert", NULL, JUSTIFY_LEFT);
+		FXVerticalFrame* right = new FXVerticalFrame(main, LAYOUT_FILL_Y | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,0,0, 0,4);
+		new FXButton(right, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXButton(right, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXFrame(right, LAYOUT_FIX_HEIGHT, 0,0,0,24, 0,0,0,0);
+		new FXButton(right, "&Anmelden zugelassen", NULL, this, ID_ALLOW, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXButton(right, "Anmelden &verweigert", NULL, this, ID_DENY, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		if (bytes.size() >= 21) {
+			for (int bit = 0; bit < 168; bit++) {
+				int local = (bit + offsetHours + 168) % 168;
+				grid->set(local / 24, local % 24, ((unsigned char)bytes[bit / 8] >> (bit % 8)) & 1);
+			}
+		}
+	}
+	long onAllow(FXObject*, FXSelector, void*) { grid->applyToSelection(true); return 1; }
+	long onDeny(FXObject*, FXSelector, void*) { grid->applyToSelection(false); return 1; }
+	// Leerer Rueckgabewert = immer zugelassen (Attribut entfernen).
+	std::string getBytes() const {
+		std::string out(21, '\0');
+		bool all = true;
+		for (int bit = 0; bit < 168; bit++) {
+			int local = (bit + offsetHours + 168) % 168;
+			bool v = grid->get(local / 24, local % 24);
+			if (v) out[bit / 8] = (char)((unsigned char)out[bit / 8] | (1 << (bit % 8))); else all = false;
+		}
+		return all ? std::string() : out;
+	}
+	virtual ~LogonHoursDialog() {}
+};
+FXDEFMAP(LogonHoursDialog) LogonHoursDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, LogonHoursDialog::ID_ALLOW, LogonHoursDialog::onAllow),
+	FXMAPFUNC(SEL_COMMAND, LogonHoursDialog::ID_DENY, LogonHoursDialog::onDeny),
+};
+FXIMPLEMENT(LogonHoursDialog, FXDialogBox, LogonHoursDialogMap, ARRAYNUMBER(LogonHoursDialogMap))
+
+// ---------------------------------------------------------------------
+// "Anmeldearbeitsstationen" -- userWorkstations, kommagetrennte
+// NetBIOS-Namen; leer = alle Computer.
+// ---------------------------------------------------------------------
+class LogonWorkstationsDialog : public FXDialogBox {
+	FXDECLARE(LogonWorkstationsDialog)
+private:
+	FXint mode = 0;
+	FXDataTarget modeTarget;
+	FXTextField* nameField = nullptr;
+	FXList* list = nullptr;
+	std::vector<std::string> names;
+	std::vector<FXWindow*> controls;
+protected:
+	LogonWorkstationsDialog() {}
+public:
+	enum { ID_MODE = FXDialogBox::ID_LAST, ID_ADD, ID_EDIT, ID_REMOVE };
+	LogonWorkstationsDialog(FXWindow* owner, const std::string& value)
+		: FXDialogBox(owner, "Anmeldearbeitsstationen", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,340),
+		  modeTarget(mode, this, ID_MODE) {
+		std::string cur;
+		for (char c : value) { if (c == ',') { if (!trimStr(cur).empty()) names.push_back(trimStr(cur)); cur.clear(); } else cur += c; }
+		if (!trimStr(cur).empty()) names.push_back(trimStr(cur));
+		mode = names.empty() ? 0 : 1;
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
+		new FXLabel(main, "Diesem Benutzer die Anmeldung an folgenden Computern erlauben:", NULL, JUSTIFY_LEFT);
+		new FXRadioButton(main, "&Alle Computer", &modeTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(main, "&Folgende Computer", &modeTarget, FXDataTarget::ID_OPTION + 1);
+		FXHorizontalFrame* body = new FXHorizontalFrame(main, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 20,0,0,0, 8,0);
+		FXVerticalFrame* left = new FXVerticalFrame(body, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,4);
+		controls.push_back(new FXLabel(left, "&Computername:", NULL, JUSTIFY_LEFT));
+		nameField = new FXTextField(left, 20, this, ID_ADD, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_ENTER_ONLY);
+		controls.push_back(nameField);
+		FXPacker* lf = new FXPacker(left, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXList(lf, NULL, 0, LIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		controls.push_back(list);
+		FXVerticalFrame* btns = new FXVerticalFrame(body, LAYOUT_FILL_Y | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,18,0, 0,4);
+		controls.push_back(new FXButton(btns, "&Hinzufügen", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3));
+		controls.push_back(new FXButton(btns, "&Bearbeiten", NULL, this, ID_EDIT, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3));
+		controls.push_back(new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3));
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,6,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		reload();
+		onMode(NULL, 0, NULL);
+	}
+	void reload() { list->clearItems(); for (auto& n : names) list->appendItem(n.c_str()); }
+	long onMode(FXObject*, FXSelector, void*) { for (auto* w : controls) { if (mode) w->enable(); else w->disable(); } return 1; }
+	long onAdd(FXObject*, FXSelector, void*) {
+		std::string n = trimStr(nameField->getText().text());
+		if (n.empty() || n.find(',') != std::string::npos) return 1;
+		std::transform(n.begin(), n.end(), n.begin(), ::toupper);
+		if (std::find(names.begin(), names.end(), n) == names.end()) names.push_back(n);
+		nameField->setText("");
+		reload();
+		return 1;
+	}
+	long onEdit(FXObject*, FXSelector, void*) {
+		int i = list->getCurrentItem();
+		if (i < 0 || i >= (int)names.size()) return 1;
+		nameField->setText(names[i].c_str());
+		names.erase(names.begin() + i);
+		reload();
+		nameField->setFocus();
+		return 1;
+	}
+	long onRemove(FXObject*, FXSelector, void*) {
+		int i = list->getCurrentItem();
+		if (i >= 0 && i < (int)names.size()) { names.erase(names.begin() + i); reload(); }
+		return 1;
+	}
+	std::string getValue() const {
+		if (!mode) return "";
+		std::string out;
+		for (auto& n : names) { if (!out.empty()) out += ","; out += n; }
+		return out;
+	}
+	virtual ~LogonWorkstationsDialog() {}
+};
+FXDEFMAP(LogonWorkstationsDialog) LogonWorkstationsDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, LogonWorkstationsDialog::ID_MODE, LogonWorkstationsDialog::onMode),
+	FXMAPFUNC(SEL_COMMAND, LogonWorkstationsDialog::ID_ADD, LogonWorkstationsDialog::onAdd),
+	FXMAPFUNC(SEL_COMMAND, LogonWorkstationsDialog::ID_EDIT, LogonWorkstationsDialog::onEdit),
+	FXMAPFUNC(SEL_COMMAND, LogonWorkstationsDialog::ID_REMOVE, LogonWorkstationsDialog::onRemove),
+};
+FXIMPLEMENT(LogonWorkstationsDialog, FXDialogBox, LogonWorkstationsDialogMap, ARRAYNUMBER(LogonWorkstationsDialogMap))
+
 static std::string crlfToLf(const std::string& s);
 static std::string ldapiReadAttr(const std::string& dn, const std::string& attr);
 static std::vector<GroupEntry> listAllUsersAsEntries();
@@ -2679,6 +2983,14 @@ private:
 	FXTextField* homeLocal = nullptr, *homeUnc = nullptr;
 	FXListBox* homeDriveBox = nullptr;
 	std::string origHomeDir, origHomeDrive;
+	// "Andere..."-Werte: Button -> Attribut; Werte je Attribut
+	std::map<FXButton*, std::pair<std::string, FXString>> otherButtons; // Knopf -> (Attribut, Titel)
+	std::map<std::string, std::vector<std::string>> multiValues, origMultiValues;
+	// Konto: Anmeldezeiten, Anmeldearbeitsstationen, Kennwort nicht aenderbar
+	std::string logonHours, origLogonHours, workstations, origWorkstations;
+	FXCheckButton* cannotChangeCheck = nullptr;
+	bool origCannotChange = false;
+	FXString displayNameForHours;
 	// Organisation: Vorgesetzte(r) (manager)
 	FXTextField* managerName = nullptr;
 	std::string origManagerDn, managerDn;
@@ -2709,7 +3021,7 @@ protected:
 	UserPropertiesDialog() {}
 public:
 	enum { ID_MEMBER_ADD = FXDialogBox::ID_LAST, ID_MEMBER_REMOVE, ID_SET_PRIMARY, ID_APPLY, ID_OK,
-	       ID_MANAGER_CHANGE, ID_MANAGER_SHOW, ID_MANAGER_CLEAR };
+	       ID_MANAGER_CHANGE, ID_MANAGER_SHOW, ID_MANAGER_CLEAR, ID_OTHER, ID_LOGON_HOURS, ID_LOGON_TO };
 
 	UserPropertiesDialog(FXWindow* owner, const DomainInfo& domain_, const DirObject& obj)
 		: FXDialogBox(owner, "Eigenschaften von " + obj.name, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,540,540),
@@ -2772,7 +3084,23 @@ public:
 		FXHorizontalFrame* row = new FXHorizontalFrame(parent, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXLabel(row, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
 		FXTextField* tf = new FXTextField(row, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
-		(new FXButton(row, other, NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,2,2))->disable();
+		static const std::map<std::string, std::string> OTHER_ATTR = {
+			{ "telephoneNumber", "otherTelephone" }, { "wWWHomePage", "url" }, { "homePhone", "otherHomePhone" },
+			{ "pager", "otherPager" }, { "mobile", "otherMobile" }, { "facsimileTelephoneNumber", "otherFacsimileTelephoneNumber" },
+			{ "ipPhone", "otherIpPhone" },
+		};
+		FXButton* ob = new FXButton(row, other, NULL, this, ID_OTHER, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,2,2);
+		auto oa = OTHER_ATTR.find(attr);
+		if (oa != OTHER_ATTR.end()) {
+			FXString title = label; title.substitute("&", ""); title.substitute(":", ""); title.trim();
+			otherButtons[ob] = { oa->second, title + " (andere)" };
+			std::vector<std::string> vals;
+			auto range = rec.equal_range(lowerCopy(oa->second));
+			for (auto it = range.first; it != range.second; ++it) vals.push_back(it->second);
+			multiValues[oa->second] = origMultiValues[oa->second] = vals;
+		} else {
+			ob->disable();
+		}
 		FXString v = ldifFirst(rec, attr).c_str();
 		tf->setText(v);
 		attrFields.push_back({ attr, tf, v });
@@ -2867,8 +3195,10 @@ public:
 		samField->setText(accountName);
 
 		FXHorizontalFrame* btns = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,2,2, 6,0);
-		(new FXButton(btns, "Anmelde&zeiten...", NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3))->disable();
-		(new FXButton(btns, "An&melden...", NULL, NULL, 0, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3))->disable();
+		new FXButton(btns, "Anmelde&zeiten...", NULL, this, ID_LOGON_HOURS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		new FXButton(btns, "An&melden...", NULL, this, ID_LOGON_TO, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 8,8,3,3);
+		logonHours = origLogonHours = ldifFirst(rec, "logonHours");
+		workstations = origWorkstations = ldifFirst(rec, "userWorkstations");
 
 		// Gesperrt ist ein Konto, solange lockoutTime gesetzt ist; nur das
 		// Aufheben ist moeglich.
@@ -2889,9 +3219,16 @@ public:
 		origMustChange = ldifFirst(rec, "pwdLastSet") == "0";
 		mustChangeCheck = new FXCheckButton(optFrame, "Benutzer muss Kennwort bei nächster Anmeldung ändern");
 		mustChangeCheck->setCheck(origMustChange);
-		// "Kann das Kennwort nicht ändern" ist in AD eine Berechtigung (ACE),
-		// kein userAccountControl-Bit -- noch nicht umgesetzt.
-		(new FXCheckButton(optFrame, "Benutzer kann das Kennwort nicht ändern"))->disable();
+		// "Kann das Kennwort nicht ändern" ist in AD kein userAccountControl-
+		// Bit, sondern zwei Verweigerungs-ACEs fuer das erweiterte Recht
+		// "Kennwort ändern" (SELF und Jeder) -- wie Windows 2000 sie setzt.
+		cannotChangeCheck = new FXCheckButton(optFrame, "Benutzer kann das Kennwort nicht ändern");
+		{
+			std::string sddl;
+			runAsRootCaptured({ FXString("samba-tool"), FXString("dsacl"), FXString("get"), FXString(("--objectdn=" + std::string(userFullDN.text())).c_str()) }, sddl);
+			origCannotChange = sddl.find(CANNOT_CHANGE_ACE_SELF) != std::string::npos;
+		}
+		cannotChangeCheck->setCheck(origCannotChange);
 		const std::pair<const char*, uint32_t> opts[] = {
 			{ "Kennwort läuft nie ab", 0x10000 },
 			{ "Kennwort mit reversibler Verschlüsselung speichern", 0x80 },
@@ -3071,6 +3408,27 @@ public:
 		for (auto it = range.first; it != range.second; ++it) reports->appendItem(dnLeafName(it->second));
 	}
 
+	static constexpr const char* CANNOT_CHANGE_ACE_SELF = "(OD;;CR;ab721a53-1e2f-11d0-9819-00aa0040529b;;PS)";
+	static constexpr const char* CANNOT_CHANGE_ACE_WORLD = "(OD;;CR;ab721a53-1e2f-11d0-9819-00aa0040529b;;WD)";
+
+	long onOther(FXObject* sender, FXSelector, void*) {
+		auto it = otherButtons.find((FXButton*)sender);
+		if (it == otherButtons.end()) return 1;
+		MultiValueDialog dlg(this, it->second.second, multiValues[it->second.first]);
+		if (dlg.execute(PLACEMENT_OWNER)) multiValues[it->second.first] = dlg.getValues();
+		return 1;
+	}
+	long onLogonHours(FXObject*, FXSelector, void*) {
+		LogonHoursDialog dlg(this, accountName, logonHours);
+		if (dlg.execute(PLACEMENT_OWNER)) logonHours = dlg.getBytes();
+		return 1;
+	}
+	long onLogonTo(FXObject*, FXSelector, void*) {
+		LogonWorkstationsDialog dlg(this, workstations);
+		if (dlg.execute(PLACEMENT_OWNER)) workstations = dlg.getValue();
+		return 1;
+	}
+
 	long onManagerChange(FXObject*, FXSelector, void*) {
 		getApp()->beginWaitCursor();
 		std::vector<GroupEntry> users = listAllUsersAsEntries();
@@ -3116,6 +3474,22 @@ public:
 		if (hd != origHomeDir) { l += "replace: homeDirectory\n"; if (!hd.empty()) l += ldifAttrLine("homeDirectory", hd); l += "-\n"; }
 		if (lowerCopy(hdr) != lowerCopy(origHomeDrive)) { l += "replace: homeDrive\n"; if (!hdr.empty()) l += ldifAttrLine("homeDrive", hdr); l += "-\n"; }
 		if (lowerCopy(managerDn) != lowerCopy(origManagerDn)) { l += "replace: manager\n"; if (!managerDn.empty()) l += ldifAttrLine("manager", managerDn); l += "-\n"; }
+		for (auto& kv : multiValues) {
+			if (kv.second == origMultiValues.at(kv.first)) continue;
+			l += "replace: " + kv.first + "\n";
+			for (auto& v : kv.second) l += ldifAttrLine(kv.first, v);
+			l += "-\n";
+		}
+		if (logonHours != origLogonHours) {
+			l += "replace: logonHours\n";
+			if (!logonHours.empty()) l += "logonHours:: " + base64Encode(std::vector<uint8_t>(logonHours.begin(), logonHours.end())) + "\n";
+			l += "-\n";
+		}
+		if (workstations != origWorkstations) {
+			l += "replace: userWorkstations\n";
+			if (!workstations.empty()) l += ldifAttrLine("userWorkstations", workstations);
+			l += "-\n";
+		}
 		return l;
 	}
 
@@ -3245,6 +3619,7 @@ public:
 		if (!extraLdif().empty()) return true;
 		if (wantedUac() != origUac || wantedUpn() != origUpn) return true;
 		if ((bool)mustChangeCheck->getCheck() != origMustChange || (bool)lockedCheck->getCheck() != origLocked) return true;
+		if ((bool)cannotChangeCheck->getCheck() != origCannotChange) return true;
 		if (wantedExpiresText() != origExpiresText) return true;
 		if (!sameDn(primaryDn, origPrimaryDn)) return true;
 		if (memberDns.size() != origMemberDns.size()) return true;
@@ -3290,9 +3665,30 @@ public:
 			origHomeDir = wantedHomeDir();
 			origHomeDrive = origHomeDir.empty() ? std::string() : wantedHomeDrive();
 			origManagerDn = managerDn;
+			origMultiValues = multiValues;
+			origLogonHours = logonHours;
+			origWorkstations = workstations;
 		}
 
-		// Konto -- Rueckfragen wie dsprop.dll (Text 1031)
+		// Konto -- Rueckfragen wie dsprop.dll (Texte 1035, 1031)
+		if (mustChangeCheck->getCheck() && cannotChangeCheck->getCheck()) {
+			FXMessageBox::error(this, MBOX_OK, "Active Directory",
+				"Die zwei Optionen 'Benutzer muss Kennwort bei der nächsten Anmeldung ändern' und\n"
+				"'Benutzer kann Kennwort nicht ändern' dürfen nicht zusammen für denselben Benutzer\n"
+				"ausgewählt werden.");
+			return false;
+		}
+		if ((bool)cannotChangeCheck->getCheck() != origCannotChange) {
+			std::string out;
+			std::string sddl = std::string(CANNOT_CHANGE_ACE_SELF) + CANNOT_CHANGE_ACE_WORLD;
+			int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("dsacl"), FXString(cannotChangeCheck->getCheck() ? "set" : "delete"),
+			                             FXString(("--objectdn=" + std::string(userFullDN.text())).c_str()), FXString(("--sddl=" + sddl).c_str()) }, out);
+			if (rc != 0) {
+				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", condenseSambaToolError(out).c_str());
+				return false;
+			}
+			origCannotChange = cannotChangeCheck->getCheck();
+		}
 		if (mustChangeCheck->getCheck() && (wantedUac() & 0x10000)) {
 			FXMessageBox::information(this, MBOX_OK, "Active Directory",
 				"Sie haben die Option \"Kennwort läuft nie ab\" ausgewählt. Der Benutzer muss daher sein\n"
@@ -3410,6 +3806,9 @@ FXDEFMAP(UserPropertiesDialog) UserPropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_APPLY, UserPropertiesDialog::onUpdApply),
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_OK, UserPropertiesDialog::onOk),
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MANAGER_CHANGE, UserPropertiesDialog::onManagerChange),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_OTHER, UserPropertiesDialog::onOther),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_LOGON_HOURS, UserPropertiesDialog::onLogonHours),
+	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_LOGON_TO, UserPropertiesDialog::onLogonTo),
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MANAGER_CLEAR, UserPropertiesDialog::onManagerClear),
 	FXMAPFUNC(SEL_UPDATE, UserPropertiesDialog::ID_MANAGER_CLEAR, UserPropertiesDialog::onUpdManagerButtons),
 	FXMAPFUNC(SEL_COMMAND, UserPropertiesDialog::ID_MANAGER_SHOW, UserPropertiesDialog::onManagerShow),
