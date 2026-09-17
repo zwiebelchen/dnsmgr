@@ -4694,18 +4694,57 @@ static std::vector<GpoSummary> listGposLdapi(const FXString& baseDN) {
 // create" angelegte dagegen "Machine"/"User" -- genommen wird, was
 // tatsaechlich existiert, sonst die neue Schreibweise.
 // ---------------------------------------------------------------------
+// Sucht in "dir" einen Eintrag ohne Ruecksicht auf Gross-/Kleinschreibung
+// (als root gelesen -- das SYSVOL ist fuer normale Benutzer nicht lesbar).
+// Windows legt SYSVOL-Ordner mit beliebiger Schreibweise an ("Machine",
+// "MACHINE", "microsoft" ...), Linux unterscheidet sie aber. Leer = nicht
+// gefunden.
+static std::string findEntryCaseInsensitive(const std::string& dir, const std::string& name) {
+	std::string out;
+	if (runAsRootCaptured({ FXString("ls"), FXString("-1A"), FXString(dir.c_str()) }, out) != 0) return "";
+	for (auto& line : splitLines(out)) {
+		std::string e = line;
+		while (!e.empty() && (e.back() == '\r' || e.back() == '\n')) e.pop_back();
+		if (!e.empty() && lowerCopy(e) == lowerCopy(name)) return dir + "/" + e;
+	}
+	return "";
+}
+
 static std::string gpoSysvolBase(const DomainInfo& domain, const std::string& guid) {
 	FXString realmLower = domain.realm; realmLower.lower();
-	return "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies/" + guid;
+	std::string policies = "/var/lib/samba/sysvol/" + std::string(realmLower.text()) + "/Policies";
+	std::string found = findEntryCaseInsensitive(policies, guid);
+	return found.empty() ? policies + "/" + guid : found;
 }
 
 static std::string gpoBranchDir(const DomainInfo& domain, const std::string& guid, bool machine) {
 	std::string base = gpoSysvolBase(domain, guid);
 	const char* preferred = machine ? SYSVOL_MACHINE_DIR : SYSVOL_USER_DIR;
-	const char* legacy = machine ? "MACHINE" : "USER";
-	if (runAsRoot({ FXString("test"), FXString("-d"), FXString((base + "/" + preferred).c_str()) }) == 0) return base + "/" + preferred;
-	if (runAsRoot({ FXString("test"), FXString("-d"), FXString((base + "/" + legacy).c_str()) }) == 0) return base + "/" + legacy;
-	return base + "/" + preferred;
+	std::string found = findEntryCaseInsensitive(base, preferred);
+	return found.empty() ? base + "/" + preferred : found;
+}
+
+// Loest "base/a/b/c" Stufe fuer Stufe ohne Ruecksicht auf Gross-/
+// Kleinschreibung auf; fehlende Stufen werden mit create angelegt und
+// erben die SYSVOL-Rechte ihres Elternordners. errorMsg enthaelt bei einem
+// Fehler die Ausgabe des gescheiterten Befehls.
+static std::string resolveSysvolPath(const std::string& base, const std::vector<std::string>& parts, bool create, FXString* errorMsg = nullptr) {
+	std::string cur = base;
+	for (auto& part : parts) {
+		std::string found = findEntryCaseInsensitive(cur, part);
+		if (!found.empty()) { cur = found; continue; }
+		std::string next = cur + "/" + part;
+		if (create) {
+			std::string out;
+			if (runAsRootCaptured({ FXString("mkdir"), FXString("-p"), FXString(next.c_str()) }, out) != 0) {
+				if (errorMsg) *errorMsg = FXString("Verzeichnis konnte nicht angelegt werden:\n") + next.c_str() + "\n\n" + trimStr(out).c_str();
+				return "";
+			}
+			inheritSysvolPermissions(cur, next, true);
+		}
+		cur = next;
+	}
+	return cur;
 }
 
 
@@ -4801,7 +4840,9 @@ static const char* SECEDIT_CSE_GUID = "{827D319E-6EAC-11D2-A4EA-00C04F79F83A}";
 static const char* SECEDIT_TOOL_GUID = "{803E14A0-B4FB-11D0-A0D0-00A0C90F574B}";
 
 static std::string gptTmplPath(const DomainInfo& domain, const std::string& guid) {
-	return gpoBranchDir(domain, guid, true) + "/Microsoft/Windows NT/SecEdit/GptTmpl.inf";
+	std::string dir = resolveSysvolPath(gpoBranchDir(domain, guid, true), { "Microsoft", "Windows NT", "SecEdit" }, false);
+	std::string f = findEntryCaseInsensitive(dir, "GptTmpl.inf");
+	return f.empty() ? dir + "/GptTmpl.inf" : f;
 }
 
 static InfFile loadGptTmpl(const DomainInfo& domain, const std::string& guid) {
@@ -5554,18 +5595,15 @@ static bool recomputeDomainAccountPolicy(const DomainInfo& domain, FXString& not
 
 static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::string& guid, InfFile& inf,
                         bool accountPolicyTouched, FXString& errorMsg) {
-	std::string branch = gpoBranchDir(domain, guid, true);
-	std::string path = gptTmplPath(domain, guid);
-	const std::string dirs[] = { branch + "/Microsoft", branch + "/Microsoft/Windows NT", branch + "/Microsoft/Windows NT/SecEdit" };
-	for (auto& d : dirs) {
-		bool existed = runAsRoot({ FXString("test"), FXString("-d"), FXString(d.c_str()) }) == 0;
-		if (existed) continue;
-		if (runAsRoot({ FXString("mkdir"), FXString(d.c_str()) }) != 0) {
-			errorMsg = FXString("Verzeichnis konnte nicht angelegt werden:\n") + d.c_str();
-			return false;
-		}
-		inheritSysvolPermissions(branch, d, true);
-	}
+	// Zweig selbst (Machine/MACHINE) notfalls anlegen, dann die Unterordner
+	// in der Schreibweise, die schon existiert.
+	std::string base = gpoSysvolBase(domain, guid);
+	std::string branch = resolveSysvolPath(base, { SYSVOL_MACHINE_DIR }, true, &errorMsg);
+	if (branch.empty()) return false;
+	std::string secedit = resolveSysvolPath(branch, { "Microsoft", "Windows NT", "SecEdit" }, true, &errorMsg);
+	if (secedit.empty()) return false;
+	std::string path = findEntryCaseInsensitive(secedit, "GptTmpl.inf");
+	if (path.empty()) path = secedit + "/GptTmpl.inf";
 
 	std::string encoded = serializeInf(inf);
 	FXString tmpPath = "/tmp/ice2k-gpttmpl.inf";
@@ -5574,10 +5612,11 @@ static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::st
 		out.write(encoded.data(), (std::streamsize)encoded.size());
 	}
 	bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(path.c_str()) }) == 0;
-	int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(path.c_str()) });
+	std::string cpOut;
+	int rc = runAsRootCaptured({ FXString("cp"), tmpPath, FXString(path.c_str()) }, cpOut);
 	runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
-	if (rc != 0) { errorMsg = FXString("GptTmpl.inf konnte nicht geschrieben werden:\n") + path.c_str(); return false; }
-	if (!existed) inheritSysvolPermissions(branch, path, false);
+	if (rc != 0) { errorMsg = FXString("GptTmpl.inf konnte nicht geschrieben werden:\n") + path.c_str() + "\n\n" + trimStr(cpOut).c_str(); return false; }
+	if (!existed) inheritSysvolPermissions(secedit, path, false);
 
 	std::string gpoDn = "CN=" + guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
 	std::string log;
@@ -6489,7 +6528,9 @@ struct RedirPolicy {
 };
 
 static std::string fdeployPath(const DomainInfo& domain, const std::string& guid) {
-	return gpoBranchDir(domain, guid, false) + "/Documents & Settings/fdeploy.ini";
+	std::string dir = resolveSysvolPath(gpoBranchDir(domain, guid, false), { "Documents & Settings" }, false);
+	std::string f = findEntryCaseInsensitive(dir, "fdeploy.ini");
+	return f.empty() ? dir + "/fdeploy.ini" : f;
 }
 
 static std::map<std::string, RedirPolicy> loadRedirPolicies(const DomainInfo& domain, const std::string& guid) {
@@ -6537,17 +6578,12 @@ static bool saveRedirPolicies(FXWindow* owner, const DomainInfo& domain, const s
 	}
 	std::string encoded = utf8ToUtf16leWithBom(text);
 
-	std::string branch = gpoBranchDir(domain, guid, false);
-	std::string dir = branch + "/Documents & Settings";
-	std::string path = dir + "/fdeploy.ini";
-	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(branch.c_str()) }) != 0) {
-		runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(branch.c_str()) });
-		inheritSysvolPermissions(gpoSysvolBase(domain, guid), branch, true);
-	}
-	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(dir.c_str()) }) != 0) {
-		runAsRoot({ FXString("mkdir"), FXString(dir.c_str()) });
-		inheritSysvolPermissions(branch, dir, true);
-	}
+	std::string branch = resolveSysvolPath(gpoSysvolBase(domain, guid), { SYSVOL_USER_DIR }, true, &errorMsg);
+	if (branch.empty()) return false;
+	std::string dir = resolveSysvolPath(branch, { "Documents & Settings" }, true, &errorMsg);
+	if (dir.empty()) return false;
+	std::string path = findEntryCaseInsensitive(dir, "fdeploy.ini");
+	if (path.empty()) path = dir + "/fdeploy.ini";
 	FXString tmp = "/tmp/ice2k-fdeploy.tmp";
 	{
 		std::ofstream o(tmp.text(), std::ios::binary);
@@ -6560,7 +6596,8 @@ static bool saveRedirPolicies(FXWindow* owner, const DomainInfo& domain, const s
 	if (!existed) inheritSysvolPermissions(dir, path, false);
 
 	// Alten Umweg aufraeumen.
-	std::string polPath = branch + "/Registry.pol";
+	std::string polPath = findEntryCaseInsensitive(branch, "Registry.pol");
+	if (polPath.empty()) polPath = branch + "/Registry.pol";
 	RegPolFile pol = readRegPolAsRoot(polPath);
 	size_t before = pol.entries.size();
 	pol.entries.erase(std::remove_if(pol.entries.begin(), pol.entries.end(), [](const RegPolEntry& e) {
@@ -6873,7 +6910,7 @@ static const ScriptEventDef SCRIPT_EVENTS[] = {
 };
 
 static std::string scriptsDir(const DomainInfo& domain, const std::string& guid, bool machine) {
-	return gpoBranchDir(domain, guid, machine) + "/Scripts";
+	return resolveSysvolPath(gpoBranchDir(domain, guid, machine), { "Scripts" }, false);
 }
 
 static std::map<std::string, std::vector<ScriptEntry>> loadScriptsIniAsRoot(const std::string& path) {
@@ -6887,22 +6924,15 @@ static std::map<std::string, std::vector<ScriptEntry>> loadScriptsIniAsRoot(cons
 }
 
 // Legt Scripts\ und Scripts\<Ereignis> mit den SYSVOL-Rechten an.
+static std::string scriptsIniPath(const DomainInfo& domain, const std::string& guid, bool machine) {
+	std::string dir = scriptsDir(domain, guid, machine);
+	std::string f = findEntryCaseInsensitive(dir, "scripts.ini");
+	return f.empty() ? dir + "/scripts.ini" : f;
+}
+
 static void ensureScriptsFolders(const DomainInfo& domain, const std::string& guid, bool machine, const char* section) {
-	std::string branch = gpoBranchDir(domain, guid, machine);
-	std::string dir = branch + "/Scripts";
-	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(branch.c_str()) }) != 0) {
-		runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(branch.c_str()) });
-		inheritSysvolPermissions(gpoSysvolBase(domain, guid), branch, true);
-	}
-	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(dir.c_str()) }) != 0) {
-		runAsRoot({ FXString("mkdir"), FXString(dir.c_str()) });
-		inheritSysvolPermissions(branch, dir, true);
-	}
-	std::string ev = dir + "/" + section;
-	if (runAsRoot({ FXString("test"), FXString("-d"), FXString(ev.c_str()) }) != 0) {
-		runAsRoot({ FXString("mkdir"), FXString(ev.c_str()) });
-		inheritSysvolPermissions(dir, ev, true);
-	}
+	std::string branch = resolveSysvolPath(gpoSysvolBase(domain, guid), { machine ? SYSVOL_MACHINE_DIR : SYSVOL_USER_DIR }, true);
+	if (!branch.empty()) resolveSysvolPath(branch, { "Scripts", section }, true);
 }
 
 // Dialog "Hinzufügen eines Skripts" bzw. "Skript bearbeiten".
@@ -6986,7 +7016,7 @@ public:
 	ScriptEventDialog(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const std::string& gpoName, const ScriptEventDef& ev_)
 		: FXDialogBox(owner, FXString("Eigenschaften von ") + ev_.label, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,500,460),
 		  domain(domain_), guid(guid_), ev(&ev_) {
-		auto sections = loadScriptsIniAsRoot(scriptsDir(domain, guid, ev->machine) + "/scripts.ini");
+		auto sections = loadScriptsIniAsRoot(scriptsIniPath(domain, guid, ev->machine));
 		entries = origEntries = sections[ev->section];
 
 		FXVerticalFrame* outer = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
@@ -7022,7 +7052,7 @@ public:
 		reload(0);
 	}
 
-	std::string eventDir() const { return scriptsDir(domain, guid, ev->machine) + "/" + ev->section; }
+	std::string eventDir() const { return resolveSysvolPath(scriptsDir(domain, guid, ev->machine), { ev->section }, false); }
 
 	void reload(int select) {
 		list->clearItems();
@@ -7089,8 +7119,8 @@ public:
 
 	bool apply() {
 		if (!dirty()) return true;
-		std::string path = scriptsDir(domain, guid, ev->machine) + "/scripts.ini";
 		ensureScriptsFolders(domain, guid, ev->machine, ev->section);
+		std::string path = scriptsIniPath(domain, guid, ev->machine);
 		auto sections = loadScriptsIniAsRoot(path);
 		sections[ev->section] = entries;
 		bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(path.c_str()) }) == 0;
@@ -7222,7 +7252,9 @@ public:
 	void loadAdmBranch(FXTreeItem* item, int hive) {
 		PolHive& h = admHive[hive];
 		h.categories = loadMergedAdmCategories(hive == 0 ? "MACHINE" : "USER");
-		h.polPath = gpoBranchDir(domain, guid, hive == 0) + "/Registry.pol";
+		std::string branch = gpoBranchDir(domain, guid, hive == 0);
+		h.polPath = findEntryCaseInsensitive(branch, "Registry.pol");
+		if (h.polPath.empty()) h.polPath = branch + "/Registry.pol";
 		h.file = readRegPolAsRoot(h.polPath);
 		h.lookup = buildRegLookup(h.file);
 		addAdmCategories(item, h.categories, {}, hive);
