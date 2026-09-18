@@ -1565,6 +1565,8 @@ struct SoftwarePackageInfo {
 	bool published = false;
 	bool pendingRemoval = false; // msiScriptName "R": wartet auf Deinstallation
 	std::string sourcePath;      // aus msiFileList ("0:" + UNC-Pfad), Spalte "Quelle"
+	// Nur fuer die Paketeigenschaften:
+	int versionHi = 0, versionLo = 0, localeID = 0, machineArch = 0, uiLevel = 0;
 };
 
 // Listet alle Pakete eines Zweigs (Computer/Benutzer) eines GPOs auf.
@@ -1580,7 +1582,7 @@ static std::vector<SoftwarePackageInfo> listSoftwarePackages(FXWindow* owner, co
 	runAsRootCaptured({
 		FXString("bash"), FXString("-c"),
 		FXString("LDAPTLS_REQCERT=never ldapsearch -H ldap://127.0.0.1 -Z -x -o ldif-wrap=no -LLL -D '") + g_adminUser + "@" + domain.realm +
-			"' -w '" + g_adminPass + "' -b '" + packagesDn.c_str() + "' -s one '(objectClass=packageRegistration)' cn displayName packageFlags msiScriptPath msiScriptName msiFileList 2>/dev/null"
+			"' -w '" + g_adminPass + "' -b '" + packagesDn.c_str() + "' -s one '(objectClass=packageRegistration)' cn displayName packageFlags msiScriptPath msiScriptName msiFileList versionNumberHi versionNumberLo localeID machineArchitecture installUiLevel 2>/dev/null"
 	}, raw);
 
 	SoftwarePackageInfo cur;
@@ -1592,6 +1594,15 @@ static std::vector<SoftwarePackageInfo> listSoftwarePackages(FXWindow* owner, co
 		if (line.rfind("cn: ", 0) == 0) { cur.guid = line.substr(4); continue; }
 		if (line.rfind("displayName: ", 0) == 0) { cur.displayName = line.substr(13); continue; }
 		if (line.rfind("msiScriptPath: ", 0) == 0) { cur.msiScriptPath = line.substr(15); continue; }
+		auto intAttr = [&](const char* name, int& target) {
+			std::string prefix = std::string(name) + ": ";
+			if (line.rfind(prefix, 0) != 0) return false;
+			try { target = std::stoi(line.substr(prefix.size())); } catch (...) {}
+			return true;
+		};
+		if (intAttr("versionNumberHi", cur.versionHi) || intAttr("versionNumberLo", cur.versionLo) ||
+		    intAttr("localeID", cur.localeID) || intAttr("machineArchitecture", cur.machineArch) ||
+		    intAttr("installUiLevel", cur.uiLevel)) continue;
 		if (line.rfind("msiFileList: ", 0) == 0) {
 			std::string v = line.substr(13);
 			size_t colon = v.find(':');
@@ -1682,6 +1693,36 @@ static bool markSoftwarePackageForRemoval(FXWindow* owner, const DomainInfo& dom
 	                    "lastUpdateSequence: " + updateSequenceStamp() + "\n";
 	if (!runLdapChange(owner, domain.realm, ldif, false, log, errorMsg)) return false;
 
+	if (!bumpClassStoreConfirmation(owner, domain.realm, classStoreDn, log, errorMsg)) return false;
+	bumpGpoVersion(owner, domain.realm, gpoObjectDn, isMachine, !isMachine, log);
+	return true;
+}
+
+// Wechselt die Bereitstellungsart eines Pakets zwischen "Zugewiesen" und
+// "Veröffentlicht" (nur Benutzerkonfiguration -- Computer kennt nur
+// zugewiesen). Das Advertise-Skript haengt nur an Computer/Benutzer und
+// bleibt deshalb unveraendert.
+static bool setPackageDeployment(FXWindow* owner, const DomainInfo& domain, const FXString& gpoGuid,
+                                 bool isMachine, const SoftwarePackageInfo& pkg, bool published,
+                                 std::string& log, FXString& errorMsg) {
+	std::string scope = isMachine ? "Machine" : "User";
+	std::string scopedGpoDn = "CN=" + scope + ",CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+	std::string classStoreDn = "CN=Class Store," + scopedGpoDn;
+	std::string packageDn = "CN=" + pkg.guid + ",CN=Packages," + classStoreDn;
+	std::string gpoObjectDn = "CN=" + std::string(gpoGuid.text()) + ",CN=Policies,CN=System," + domain.baseDN.text();
+	uint32_t flags = isMachine ? PACKAGE_FLAGS_ASSIGNED_MACHINE
+	               : published ? PACKAGE_FLAGS_PUBLISHED
+	                           : PACKAGE_FLAGS_ASSIGNED_USER;
+
+	std::string ldif = "dn: " + packageDn + "\n"
+	                    "changetype: modify\n"
+	                    "replace: msiScriptName\n"
+	                    "msiScriptName: " + std::string(published && !isMachine ? "P" : "A") + "\n-\n"
+	                    "replace: packageFlags\n"
+	                    "packageFlags: " + std::to_string((int32_t)flags) + "\n-\n"
+	                    "replace: lastUpdateSequence\n"
+	                    "lastUpdateSequence: " + updateSequenceStamp() + "\n";
+	if (!runLdapChange(owner, domain.realm, ldif, false, log, errorMsg)) return false;
 	if (!bumpClassStoreConfirmation(owner, domain.realm, classStoreDn, log, errorMsg)) return false;
 	bumpGpoVersion(owner, domain.realm, gpoObjectDn, isMachine, !isMachine, log);
 	return true;
@@ -4324,9 +4365,9 @@ public:
 		FXVerticalFrame* radios = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 16,0,4,4, 0,6);
 		FXRadioButton* pub = new FXRadioButton(radios, "&Veröffentlicht", &target, FXDataTarget::ID_OPTION + 0);
 		new FXRadioButton(radios, "&Zugewiesen", &target, FXDataTarget::ID_OPTION + 1);
-		// "Erweitert" oeffnet im Original die Paketeigenschaften, die es hier
-		// (noch) nicht gibt.
-		(new FXRadioButton(radios, "&Erweiterte Methode von \"Veröffentlicht\" oder \"Zugewiesen\"", &target, FXDataTarget::ID_OPTION + 2))->disable();
+		// "Erweitert" heisst wie im Original: bereitstellen und danach gleich
+		// die Paketeigenschaften oeffnen.
+		new FXRadioButton(radios, "&Erweiterte Methode von \"Veröffentlicht\" oder \"Zugewiesen\"", &target, FXDataTarget::ID_OPTION + 2);
 		if (machine) pub->disable();
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 		description = new FXLabel(main, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
@@ -4343,6 +4384,7 @@ public:
 		return 1;
 	}
 	bool published() const { return method == 0; }
+	bool advanced() const { return method == 2; }
 	virtual ~DeploySoftwareDialog() {}
 };
 FXDEFMAP(DeploySoftwareDialog) DeploySoftwareDialogMap[] = {
@@ -7181,6 +7223,92 @@ FXDEFMAP(ScriptEventDialog) ScriptEventDialogMap[] = {
 FXIMPLEMENT(ScriptEventDialog, FXDialogBox, ScriptEventDialogMap, ARRAYNUMBER(ScriptEventDialogMap))
 
 // ---------------------------------------------------------------------
+// Eigenschaften eines Softwarepakets (appmgr.dll): Reiter "Allgemein" mit
+// den Angaben aus dem AD-Objekt und "Bereitstellung" mit der
+// Bereitstellungsart. Optionen und Installationsoberflaeche zeigt der
+// Dialog an, aendert sie aber nicht -- welche Bits von packageFlags sie
+// steuern, ist nicht belegt, und geraten wird hier nichts.
+// ---------------------------------------------------------------------
+class PackagePropertiesDialog : public FXDialogBox {
+	FXDECLARE(PackagePropertiesDialog)
+private:
+	SoftwarePackageInfo pkg;
+	bool machine = false;
+	FXint method = 0; // 0 = veroeffentlicht, 1 = zugewiesen
+	FXDataTarget methodTarget;
+	bool origPublished = false;
+protected:
+	PackagePropertiesDialog() {}
+public:
+	enum { ID_OK = FXDialogBox::ID_LAST };
+	PackagePropertiesDialog(FXWindow* owner, const SoftwarePackageInfo& pkg_, bool machine_)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + pkg_.displayName.c_str(), DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,470,430),
+		  pkg(pkg_), machine(machine_), methodTarget(method) {
+		origPublished = pkg.published;
+		method = pkg.published ? 0 : 1;
+		FXVerticalFrame* outer = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 6,6,6,6, 0,6);
+		FXTabBook* tabs = new FXTabBook(outer, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		// ---- Allgemein ----
+		new FXTabItem(tabs, "Allgemein", NULL);
+		FXVerticalFrame* gen = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,6);
+		FXHorizontalFrame* head = new FXHorizontalFrame(gen, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedPngIcon(resico_network), LAYOUT_CENTER_Y);
+		FXTextField* nameField = new FXTextField(head, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | TEXTFIELD_READONLY);
+		nameField->setText(pkg.displayName.c_str());
+		new FXHorizontalSeparator(gen, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXGroupBox* prod = new FXGroupBox(gen, "Produktinformationen", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8);
+		FXMatrix* m = new FXMatrix(prod, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 14,4);
+		auto row = [&](const char* label, const FXString& value) {
+			new FXLabel(m, label, NULL, JUSTIFY_LEFT);
+			new FXLabel(m, value, NULL, JUSTIFY_LEFT);
+		};
+		row("Version:", (std::to_string(pkg.versionHi) + "." + std::to_string(pkg.versionLo)).c_str());
+		row("Sprache:", pkg.localeID ? FXString(std::to_string(pkg.localeID).c_str()) : FXString("Sprachneutral"));
+		row("Plattform:", pkg.machineArch == 1282 ? "Intel" : FXString(std::to_string(pkg.machineArch).c_str()));
+		row("Quelle:", pkg.sourcePath.c_str());
+		row("Bereitstellungszustand:", pkg.pendingRemoval ? "Wird deinstalliert" : pkg.published ? "Veröffentlicht" : "Zugewiesen");
+
+		// ---- Bereitstellung ----
+		new FXTabItem(tabs, "Bereitstellung", NULL);
+		FXVerticalFrame* dep = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
+		FXGroupBox* type = new FXGroupBox(dep, "Bereitstellungsart", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8, 0,4);
+		FXRadioButton* pub = new FXRadioButton(type, "&Veröffentlicht", &methodTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(type, "&Zugewiesen", &methodTarget, FXDataTarget::ID_OPTION + 1);
+		// In der Computerkonfiguration kann Software nur zugewiesen werden.
+		if (machine || pkg.pendingRemoval) { pub->disable(); if (pkg.pendingRemoval) type->disable(); }
+
+		FXGroupBox* opt = new FXGroupBox(dep, "Bereitstellungsoptionen", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8, 0,4);
+		for (const char* t : { "Anwendung bei Dateierweiterungsaktivierung automatisch installieren",
+		                       "Anwendung deinstallieren, wenn sie außerhalb des Verwaltungsbereichs liegt",
+		                       "Diese Anwendung im Dialogfeld \"Software\" nicht anzeigen" })
+			(new FXCheckButton(opt, t))->disable();
+
+		FXGroupBox* ui = new FXGroupBox(dep, "Installationsbenutzeroberfläche", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8, 0,4);
+		FXCheckButton* basic = new FXCheckButton(ui, "Standard");
+		FXCheckButton* maxi = new FXCheckButton(ui, "Maximum");
+		basic->setCheck(pkg.uiLevel < 3);
+		maxi->setCheck(pkg.uiLevel >= 3);
+		basic->disable();
+		maxi->disable();
+		new FXLabel(dep, "Optionen und Installationsoberfläche werden angezeigt, aber nicht verändert.", NULL, JUSTIFY_LEFT);
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(outer, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	long onOk(FXObject*, FXSelector, void*) { return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL); }
+	bool publishedWanted() const { return method == 0; }
+	bool deploymentChanged() const { return publishedWanted() != origPublished; }
+	virtual ~PackagePropertiesDialog() {}
+};
+FXDEFMAP(PackagePropertiesDialog) PackagePropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, PackagePropertiesDialog::ID_OK, PackagePropertiesDialog::onOk),
+};
+FXIMPLEMENT(PackagePropertiesDialog, FXDialogBox, PackagePropertiesDialogMap, ARRAYNUMBER(PackagePropertiesDialogMap))
+
+// ---------------------------------------------------------------------
 // Fenster "Gruppenrichtlinie" -- Nachbau des Gruppenrichtlinienobjekt-
 // Editors: links der Baum mit Computer- und Benutzerkonfiguration,
 // rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
@@ -7228,7 +7356,7 @@ private:
 protected:
 	GpoEditorWindow() {}
 public:
-	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE, ID_ADD_RGROUP, ID_DELETE_RGROUP, ID_EDIT_RGROUP, ID_ADD_OBJECT, ID_DELETE_OBJECT, ID_EDIT_OBJECT };
+	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE, ID_ADD_RGROUP, ID_DELETE_RGROUP, ID_EDIT_RGROUP, ID_ADD_OBJECT, ID_DELETE_OBJECT, ID_EDIT_OBJECT, ID_PACKAGE_PROPS };
 
 	GpoEditorWindow(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const FXString& gpoName_)
 		: FXDialogBox(owner, "Gruppenrichtlinie", DECOR_ALL, 0,0,900,620),
@@ -7652,6 +7780,9 @@ public:
 			case GN_FILES:
 				editObjectPolicy(idx);
 				break;
+			case GN_SOFTWARE:
+				editPackage(idx);
+				break;
 			case GN_SCRIPTS: {
 				if (!requireRoot()) break;
 				int k = 0;
@@ -7786,6 +7917,26 @@ public:
 		reselect(row);
 		return 1;
 	}
+
+	// Eigenschaften eines Pakets; ein Wechsel der Bereitstellungsart wird
+	// direkt geschrieben.
+	void editPackage(int row) {
+		if (row < 0 || row >= (int)rowPackages.size() || !requireRoot()) return;
+		auto nit = nodes.find(shownItem);
+		if (nit == nodes.end()) return;
+		bool machine = nit->second.machine;
+		PackagePropertiesDialog dlg(this, rowPackages[row], machine);
+		if (!dlg.execute(PLACEMENT_OWNER) || !dlg.deploymentChanged()) return;
+		std::string log;
+		FXString errorMsg;
+		getApp()->beginWaitCursor();
+		bool ok = setPackageDeployment(this, domain, guid.c_str(), machine, rowPackages[row], dlg.publishedWanted(), log, errorMsg);
+		getApp()->endWaitCursor();
+		if (!ok) FXMessageBox::error(this, MBOX_OK, "Softwareinstallation", "%s", errorMsg.text());
+		reselect(row);
+	}
+
+	long onPackageProps(FXObject*, FXSelector, void*) { editPackage(list->getCurrentItem()); return 1; }
 
 	long onEditObject(FXObject*, FXSelector, void*) {
 		editObjectPolicy(list->getCurrentItem());
@@ -8016,6 +8167,8 @@ public:
 		if (idx >= 0 && idx < (int)rowPackages.size()) {
 			new FXMenuSeparator(&menu);
 			new FXMenuCommand(&menu, "&Entfernen...", NULL, this, ID_REMOVE_PACKAGE);
+			new FXMenuSeparator(&menu);
+			new FXMenuCommand(&menu, "Ei&genschaften", NULL, this, ID_PACKAGE_PROPS);
 		}
 		menu.create();
 		menu.popup(NULL, ev->root_x, ev->root_y);
@@ -8040,6 +8193,7 @@ public:
 		if (!deploy.execute(PLACEMENT_OWNER)) return 1;
 		params.assignedPerMachine = machine;
 		params.published = !machine && deploy.published();
+		bool openProperties = deploy.advanced();
 		std::string log;
 		FXString errorMsg;
 		getApp()->beginWaitCursor();
@@ -8047,6 +8201,16 @@ public:
 		getApp()->endWaitCursor();
 		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
 		showNode(shownItem);
+		// "Erweitert": das frisch angelegte Paket gleich in den Eigenschaften
+		// oeffnen, wie im Original.
+		if (ok && openProperties) {
+			for (size_t i = 0; i < rowPackages.size(); i++) {
+				if (rowPackages[i].sourcePath != params.msiUncPath) continue;
+				reselect((int)i);
+				editPackage((int)i);
+				break;
+			}
+		}
 		return 1;
 	}
 
@@ -8095,6 +8259,7 @@ FXDEFMAP(GpoEditorWindow) GpoEditorWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_ADD_OBJECT, GpoEditorWindow::onAddObject),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_DELETE_OBJECT, GpoEditorWindow::onDeleteObject),
 	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_EDIT_OBJECT, GpoEditorWindow::onEditObject),
+	FXMAPFUNC(SEL_COMMAND, GpoEditorWindow::ID_PACKAGE_PROPS, GpoEditorWindow::onPackageProps),
 };
 FXIMPLEMENT(GpoEditorWindow, FXDialogBox, GpoEditorWindowMap, ARRAYNUMBER(GpoEditorWindowMap))
 
