@@ -49,7 +49,7 @@ nicht im vollen Umfang des Originals.
 | 13 | Konfiguration des Servers | -- | offen (Startseite mit Verweisen auf die übrigen Programme) |
 | 14 | Lizenzierung | -- | nicht geplant |
 | 15 | Lokale Sicherheitsrichtlinie | [`secpol/`](secpol/README.md) `--local` | **umgesetzt**: bearbeitbar wie im Original, mit den Spalten "Lokale Einstellung" und "Effektive Einstellung" (lokale Werte, überschrieben von den wirksamen Gruppenrichtlinien). Lokale Werte werden gespeichert, aber noch nicht auf das Linux-System angewendet |
-| 16 | Routing und RAS | [`rras/`](rras/README.md) | **teilweise**: Serverstatus, Aktivieren/Deaktivieren (IP-Weiterleitung), Eigenschaften, Routingschnittstellen, IP-Routing mit statischen Routen (anlegen/löschen); Texte und Symbole aus `mprsnap.dll`. Offen: Einwahl/VPN und Ports, Adressumsetzung, Paketfilter, Routingprotokolle |
+| 16 | Routing und RAS | [`rras/`](rras/README.md) | **teilweise**: Serverstatus, Aktivieren/Deaktivieren, Eigenschaften, Routingschnittstellen, statische Routen, **VPN-Server** (WireGuard vollständig, OpenVPN und strongSwan als Konfiguration) und **Paketfilter** je Schnittstelle über nftables; Texte und Symbole aus `mprsnap.dll`/`rtrfiltr.dll`. Offen: Einwahl (Modem/ISDN), Adressumsetzung, Routingprotokolle |
 | 17 | Systemmonitor | -- | offen |
 | 18 | Telefonie | -- | nicht geplant |
 | 19 | Telnetserververwaltung | -- | nicht geplant |

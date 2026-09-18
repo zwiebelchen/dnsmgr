@@ -139,11 +139,13 @@ static std::vector<std::string> splitLines(const std::string& s) {
 // ---------------------------------------------------------------------
 // Zustand: Serverrolle und IP-Weiterleitung.
 // ---------------------------------------------------------------------
-enum ServerRole { ROLE_NONE = 0, ROLE_ROUTER_LAN, ROLE_ROUTER_DIALUP, ROLE_MANUAL };
+enum ServerRole { ROLE_NONE = 0, ROLE_ROUTER_LAN, ROLE_ROUTER_DIALUP, ROLE_MANUAL, ROLE_VPN };
 
 struct RrasState {
 	ServerRole role = ROLE_NONE;
 	bool forwarding = false;    // net.ipv4.ip_forward des laufenden Systems
+	// Nur bei role = vpn gefuellt.
+	std::string vpnBackend, vpnName, vpnPort, vpnSubnet, vpnServerIp;
 	bool configured() const { return role != ROLE_NONE; }
 };
 
@@ -154,17 +156,26 @@ static RrasState readState() {
 		if (eq == std::string::npos) continue;
 		std::string key = svcprobe::trimmed(line.substr(0, eq));
 		std::string val = svcprobe::trimmed(line.substr(eq + 1));
-		if (key != "role") continue;
+		if (key != "role") {
+			if (key == "vpn") st.vpnBackend = val;
+			else if (key == "vpn-name") st.vpnName = val;
+			else if (key == "vpn-port") st.vpnPort = val;
+			else if (key == "vpn-subnet") st.vpnSubnet = val;
+			else if (key == "vpn-server-ip") st.vpnServerIp = val;
+			continue;
+		}
 		if (val == "router-lan") st.role = ROLE_ROUTER_LAN;
 		else if (val == "router-dialup") st.role = ROLE_ROUTER_DIALUP;
 		else if (val == "manual") st.role = ROLE_MANUAL;
+		else if (val == "vpn") st.role = ROLE_VPN;
 	}
 	st.forwarding = svcprobe::trimmed(readFileUnprivileged("/proc/sys/net/ipv4/ip_forward")) == "1";
 	return st;
 }
 
 static const char* roleKeyword(ServerRole r) {
-	return r == ROLE_ROUTER_LAN ? "router-lan" : r == ROLE_ROUTER_DIALUP ? "router-dialup" : r == ROLE_MANUAL ? "manual" : "none";
+	return r == ROLE_ROUTER_LAN ? "router-lan" : r == ROLE_ROUTER_DIALUP ? "router-dialup"
+	     : r == ROLE_MANUAL ? "manual" : r == ROLE_VPN ? "vpn" : "none";
 }
 
 // Gemeinsames Wurzelsymbol fuer die Dialoge.
@@ -178,6 +189,7 @@ static FXString roleLabel(ServerRole r) {
 	return r == ROLE_ROUTER_LAN ? "Netzwerkrouter (nur LAN-Routing)"
 	     : r == ROLE_ROUTER_DIALUP ? "Netzwerkrouter (LAN und bei Bedarf wählendes Routing)"
 	     : r == ROLE_MANUAL ? "Manuell konfigurierter Server"
+	     : r == ROLE_VPN ? "VPN-Server"
 	                        : "Nicht konfiguriert";
 }
 
@@ -198,6 +210,9 @@ static bool applyForwarding(bool on, FXString& errorMsg) {
 static bool writeState(const RrasState& st, FXString& errorMsg) {
 	std::string conf = "# Von ice2k \"Routing und RAS\" verwaltet.\n"
 	                   "role = " + std::string(roleKeyword(st.role)) + "\n";
+	if (st.role == ROLE_VPN)
+		conf += "vpn = " + st.vpnBackend + "\nvpn-name = " + st.vpnName + "\nvpn-port = " + st.vpnPort +
+		        "\nvpn-subnet = " + st.vpnSubnet + "\nvpn-server-ip = " + st.vpnServerIp + "\n";
 	return writeFileAsRoot(RRAS_CONF, conf, errorMsg);
 }
 
@@ -388,7 +403,7 @@ public:
 			case C_RAS: description->setText("Nimmt Einwählverbindungen entgegen.\n"
 			                                 "Noch nicht umgesetzt."); break;
 			case C_VPN: description->setText("Nimmt VPN-Verbindungen aus dem Internet entgegen.\n"
-			                                 "Noch nicht umgesetzt."); break;
+			                                 "Zur Auswahl stehen WireGuard, OpenVPN und strongSwan."); break;
 			case C_ROUTER: description->setText("Leitet Pakete zwischen den Netzwerken dieses Servers weiter.\n"
 			                                    "Schaltet die IP-Weiterleitung des Kernels ein."); break;
 			default: description->setText("Aktiviert Routing und RAS, ohne weitere Einstellungen vorzunehmen.\n"
@@ -397,16 +412,16 @@ public:
 		return 1;
 	}
 	long onOk(FXObject*, FXSelector, void*) {
-		if (choice == C_INTERNET || choice == C_RAS || choice == C_VPN) {
+		if (choice == C_INTERNET || choice == C_RAS) {
 			FXMessageBox::information(this, MBOX_OK, "Routing und RAS",
 				"Diese Serverrolle ist noch nicht umgesetzt.\n\n"
-				"Umgesetzt sind bisher \"Netzwerkrouter\" und \"Manuell konfigurierter Server\";\n"
-				"beide schalten die IP-Weiterleitung ein.");
+				"Umgesetzt sind \"VPN-Server\" (WireGuard, OpenVPN, strongSwan), \"Netzwerkrouter\"\n"
+				"und \"Manuell konfigurierter Server\".");
 			return 1;
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
-	ServerRole role() const { return choice == C_ROUTER ? ROLE_ROUTER_LAN : ROLE_MANUAL; }
+	ServerRole role() const { return choice == C_ROUTER ? ROLE_ROUTER_LAN : choice == C_VPN ? ROLE_VPN : ROLE_MANUAL; }
 	virtual ~ConfigureDialog() {}
 };
 FXDEFMAP(ConfigureDialog) ConfigureDialogMap[] = {
@@ -470,6 +485,506 @@ FXDEFMAP(ServerPropertiesDialog) ServerPropertiesDialogMap[] = {
 	FXMAPFUNC(SEL_COMMAND, ServerPropertiesDialog::ID_ROUTER, ServerPropertiesDialog::onRouter),
 };
 FXIMPLEMENT(ServerPropertiesDialog, FXDialogBox, ServerPropertiesDialogMap, ARRAYNUMBER(ServerPropertiesDialogMap))
+
+// ---------------------------------------------------------------------
+// VPN-Server. Windows 2000 kennt hier PPTP und L2TP/IPSec; unter Linux
+// treten WireGuard, OpenVPN und strongSwan an deren Stelle. Der Dialog
+// hält sich an den Aufbau des Assistenten, die Felder sind die des
+// jeweiligen Dienstes.
+// ---------------------------------------------------------------------
+enum VpnBackend { VPN_NONE = 0, VPN_WIREGUARD, VPN_OPENVPN, VPN_STRONGSWAN };
+
+static const char* vpnKeyword(VpnBackend b) {
+	return b == VPN_WIREGUARD ? "wireguard" : b == VPN_OPENVPN ? "openvpn" : b == VPN_STRONGSWAN ? "strongswan" : "none";
+}
+static FXString vpnLabel(VpnBackend b) {
+	return b == VPN_WIREGUARD ? "WireGuard" : b == VPN_OPENVPN ? "OpenVPN" : b == VPN_STRONGSWAN ? "strongSwan (IPSec)" : "";
+}
+static const char* vpnUnit(VpnBackend b, const std::string& name) {
+	static std::string unit;
+	unit = b == VPN_WIREGUARD ? "wg-quick@" + name : b == VPN_OPENVPN ? "openvpn-server@" + name : "strongswan";
+	return unit.c_str();
+}
+
+struct VpnConfig {
+	VpnBackend backend = VPN_NONE;
+	std::string name = "vpn0";      // wg-Schnittstelle bzw. Instanzname
+	std::string port = "51820";
+	std::string subnet = "10.8.0.0/24";
+	std::string serverIp = "10.8.0.1";
+};
+
+// Dialog "VPN-Server einrichten".
+class VpnSetupDialog : public FXDialogBox {
+	FXDECLARE(VpnSetupDialog)
+private:
+	FXint backend = 0;   // 0 WireGuard, 1 OpenVPN, 2 strongSwan
+	FXDataTarget backendTarget;
+	FXTextField *nameField = nullptr, *portField = nullptr, *subnetField = nullptr, *serverIpField = nullptr;
+	FXLabel* hint = nullptr;
+protected:
+	VpnSetupDialog() {}
+public:
+	enum { ID_BACKEND = FXDialogBox::ID_LAST, ID_OK };
+	VpnSetupDialog(FXWindow* owner)
+		: FXDialogBox(owner, "VPN-Server einrichten", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,560,0),
+		  backendTarget(backend, this, ID_BACKEND) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
+		new FXLabel(main, "VPN-Dienst", NULL, JUSTIFY_LEFT);
+		new FXLabel(main, "Windows 2000 verwendet hier PPTP und L2TP/IPSec. Wählen Sie den Dienst,\n"
+		                  "der diese Aufgabe auf diesem Server übernimmt.", NULL, JUSTIFY_LEFT);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXVerticalFrame* radios = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 12,0,4,4, 0,2);
+		auto opt = [&](const char* label, int v, const char* text) {
+			new FXRadioButton(radios, label, &backendTarget, FXDataTarget::ID_OPTION + v);
+			new FXLabel(radios, text, NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+			new FXFrame(radios, LAYOUT_FIX_HEIGHT, 0,0,0,4, 0,0,0,0);
+		};
+		opt("&WireGuard", 0, "        Schlanker VPN-Dienst mit Schlüsselpaaren; wird hier vollständig eingerichtet.");
+		opt("&OpenVPN", 1, "        Benötigt Zertifikate (CA, Server) -- die Konfiguration wird geschrieben,\n        die Zertifikate müssen vorhanden sein.");
+		opt("&strongSwan (IPSec)", 2, "        IKEv2; die Verbindung wird angelegt, Zertifikate bzw. Schlüssel müssen\n        vorhanden sein.");
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		auto row = [&](const char* label, const char* value) {
+			FXHorizontalFrame* r = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+			new FXLabel(r, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,150,0);
+			FXTextField* tf = new FXTextField(r, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+			tf->setText(value);
+			return tf;
+		};
+		nameField = row("&Name:", "vpn0");
+		portField = row("&Port:", "51820");
+		subnetField = row("&VPN-Netzwerk:", "10.8.0.0/24");
+		serverIpField = row("&Adresse des Servers:", "10.8.0.1");
+		hint = new FXLabel(main, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "&Fertig stellen", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		onBackend(NULL, 0, NULL);
+	}
+	long onBackend(FXObject*, FXSelector, void*) {
+		if (backend == 0) { portField->setText("51820"); hint->setText("Schreibt /etc/wireguard/<Name>.conf mit einem neuen Schlüsselpaar und startet wg-quick@<Name>."); }
+		else if (backend == 1) { portField->setText("1194"); hint->setText("Schreibt /etc/openvpn/server/<Name>.conf; erwartet ca.crt, server.crt, server.key und dh.pem in /etc/openvpn/server."); }
+		else { portField->setText("500"); hint->setText("Schreibt /etc/swanctl/conf.d/<Name>.conf (IKEv2); Zertifikate bzw. Schlüssel müssen in /etc/swanctl liegen."); }
+		return 1;
+	}
+	long onOk(FXObject*, FXSelector, void*) {
+		std::string n = svcprobe::trimmed(nameField->getText().text());
+		if (n.empty() || n.find('/') != std::string::npos || n.find(' ') != std::string::npos) {
+			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "Geben Sie einen gültigen Namen ohne Leer- und Sonderzeichen an.");
+			return 1;
+		}
+		unsigned a,b,c,d,bits;
+		if (sscanf(svcprobe::trimmed(subnetField->getText().text()).c_str(), "%u.%u.%u.%u/%u", &a,&b,&c,&d,&bits) != 5) {
+			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "Geben Sie das VPN-Netzwerk in der Form 10.8.0.0/24 an.");
+			return 1;
+		}
+		if (sscanf(svcprobe::trimmed(serverIpField->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
+			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "Geben Sie eine gültige Adresse für den Server an.");
+			return 1;
+		}
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	VpnConfig config() const {
+		VpnConfig c;
+		c.backend = backend == 0 ? VPN_WIREGUARD : backend == 1 ? VPN_OPENVPN : VPN_STRONGSWAN;
+		c.name = svcprobe::trimmed(nameField->getText().text());
+		c.port = svcprobe::trimmed(portField->getText().text());
+		c.subnet = svcprobe::trimmed(subnetField->getText().text());
+		c.serverIp = svcprobe::trimmed(serverIpField->getText().text());
+		return c;
+	}
+	virtual ~VpnSetupDialog() {}
+};
+FXDEFMAP(VpnSetupDialog) VpnSetupDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, VpnSetupDialog::ID_BACKEND, VpnSetupDialog::onBackend),
+	FXMAPFUNC(SEL_COMMAND, VpnSetupDialog::ID_OK, VpnSetupDialog::onOk),
+};
+FXIMPLEMENT(VpnSetupDialog, FXDialogBox, VpnSetupDialogMap, ARRAYNUMBER(VpnSetupDialogMap))
+
+// Richtet den gewaehlten Dienst ein. Bei WireGuard komplett (Schluessel,
+// Konfiguration, Dienst), bei OpenVPN und strongSwan wird die
+// Serverkonfiguration geschrieben -- Zertifikate und Schluessel legt
+// diese Konsole bewusst nicht an.
+static bool setupVpn(const VpnConfig& c, std::string& note, FXString& errorMsg) {
+	note.clear();
+	if (c.backend == VPN_WIREGUARD) {
+		std::string key, pub;
+		if (runAsRootCaptured({ FXString("bash"), FXString("-c"), FXString("wg genkey") }, key) != 0 || svcprobe::trimmed(key).empty()) {
+			errorMsg = "wg wurde nicht gefunden. Installieren Sie das Paket wireguard-tools.";
+			return false;
+		}
+		key = svcprobe::trimmed(key);
+		runAsRootCaptured({ FXString("bash"), FXString("-c"), FXString(("echo '" + key + "' | wg pubkey").c_str()) }, pub);
+		std::string conf = "# Von ice2k \"Routing und RAS\" erzeugt.\n[Interface]\n"
+		                   "Address = " + c.serverIp + "/" + c.subnet.substr(c.subnet.find('/') + 1) + "\n"
+		                   "ListenPort = " + c.port + "\n"
+		                   "PrivateKey = " + key + "\n\n"
+		                   "# Für jeden Client hier einen Abschnitt anfügen:\n"
+		                   "# [Peer]\n# PublicKey = <öffentlicher Schlüssel des Clients>\n# AllowedIPs = 10.8.0.2/32\n";
+		if (!writeFileAsRoot("/etc/wireguard/" + c.name + ".conf", conf, errorMsg)) return false;
+		runAsRoot({ FXString("chmod"), FXString("600"), FXString(("/etc/wireguard/" + c.name + ".conf").c_str()) });
+		std::string out;
+		if (runAsRootCaptured({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString(vpnUnit(c.backend, c.name)) }, out) != 0)
+			note = "Die Konfiguration wurde geschrieben, der Dienst konnte aber nicht gestartet werden:\n\n" + svcprobe::trimmed(out);
+		note += (note.empty() ? "" : "\n\n") + std::string("Öffentlicher Schlüssel des Servers:\n") + svcprobe::trimmed(pub);
+		return true;
+	}
+	if (c.backend == VPN_OPENVPN) {
+		std::string conf = "# Von ice2k \"Routing und RAS\" erzeugt.\n"
+		                   "port " + c.port + "\nproto udp\ndev tun\n"
+		                   "ca ca.crt\ncert server.crt\nkey server.key\ndh dh.pem\n"
+		                   "server " + c.subnet.substr(0, c.subnet.find('/')) + " " + prefixToMask(atoi(c.subnet.c_str() + c.subnet.find('/') + 1)) + "\n"
+		                   "topology subnet\nkeepalive 10 120\npersist-key\npersist-tun\nuser nobody\ngroup nogroup\nverb 3\n";
+		if (!writeFileAsRoot("/etc/openvpn/server/" + c.name + ".conf", conf, errorMsg)) return false;
+		bool haveCerts = runAsRoot({ FXString("test"), FXString("-f"), FXString("/etc/openvpn/server/server.crt") }) == 0;
+		if (!haveCerts) {
+			note = "Die Konfiguration wurde nach /etc/openvpn/server/" + c.name + ".conf geschrieben.\n\n"
+			       "Es fehlen noch die Zertifikate (ca.crt, server.crt, server.key, dh.pem) in\n"
+			       "/etc/openvpn/server. Legen Sie sie z.B. mit easy-rsa an; danach lässt sich der\n"
+			       "Dienst openvpn-server@" + c.name + " starten.";
+			return true;
+		}
+		std::string out;
+		if (runAsRootCaptured({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString(vpnUnit(c.backend, c.name)) }, out) != 0)
+			note = "Die Konfiguration wurde geschrieben, der Dienst konnte aber nicht gestartet werden:\n\n" + svcprobe::trimmed(out);
+		return true;
+	}
+	// strongSwan
+	std::string conf = "# Von ice2k \"Routing und RAS\" erzeugt.\nconnections {\n"
+	                   "    " + c.name + " {\n"
+	                   "        version = 2\n        pools = " + c.name + "_pool\n"
+	                   "        local {\n            auth = pubkey\n            certs = server.crt\n        }\n"
+	                   "        remote {\n            auth = eap-mschapv2\n            eap_id = %any\n        }\n"
+	                   "        children {\n            " + c.name + " {\n"
+	                   "                local_ts = 0.0.0.0/0\n                esp_proposals = aes256gcm16-x25519\n            }\n        }\n    }\n}\n\n"
+	                   "pools {\n    " + c.name + "_pool {\n        addrs = " + c.subnet + "\n    }\n}\n";
+	if (!writeFileAsRoot("/etc/swanctl/conf.d/" + c.name + ".conf", conf, errorMsg)) return false;
+	note = "Die Verbindung wurde nach /etc/swanctl/conf.d/" + c.name + ".conf geschrieben.\n\n"
+	       "Serverzertifikat und Schlüssel müssen in /etc/swanctl/x509 bzw. /etc/swanctl/private\n"
+	       "liegen, die Benutzer in /etc/swanctl/swanctl.conf (secrets). Danach:\n"
+	       "systemctl restart strongswan und swanctl --load-all.";
+	return true;
+}
+
+// Zustand der VPN-Anschluesse fuer den Knoten "Ports".
+struct VpnPort {
+	std::string name;     // "vpn0"
+	std::string device;   // "WireGuard" ...
+	std::string status;   // "Aktiv", "Beendet", "Nicht eingerichtet"
+};
+
+static std::vector<VpnPort> listVpnPorts(const VpnConfig& c) {
+	std::vector<VpnPort> out;
+	if (c.backend == VPN_NONE) return out;
+	VpnPort p;
+	p.name = c.name;
+	p.device = vpnLabel(c.backend).text();
+	std::string state;
+	runAsRootCaptured({ FXString("systemctl"), FXString("is-active"), FXString(vpnUnit(c.backend, c.name)) }, state);
+	state = svcprobe::trimmed(state);
+	p.status = state == "active" ? "Aktiv" : state.empty() ? "Unbekannt" : ("Beendet (" + state + ")");
+	out.push_back(p);
+	if (c.backend == VPN_WIREGUARD) {
+		// Jeder Peer ist ein "Anschluss".
+		std::string raw;
+		if (runAsRootCaptured({ FXString("wg"), FXString("show"), FXString(c.name.c_str()), FXString("peers") }, raw) == 0) {
+			int n = 1;
+			for (auto& line : splitLines(raw)) {
+				if (svcprobe::trimmed(line).empty()) continue;
+				VpnPort peer;
+				peer.name = c.name + "-" + std::to_string(n++);
+				peer.device = "WireGuard-Peer";
+				peer.status = svcprobe::trimmed(line).substr(0, 20) + "...";
+				out.push_back(peer);
+			}
+		}
+	}
+	return out;
+}
+
+// ---------------------------------------------------------------------
+// Paketfilter je Schnittstelle -- Dialoge nach rtrfiltr.dll (14002
+// "Eingabefilter"/"Ausgabefilter" und 14003 "IP-Filter"). Unterbau ist
+// nftables: die Filter stehen in /etc/ice2k/rras-filters, daraus wird
+// /etc/ice2k/rras-filter.nft erzeugt und mit "nft -f" geladen.
+// ---------------------------------------------------------------------
+struct PacketFilter {
+	std::string iface;
+	bool input = true;          // true = Eingabefilter, false = Ausgabefilter
+	bool dropExcept = false;    // false = alle annehmen ausser..., true = alle verwerfen ausser...
+	std::string src, srcMask, dst, dstMask;
+	std::string proto;          // "", "tcp", "udp", "icmp"
+	std::string sport, dport;
+};
+
+static const char* RRAS_FILTERS = "/etc/ice2k/rras-filters";
+static const char* RRAS_FILTER_NFT = "/etc/ice2k/rras-filter.nft";
+
+static std::vector<std::string> splitFields(const std::string& line, char sep) {
+	std::vector<std::string> out;
+	std::string cur;
+	for (char c : line) { if (c == sep) { out.push_back(cur); cur.clear(); } else cur += c; }
+	out.push_back(cur);
+	return out;
+}
+
+static std::vector<PacketFilter> loadFilters() {
+	std::vector<PacketFilter> out;
+	for (auto& line : splitLines(readFileUnprivileged(RRAS_FILTERS))) {
+		if (line.empty() || line[0] == '#') continue;
+		std::vector<std::string> f = splitFields(line, '|');
+		if (f.size() < 10) continue;
+		PacketFilter p;
+		p.iface = f[0]; p.input = f[1] == "in"; p.dropExcept = f[2] == "drop";
+		p.src = f[3]; p.srcMask = f[4]; p.dst = f[5]; p.dstMask = f[6];
+		p.proto = f[7]; p.sport = f[8]; p.dport = f[9];
+		out.push_back(p);
+	}
+	return out;
+}
+
+// Erzeugt das nftables-Regelwerk und laedt es.
+static bool applyFilters(const std::vector<PacketFilter>& filters, FXString& errorMsg) {
+	std::string content = "# Von ice2k \"Routing und RAS\" erzeugt -- nicht von Hand ändern.\n"
+	                      "table inet ice2k_rras\ndelete table inet ice2k_rras\n"
+	                      "table inet ice2k_rras {\n";
+	auto rulesFor = [&](bool input) {
+		std::string hook = input ? "input" : "output";
+		std::string chain = "\tchain " + hook + " {\n\t\ttype filter hook " + hook + " priority 0; policy accept;\n";
+		// Je Schnittstelle: die Kriterien zuerst, danach die Grundregel.
+		std::vector<std::string> ifaces;
+		for (auto& f : filters) {
+			if (f.input != input) continue;
+			if (std::find(ifaces.begin(), ifaces.end(), f.iface) == ifaces.end()) ifaces.push_back(f.iface);
+		}
+		for (auto& iface : ifaces) {
+			bool dropExcept = false;
+			for (auto& f : filters) if (f.input == input && f.iface == iface) dropExcept = f.dropExcept;
+			for (auto& f : filters) {
+				if (f.input != input || f.iface != iface) continue;
+				std::string r = "\t\t" + std::string(input ? "iifname \"" : "oifname \"") + iface + "\"";
+				if (!f.src.empty()) r += " ip saddr " + f.src + (f.srcMask.empty() ? "" : "/" + std::to_string(maskToPrefix(f.srcMask)));
+				if (!f.dst.empty()) r += " ip daddr " + f.dst + (f.dstMask.empty() ? "" : "/" + std::to_string(maskToPrefix(f.dstMask)));
+				if (!f.proto.empty()) r += " ip protocol " + f.proto;
+				if (!f.sport.empty() && (f.proto == "tcp" || f.proto == "udp")) r += " " + f.proto + " sport " + f.sport;
+				if (!f.dport.empty() && (f.proto == "tcp" || f.proto == "udp")) r += " " + f.proto + " dport " + f.dport;
+				r += dropExcept ? " accept\n" : " drop\n";
+				chain += r;
+			}
+			// Grundregel der Schnittstelle
+			chain += "\t\t" + std::string(input ? "iifname \"" : "oifname \"") + iface + "\" " + (dropExcept ? "drop\n" : "accept\n");
+		}
+		chain += "\t}\n";
+		return chain;
+	};
+	content += rulesFor(true);
+	content += rulesFor(false);
+	content += "}\n";
+	if (!writeFileAsRoot(RRAS_FILTER_NFT, content, errorMsg)) return false;
+	std::string out;
+	if (runAsRootCaptured({ FXString("nft"), FXString("-f"), FXString(RRAS_FILTER_NFT) }, out) != 0) {
+		errorMsg = FXString("Die Filter konnten nicht geladen werden:\n") + svcprobe::trimmed(out).c_str();
+		return false;
+	}
+	return true;
+}
+
+static bool saveFilters(const std::vector<PacketFilter>& filters, FXString& errorMsg) {
+	std::string content = "# Paketfilter, von ice2k \"Routing und RAS\" verwaltet.\n"
+	                      "# Schnittstelle|in/out|accept/drop|Quelle|Quellmaske|Ziel|Zielmaske|Protokoll|Quellport|Zielport\n";
+	for (auto& f : filters)
+		content += f.iface + "|" + (f.input ? "in" : "out") + "|" + (f.dropExcept ? "drop" : "accept") + "|" +
+		           f.src + "|" + f.srcMask + "|" + f.dst + "|" + f.dstMask + "|" + f.proto + "|" + f.sport + "|" + f.dport + "\n";
+	if (!writeFileAsRoot(RRAS_FILTERS, content, errorMsg)) return false;
+	return applyFilters(filters, errorMsg);
+}
+
+// Dialog "IP-Filter" (rtrfiltr.dll, 14003).
+class IpFilterDialog : public FXDialogBox {
+	FXDECLARE(IpFilterDialog)
+private:
+	FXCheckButton *srcCheck = nullptr, *dstCheck = nullptr;
+	FXTextField *srcAddr = nullptr, *srcMask = nullptr, *dstAddr = nullptr, *dstMask = nullptr, *sport = nullptr, *dport = nullptr;
+	FXListBox* protoBox = nullptr;
+	std::vector<FXWindow*> srcCtrl, dstCtrl;
+protected:
+	IpFilterDialog() {}
+public:
+	enum { ID_SRC = FXDialogBox::ID_LAST, ID_DST, ID_PROTO, ID_OK };
+	IpFilterDialog(FXWindow* owner, const PacketFilter& f)
+		: FXDialogBox(owner, "IP-Filter", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,4);
+		srcCheck = new FXCheckButton(main, "Quell&netzwerk", this, ID_SRC);
+		FXVerticalFrame* sf = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 16,0,0,0, 0,2);
+		auto row = [&](FXComposite* p, const char* label, std::vector<FXWindow*>* reg) {
+			FXHorizontalFrame* r = new FXHorizontalFrame(p, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+			FXLabel* l = new FXLabel(r, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
+			FXTextField* tf = new FXTextField(r, 16, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+			if (reg) { reg->push_back(l); reg->push_back(tf); }
+			return tf;
+		};
+		srcAddr = row(sf, "&IP-Adresse:", &srcCtrl);
+		srcMask = row(sf, "Subnetz&maske:", &srcCtrl);
+		dstCheck = new FXCheckButton(main, "&Zielnetzwerk", this, ID_DST);
+		FXVerticalFrame* df = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 16,0,0,0, 0,2);
+		dstAddr = row(df, "IP-&Adresse:", &dstCtrl);
+		dstMask = row(df, "S&ubnetzmaske:", &dstCtrl);
+		FXHorizontalFrame* pr = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,6,0);
+		new FXLabel(pr, "&Protokoll:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
+		protoBox = new FXListBox(pr, this, ID_PROTO, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		// Reihenfolge und Namen wie rtrfiltr.dll (Texte 12-15).
+		protoBox->appendItem("Beliebig");
+		protoBox->appendItem("TCP");
+		protoBox->appendItem("UDP");
+		protoBox->appendItem("ICMP");
+		protoBox->setNumVisible(4);
+		sport = row(main, "&Quellport:", NULL);
+		dport = row(main, "Zie&lport:", NULL);
+
+		srcCheck->setCheck(!f.src.empty());
+		dstCheck->setCheck(!f.dst.empty());
+		srcAddr->setText(f.src.c_str()); srcMask->setText(f.srcMask.empty() ? "255.255.255.0" : f.srcMask.c_str());
+		dstAddr->setText(f.dst.c_str()); dstMask->setText(f.dstMask.empty() ? "255.255.255.0" : f.dstMask.c_str());
+		protoBox->setCurrentItem(f.proto == "tcp" ? 1 : f.proto == "udp" ? 2 : f.proto == "icmp" ? 3 : 0);
+		sport->setText(f.sport.c_str());
+		dport->setText(f.dport.c_str());
+
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		update2();
+	}
+	void update2() {
+		for (auto* w : srcCtrl) { if (srcCheck->getCheck()) w->enable(); else w->disable(); }
+		for (auto* w : dstCtrl) { if (dstCheck->getCheck()) w->enable(); else w->disable(); }
+		bool ports = protoBox->getCurrentItem() == 1 || protoBox->getCurrentItem() == 2;
+		if (ports) { sport->enable(); dport->enable(); } else { sport->disable(); dport->disable(); }
+	}
+	long onToggle(FXObject*, FXSelector, void*) { update2(); return 1; }
+	long onOk(FXObject*, FXSelector, void*) {
+		unsigned a,b,c,d;
+		if (srcCheck->getCheck() && sscanf(svcprobe::trimmed(srcAddr->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
+			FXMessageBox::error(this, MBOX_OK, "IP-Filter", "Geben Sie eine IP-Adresse für die Quelle an."); return 1;
+		}
+		if (dstCheck->getCheck() && sscanf(svcprobe::trimmed(dstAddr->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
+			FXMessageBox::error(this, MBOX_OK, "IP-Filter", "Geben Sie eine IP-Adresse für das Ziel an."); return 1;
+		}
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	PacketFilter filter() const {
+		PacketFilter f;
+		if (srcCheck->getCheck()) { f.src = svcprobe::trimmed(srcAddr->getText().text()); f.srcMask = svcprobe::trimmed(srcMask->getText().text()); }
+		if (dstCheck->getCheck()) { f.dst = svcprobe::trimmed(dstAddr->getText().text()); f.dstMask = svcprobe::trimmed(dstMask->getText().text()); }
+		int p = protoBox->getCurrentItem();
+		f.proto = p == 1 ? "tcp" : p == 2 ? "udp" : p == 3 ? "icmp" : "";
+		if (p == 1 || p == 2) { f.sport = svcprobe::trimmed(sport->getText().text()); f.dport = svcprobe::trimmed(dport->getText().text()); }
+		return f;
+	}
+	virtual ~IpFilterDialog() {}
+};
+FXDEFMAP(IpFilterDialog) IpFilterDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, IpFilterDialog::ID_SRC, IpFilterDialog::onToggle),
+	FXMAPFUNC(SEL_COMMAND, IpFilterDialog::ID_DST, IpFilterDialog::onToggle),
+	FXMAPFUNC(SEL_COMMAND, IpFilterDialog::ID_PROTO, IpFilterDialog::onToggle),
+	FXMAPFUNC(SEL_COMMAND, IpFilterDialog::ID_OK, IpFilterDialog::onOk),
+};
+FXIMPLEMENT(IpFilterDialog, FXDialogBox, IpFilterDialogMap, ARRAYNUMBER(IpFilterDialogMap))
+
+// Dialog "Eingabefilter"/"Ausgabefilter" (rtrfiltr.dll, 14002).
+class FilterListDialog : public FXDialogBox {
+	FXDECLARE(FilterListDialog)
+private:
+	std::vector<PacketFilter> filters;   // nur die dieser Schnittstelle/Richtung
+	std::string iface;
+	bool input = true;
+	FXint action = 0;                    // 0 = alle annehmen ausser..., 1 = alle verwerfen ausser...
+	FXDataTarget actionTarget;
+	FXIconList* list = nullptr;
+protected:
+	FilterListDialog() {}
+public:
+	enum { ID_ADD = FXDialogBox::ID_LAST, ID_EDIT, ID_REMOVE };
+	FilterListDialog(FXWindow* owner, const std::string& iface_, bool input_, const std::vector<PacketFilter>& initial)
+		: FXDialogBox(owner, input_ ? "Eingabefilter" : "Ausgabefilter", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,620,420),
+		  filters(initial), iface(iface_), input(input_), actionTarget(action) {
+		if (!filters.empty()) action = filters[0].dropExcept ? 1 : 0;
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
+		new FXLabel(main, input
+			? "Diese Filter steuern, welche Pakete für Weiterleitung oder Verarbeitung auf\ndieser Schnittstelle empfangen werden."
+			: "Diese Filter steuern, welche Pakete über diese Schnittstelle gesendet werden.", NULL, JUSTIFY_LEFT);
+		new FXRadioButton(main, input ? "Alle Pakete e&mpfangen, mit Ausnahme derjenigen, die die unten aufgeführten Kriterien erfüllen"
+		                              : "Alle Pakete über&tragen, mit Ausnahme derjenigen, die die unten aufgeführten Kriterien erfüllen",
+		                  &actionTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(main, "Alle Pakete &verwerfen, mit Ausnahme derjenigen, die die unten aufgeführten Kriterien erfüllen",
+		                  &actionTarget, FXDataTarget::ID_OPTION + 1);
+		new FXLabel(main, "&Filter:", NULL, JUSTIFY_LEFT);
+		FXPacker* lf = new FXPacker(main, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		list = new FXIconList(lf, NULL, 0, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		// Spalten wie rtrfiltr.dll (Texte 5-11).
+		for (auto& c : { std::make_pair("Quelladresse", 110), std::make_pair("Quellmaske", 110), std::make_pair("Zieladresse", 110),
+		                 std::make_pair("Zielmaske", 110), std::make_pair("Protokoll", 80), std::make_pair("Quellport oder -typ", 120),
+		                 std::make_pair("Zielport oder -code", 120) })
+			list->appendHeader(c.first, NULL, c.second);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXButton(btns, "&Hinzufügen...", NULL, this, ID_ADD, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "Be&arbeiten...", NULL, this, ID_EDIT, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXButton(btns, "&Entfernen", NULL, this, ID_REMOVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		reload();
+	}
+	void reload() {
+		list->clearItems();
+		for (auto& f : filters) {
+			FXString proto = f.proto.empty() ? "Beliebig" : f.proto == "tcp" ? "TCP" : f.proto == "udp" ? "UDP" : "ICMP";
+			list->appendItem(FXString(f.src.empty() ? "Beliebig" : f.src.c_str()) + "\t" + (f.srcMask.empty() ? "-" : f.srcMask.c_str()) + "\t" +
+			                 (f.dst.empty() ? "Beliebig" : f.dst.c_str()) + "\t" + (f.dstMask.empty() ? "-" : f.dstMask.c_str()) + "\t" +
+			                 proto + "\t" + (f.sport.empty() ? "-" : f.sport.c_str()) + "\t" + (f.dport.empty() ? "-" : f.dport.c_str()));
+		}
+	}
+	long onAdd(FXObject*, FXSelector, void*) {
+		IpFilterDialog dlg(this, PacketFilter());
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		PacketFilter f = dlg.filter();
+		f.iface = iface; f.input = input;
+		filters.push_back(f);
+		reload();
+		return 1;
+	}
+	long onEdit(FXObject*, FXSelector, void*) {
+		int i = list->getCurrentItem();
+		if (i < 0 || i >= (int)filters.size()) return 1;
+		IpFilterDialog dlg(this, filters[i]);
+		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+		PacketFilter f = dlg.filter();
+		f.iface = iface; f.input = input;
+		filters[i] = f;
+		reload();
+		return 1;
+	}
+	long onRemove(FXObject*, FXSelector, void*) {
+		int i = list->getCurrentItem();
+		if (i >= 0 && i < (int)filters.size()) { filters.erase(filters.begin() + i); reload(); }
+		return 1;
+	}
+	std::vector<PacketFilter> result() const {
+		std::vector<PacketFilter> out = filters;
+		for (auto& f : out) f.dropExcept = (action == 1);
+		return out;
+	}
+	virtual ~FilterListDialog() {}
+};
+FXDEFMAP(FilterListDialog) FilterListDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, FilterListDialog::ID_ADD, FilterListDialog::onAdd),
+	FXMAPFUNC(SEL_COMMAND, FilterListDialog::ID_EDIT, FilterListDialog::onEdit),
+	FXMAPFUNC(SEL_COMMAND, FilterListDialog::ID_REMOVE, FilterListDialog::onRemove),
+};
+FXIMPLEMENT(FilterListDialog, FXDialogBox, FilterListDialogMap, ARRAYNUMBER(FilterListDialogMap))
 
 // ---------------------------------------------------------------------
 // "Neue statische Route" -- die Dialoge des IP-Routers stecken in
@@ -571,7 +1086,7 @@ protected:
 	RrasWindow() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_CONFIGURE, ID_DEACTIVATE, ID_PROPERTIES, ID_REFRESH, ID_ABOUT,
-	       ID_LIST, ID_NEW_ROUTE, ID_DELETE_ROUTE };
+	       ID_LIST, ID_NEW_ROUTE, ID_DELETE_ROUTE, ID_IN_FILTER, ID_OUT_FILTER };
 
 	RrasWindow(FXApp* a);
 	virtual void create();
@@ -587,6 +1102,7 @@ public:
 	long onAbout(FXObject*, FXSelector, void*);
 	long onListRightClick(FXObject*, FXSelector, void*);
 	long onNewRoute(FXObject*, FXSelector, void*);
+	long onFilter(FXObject*, FXSelector, void*);
 	long onDeleteRoute(FXObject*, FXSelector, void*);
 	void buildServerNodes();
 	void setColumns(const std::vector<std::pair<const char*, int>>& cols);
@@ -608,6 +1124,7 @@ FXDEFMAP(RrasWindow) RrasWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_ABOUT, RrasWindow::onAbout),
 	FXMAPFUNC(SEL_RIGHTBUTTONRELEASE, RrasWindow::ID_LIST, RrasWindow::onListRightClick),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_NEW_ROUTE, RrasWindow::onNewRoute),
+	FXMAPFUNCS(SEL_COMMAND, RrasWindow::ID_IN_FILTER, RrasWindow::ID_OUT_FILTER, RrasWindow::onFilter),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_DELETE_ROUTE, RrasWindow::onDeleteRoute),
 };
 FXIMPLEMENT(RrasWindow, FXMainWindow, RrasWindowMap, ARRAYNUMBER(RrasWindowMap))
@@ -762,8 +1279,16 @@ void RrasWindow::showFor(FXTreeItem* item) {
 				                     icoNetwork, icoNetwork);
 			statusbar->setText(" LAN-Schnittstellen und Schnittstellen für Wählen bei Bedarf");
 		} else if (item == portsItem) {
-			setColumns({ { "Name", 220 }, { "Gerät", 200 }, { "Status", 160 } });
-			statusbar->setText(" Einwähl- und VPN-Anschlüsse sind noch nicht umgesetzt.");
+			setColumns({ { "Name", 220 }, { "Gerät", 200 }, { "Status", 220 } });
+			VpnConfig c;
+			c.backend = state.vpnBackend == "wireguard" ? VPN_WIREGUARD : state.vpnBackend == "openvpn" ? VPN_OPENVPN
+			          : state.vpnBackend == "strongswan" ? VPN_STRONGSWAN : VPN_NONE;
+			c.name = state.vpnName;
+			for (auto& p : listVpnPorts(c))
+				itemList->appendItem(FXString(p.name.c_str()) + "\t" + p.device.c_str() + "\t" + p.status.c_str(), icoNetwork, icoNetwork);
+			statusbar->setText(state.role == ROLE_VPN
+				? FXString(" VPN-Server: ") + state.vpnBackend.c_str() + ", Netzwerk " + state.vpnSubnet.c_str() + ", Port " + state.vpnPort.c_str()
+				: FXString(" Es ist kein VPN-Server eingerichtet. Einwählanschlüsse (Modem/ISDN) sind nicht umgesetzt."));
 		} else if (item == ipGeneralItem) {
 			setColumns({ { "Schnittstelle", 200 }, { "Typ", 160 }, { "IP-Adresse", 180 }, { "Verwaltungsstatus", 130 }, { "Betriebsstatus", 130 } });
 			for (auto& i : listInterfaces())
@@ -859,10 +1384,30 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	RrasState st = state;
 	st.role = dlg.role();
+	std::string vpnNote;
+	if (st.role == ROLE_VPN) {
+		VpnSetupDialog vdlg(this);
+		if (!vdlg.execute(PLACEMENT_OWNER)) return 1;
+		VpnConfig c = vdlg.config();
+		if (!setupVpn(c, vpnNote, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "%s", errorMsg.text());
+			return 1;
+		}
+		st.vpnBackend = vpnKeyword(c.backend);
+		st.vpnName = c.name;
+		st.vpnPort = c.port;
+		st.vpnSubnet = c.subnet;
+		st.vpnServerIp = c.serverIp;
+	}
 	if (!applyForwarding(true, errorMsg) || !writeState(st, errorMsg)) {
 		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
 		reload();
 		return 1;
+	}
+	// Gemerkte Paketfilter wieder laden.
+	{
+		std::vector<PacketFilter> f = loadFilters();
+		if (!f.empty()) { FXString e; applyFilters(f, e); }
 	}
 	// Gemerkte statische Routen wieder setzen (der Kernel hat sie nach
 	// einem Neustart nicht mehr).
@@ -875,8 +1420,9 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 		runAsRootCaptured(args, out);
 	}
 	reload();
-	FXMessageBox::information(this, MBOX_OK, "Routing und RAS",
-		"Routing und RAS wurde aktiviert.\n\nDie IP-Weiterleitung ist eingeschaltet und bleibt es auch nach einem Neustart.");
+	FXString msg = "Routing und RAS wurde aktiviert.\n\nDie IP-Weiterleitung ist eingeschaltet und bleibt es auch nach einem Neustart.";
+	if (!vpnNote.empty()) msg += FXString("\n\n") + vpnNote.c_str();
+	FXMessageBox::information(this, MBOX_OK, "Routing und RAS", "%s", msg.text());
 	return 1;
 }
 
@@ -911,8 +1457,22 @@ long RrasWindow::onProperties(FXObject*, FXSelector, void*) {
 }
 
 long RrasWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
-	if (tree->getCurrentItem() != staticRoutesItem) return 1;
 	FXEvent* ev = (FXEvent*)ptr;
+	// Schnittstellenliste: Ein-/Ausgabefilter wie im Original.
+	if (tree->getCurrentItem() == ifacesItem || tree->getCurrentItem() == ipGeneralItem) {
+		FXint idx = itemList->getItemAt(ev->win_x, ev->win_y);
+		if (idx < 0) return 1;
+		itemList->setCurrentItem(idx);
+		itemList->selectItem(idx);
+		FXMenuPane menu(this);
+		new FXMenuCommand(&menu, "&Eingabefilter...", NULL, this, ID_IN_FILTER);
+		new FXMenuCommand(&menu, "&Ausgabefilter...", NULL, this, ID_OUT_FILTER);
+		menu.create();
+		menu.popup(NULL, ev->root_x, ev->root_y);
+		getApp()->runModalWhileShown(&menu);
+		return 1;
+	}
+	if (tree->getCurrentItem() != staticRoutesItem) return 1;
 	FXint idx = itemList->getItemAt(ev->win_x, ev->win_y);
 	if (idx >= 0) { itemList->setCurrentItem(idx); itemList->selectItem(idx); }
 	FXMenuPane menu(this);
@@ -976,6 +1536,28 @@ long RrasWindow::onDeleteRoute(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	storeRouteLines(keep, errorMsg);
 	showFor(tree->getCurrentItem());
+	return 1;
+}
+
+// Ein-/Ausgabefilter der markierten Schnittstelle.
+long RrasWindow::onFilter(FXObject* , FXSelector sel, void*) {
+	bool input = FXSELID(sel) == ID_IN_FILTER;
+	int idx = itemList->getCurrentItem();
+	if (idx < 0) return 1;
+	std::string iface = itemList->getItemText(idx).section('\t', 0).text();
+	std::vector<PacketFilter> all = loadFilters(), mine, others;
+	for (auto& f : all) {
+		if (f.iface == iface && f.input == input) mine.push_back(f);
+		else others.push_back(f);
+	}
+	FilterListDialog dlg(this, iface, input, mine);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	std::vector<PacketFilter> result = others;
+	for (auto& f : dlg.result()) result.push_back(f);
+	FXString errorMsg;
+	if (!saveFilters(result, errorMsg))
+		FXMessageBox::error(this, MBOX_OK, input ? "Eingabefilter" : "Ausgabefilter", "%s", errorMsg.text());
 	return 1;
 }
 

@@ -33,6 +33,28 @@ Aktualisieren und Eigenschaften.
     Verwaltungs- und Betriebsstatus (aus `ip addr`)
   - *IP-Routing → Statische Routen*: die Routingtabelle (aus
     `ip route`), Rechtsklick legt eine Route an oder löscht sie
+- **VPN-Server**: Die Rolle "VPN-Server" des Assistenten fragt danach,
+  welcher Dienst die Aufgabe übernimmt -- Windows 2000 hat hier PPTP und
+  L2TP/IPSec:
+  - *WireGuard*: wird vollständig eingerichtet -- Schlüsselpaar erzeugt,
+    `/etc/wireguard/<Name>.conf` geschrieben, `wg-quick@<Name>` aktiviert;
+    der öffentliche Schlüssel des Servers wird angezeigt. Clients werden
+    als `[Peer]`-Abschnitte ergänzt.
+  - *OpenVPN*: schreibt `/etc/openvpn/server/<Name>.conf`. Zertifikate
+    (ca.crt, server.crt, server.key, dh.pem) legt die Konsole **nicht**
+    an; fehlen sie, sagt sie das und startet den Dienst nicht.
+  - *strongSwan*: schreibt `/etc/swanctl/conf.d/<Name>.conf` (IKEv2 mit
+    Adresspool). Zertifikate und Benutzer müssen vorhanden sein.
+  - Der Knoten *Ports* zeigt den eingerichteten Dienst mit seinem Zustand
+    und bei WireGuard zusätzlich die Peers.
+- **Paketfilter** je Schnittstelle (Rechtsklick auf eine Schnittstelle →
+  "Eingabefilter..." / "Ausgabefilter..."), Dialoge nach `rtrfiltr.dll`:
+  "Alle Pakete empfangen/übertragen, mit Ausnahme..." bzw. "Alle Pakete
+  verwerfen, mit Ausnahme...", darunter die Filterliste mit
+  Quelladresse/-maske, Zieladresse/-maske, Protokoll und Ports. Die
+  Filter stehen in `/etc/ice2k/rras-filters`; daraus entsteht
+  `/etc/ice2k/rras-filter.nft` (Tabelle `inet ice2k_rras`), das mit
+  `nft -f` geladen wird.
 - **Statische Routen** werden sofort gesetzt (`ip route add`) und in
   `/etc/ice2k/rras-routes` gemerkt; beim nächsten "Konfigurieren und
   aktivieren" werden sie wieder gesetzt, da der Kernel Routen beim
@@ -42,14 +64,16 @@ Die gewählte Rolle merkt sich `/etc/ice2k/rras.conf`.
 
 ## Was noch fehlt
 
-- Einwähl- und VPN-Server: Ports, Schnittstellen, Anschlüsse,
-  RAS-Richtlinien und Protokollierung. Der Dialog sagt das ausdrücklich,
-  statt etwas vorzutäuschen.
+- Einwählserver (Modem/ISDN), RAS-Richtlinien und Protokollierung.
+- VPN-Clientverwaltung: Peers bzw. Benutzer werden noch nicht über die
+  Oberfläche angelegt (bei WireGuard also keine Peer-Verwaltung).
+- Die Paketfilter kennen nur IPv4 und werden beim Systemstart erst mit
+  "Konfigurieren und aktivieren" wieder geladen; eine eigene
+  systemd-Unit dafür fehlt.
 - Adressumsetzung (Internetverbindungsserver) und Firewallregeln.
 - Routingprotokolle (RIP, OSPF) -- unter Linux wäre FRR der
   naheliegende Unterbau.
-- Paketfilter (Ein-/Ausgangsfilter je Schnittstelle); Vorlage ist
-  `rtrfiltr.dll`, Unterbau wäre nftables.
+- Adressumsetzung (NAT) für den Internetverbindungsserver.
 - "LAN- und Einwählrouting" unterscheidet sich derzeit nur im
   gespeicherten Zustand, solange es keine Einwahl gibt.
 
