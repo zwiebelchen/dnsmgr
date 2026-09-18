@@ -223,6 +223,116 @@ static FXString hostName() {
 }
 
 // ---------------------------------------------------------------------
+// Netzwerkschnittstellen und Routen des Systems ("ip" aus iproute2).
+// ---------------------------------------------------------------------
+struct IfaceInfo {
+	std::string name;
+	std::string type;      // "Loopback", "Lokale Verbindung" ...
+	bool up = false;       // Verwaltungsstatus (IFF_UP)
+	bool running = false;  // Verbindung besteht (LOWER_UP)
+	std::string address;   // erste IPv4-Adresse mit Praefix
+};
+
+static std::vector<IfaceInfo> listInterfaces() {
+	std::vector<IfaceInfo> out;
+	std::string raw;
+	if (runAsRootCaptured({ FXString("ip"), FXString("-o"), FXString("link"), FXString("show") }, raw) != 0) return out;
+	for (auto& line : splitLines(raw)) {
+		size_t colon = line.find(": ");
+		if (colon == std::string::npos) continue;
+		size_t second = line.find(':', colon + 2);
+		if (second == std::string::npos) continue;
+		IfaceInfo i;
+		i.name = line.substr(colon + 2, second - colon - 2);
+		size_t at = i.name.find('@');
+		if (at != std::string::npos) i.name = i.name.substr(0, at);
+		i.up = line.find("UP") != std::string::npos;
+		i.running = line.find("LOWER_UP") != std::string::npos;
+		i.type = i.name == "lo" ? "Loopback" : "Lokale Verbindung";
+		out.push_back(i);
+	}
+	raw.clear();
+	runAsRootCaptured({ FXString("ip"), FXString("-o"), FXString("-4"), FXString("addr"), FXString("show") }, raw);
+	for (auto& line : splitLines(raw)) {
+		std::istringstream iss(line);
+		std::string idx, name, fam, addr;
+		iss >> idx >> name >> fam >> addr;
+		for (auto& i : out) if (i.name == name && i.address.empty()) i.address = addr;
+	}
+	return out;
+}
+
+struct RouteInfo {
+	std::string dest;      // "192.168.5.0"
+	std::string mask;      // "255.255.255.0"
+	std::string gateway;   // leer = direkt verbunden
+	std::string iface;
+	int metric = 0;
+};
+
+// "24" -> "255.255.255.0"
+static std::string prefixToMask(int bits) {
+	unsigned long m = bits >= 32 ? 0xFFFFFFFFul : (bits <= 0 ? 0ul : (0xFFFFFFFFul << (32 - bits)));
+	char buf[20];
+	snprintf(buf, sizeof(buf), "%lu.%lu.%lu.%lu", (m >> 24) & 0xFF, (m >> 16) & 0xFF, (m >> 8) & 0xFF, m & 0xFF);
+	return buf;
+}
+
+static int maskToPrefix(const std::string& mask) {
+	unsigned a = 0, b = 0, c = 0, d = 0;
+	if (sscanf(mask.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return -1;
+	unsigned long m = (a << 24) | (b << 16) | (c << 8) | d;
+	int bits = 0;
+	while (bits < 32 && (m & (0x80000000ul >> bits))) bits++;
+	// Nach den gesetzten Bits darf nichts mehr kommen.
+	unsigned long expect = bits == 0 ? 0ul : (0xFFFFFFFFul << (32 - bits)) & 0xFFFFFFFFul;
+	return m == expect ? bits : -1;
+}
+
+static std::vector<RouteInfo> listRoutes() {
+	std::vector<RouteInfo> out;
+	std::string raw;
+	if (runAsRootCaptured({ FXString("ip"), FXString("-4"), FXString("route"), FXString("show") }, raw) != 0) return out;
+	for (auto& line : splitLines(raw)) {
+		std::istringstream iss(line);
+		std::string tok;
+		RouteInfo r;
+		if (!(iss >> tok)) continue;
+		if (tok == "default") { r.dest = "0.0.0.0"; r.mask = "0.0.0.0"; }
+		else {
+			size_t slash = tok.find('/');
+			r.dest = slash == std::string::npos ? tok : tok.substr(0, slash);
+			r.mask = slash == std::string::npos ? "255.255.255.255" : prefixToMask(atoi(tok.c_str() + slash + 1));
+		}
+		while (iss >> tok) {
+			if (tok == "via") iss >> r.gateway;
+			else if (tok == "dev") iss >> r.iface;
+			else if (tok == "metric") { std::string m; iss >> m; r.metric = atoi(m.c_str()); }
+		}
+		out.push_back(r);
+	}
+	return out;
+}
+
+// Statische Routen dieser Konsole: zusaetzlich zu "ip route add" in einer
+// Datei gemerkt, damit sie beim Aktivieren wieder gesetzt werden koennen
+// -- der Kernel vergisst sie beim Neustart.
+static const char* RRAS_ROUTES = "/etc/ice2k/rras-routes";
+
+static std::vector<std::string> storedRouteLines() {
+	std::vector<std::string> out;
+	for (auto& l : splitLines(readFileUnprivileged(RRAS_ROUTES)))
+		if (!svcprobe::trimmed(l).empty() && l[0] != '#') out.push_back(svcprobe::trimmed(l));
+	return out;
+}
+
+static bool storeRouteLines(const std::vector<std::string>& lines, FXString& errorMsg) {
+	std::string content = "# Statische Routen, von ice2k \"Routing und RAS\" verwaltet.\n";
+	for (auto& l : lines) content += l + "\n";
+	return writeFileAsRoot(RRAS_ROUTES, content, errorMsg);
+}
+
+// ---------------------------------------------------------------------
 // Dialog "Routing und RAS konfigurieren und aktivieren" -- im Original
 // ein Assistent; hier eine Seite mit denselben Serverrollen.
 // ---------------------------------------------------------------------
@@ -362,6 +472,78 @@ FXDEFMAP(ServerPropertiesDialog) ServerPropertiesDialogMap[] = {
 FXIMPLEMENT(ServerPropertiesDialog, FXDialogBox, ServerPropertiesDialogMap, ARRAYNUMBER(ServerPropertiesDialogMap))
 
 // ---------------------------------------------------------------------
+// "Neue statische Route" -- die Dialoge des IP-Routers stecken in
+// iprtrui.dll, die hier nicht vorliegt; Beschriftungen daher eigene,
+// aber mit den Feldern des Originals.
+// ---------------------------------------------------------------------
+class StaticRouteDialog : public FXDialogBox {
+	FXDECLARE(StaticRouteDialog)
+private:
+	FXListBox* ifaceBox = nullptr;
+	FXTextField *destField = nullptr, *maskField = nullptr, *gwField = nullptr, *metricField = nullptr;
+	std::vector<std::string> ifaces;
+protected:
+	StaticRouteDialog() {}
+public:
+	enum { ID_OK = FXDialogBox::ID_LAST };
+	StaticRouteDialog(FXWindow* owner, const std::vector<IfaceInfo>& interfaces)
+		: FXDialogBox(owner, "Statische Route", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,400,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,4);
+		auto row = [&](const char* label) {
+			FXHorizontalFrame* r = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+			new FXLabel(r, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,120,0);
+			return r;
+		};
+		FXHorizontalFrame* ir = row("&Schnittstelle:");
+		ifaceBox = new FXListBox(ir, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		for (auto& i : interfaces) { if (i.name == "lo") continue; ifaceBox->appendItem(i.name.c_str()); ifaces.push_back(i.name); }
+		ifaceBox->setNumVisible(std::min<int>(8, (int)ifaces.size()));
+		destField = new FXTextField(row("&Ziel:"), 18, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		maskField = new FXTextField(row("&Netzwerkmaske:"), 18, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		maskField->setText("255.255.255.0");
+		gwField = new FXTextField(row("&Gateway:"), 18, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		metricField = new FXTextField(row("&Metrik:"), 6, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		metricField->setText("1");
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	long onOk(FXObject*, FXSelector, void*) {
+		if (ifaces.empty()) { FXMessageBox::error(this, MBOX_OK, "Statische Route", "Es wurde keine Netzwerkschnittstelle gefunden."); return 1; }
+		unsigned a,b,c,d;
+		if (sscanf(svcprobe::trimmed(destField->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
+			FXMessageBox::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige IP-Adresse für das Ziel an."); return 1;
+		}
+		if (maskToPrefix(svcprobe::trimmed(maskField->getText().text())) < 0) {
+			FXMessageBox::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige Netzwerkmaske an (z.B. 255.255.255.0)."); return 1;
+		}
+		std::string gw = svcprobe::trimmed(gwField->getText().text());
+		if (!gw.empty() && sscanf(gw.c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
+			FXMessageBox::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige IP-Adresse für das Gateway an."); return 1;
+		}
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	// Route als "ip route"-Argumente, so wie sie auch gespeichert wird.
+	std::string routeSpec() const {
+		std::string dest = svcprobe::trimmed(destField->getText().text());
+		int bits = maskToPrefix(svcprobe::trimmed(maskField->getText().text()));
+		std::string gw = svcprobe::trimmed(gwField->getText().text());
+		std::string metric = svcprobe::trimmed(metricField->getText().text());
+		std::string spec = dest + "/" + std::to_string(bits);
+		if (!gw.empty()) spec += " via " + gw;
+		spec += " dev " + ifaces[std::max(0, ifaceBox->getCurrentItem())];
+		if (!metric.empty() && metric != "0") spec += " metric " + metric;
+		return spec;
+	}
+	virtual ~StaticRouteDialog() {}
+};
+FXDEFMAP(StaticRouteDialog) StaticRouteDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, StaticRouteDialog::ID_OK, StaticRouteDialog::onOk),
+};
+FXIMPLEMENT(StaticRouteDialog, FXDialogBox, StaticRouteDialogMap, ARRAYNUMBER(StaticRouteDialogMap))
+
+// ---------------------------------------------------------------------
 // Hauptfenster
 // ---------------------------------------------------------------------
 class RrasWindow : public FXMainWindow {
@@ -376,12 +558,20 @@ private:
 	FXLabel* welcomeTitle = nullptr, *welcomeText = nullptr;
 	FXLabel* statusbar = nullptr;
 	FXTreeItem *rootItem = nullptr, *statusItem = nullptr, *serverItem = nullptr;
-	FXIcon *icoRoot = nullptr, *icoStatus = nullptr, *icoServerStopped = nullptr, *icoServerStarted = nullptr, *icoInfo = nullptr;
+	// Knoten unterhalb des Servers -- nur, solange Routing und RAS aktiv ist
+	// (wie im Original).
+	FXTreeItem *ifacesItem = nullptr, *portsItem = nullptr, *ipRoutingItem = nullptr,
+	           *ipGeneralItem = nullptr, *staticRoutesItem = nullptr;
+	FXIconList* itemList = nullptr;
+	std::vector<RouteInfo> shownRoutes;
+	FXIcon *icoRoot = nullptr, *icoStatus = nullptr, *icoServerStopped = nullptr, *icoServerStarted = nullptr,
+	       *icoInfo = nullptr, *icoNetwork = nullptr;
 	RrasState state;
 protected:
 	RrasWindow() {}
 public:
-	enum { ID_TREE = FXMainWindow::ID_LAST, ID_CONFIGURE, ID_DEACTIVATE, ID_PROPERTIES, ID_REFRESH, ID_ABOUT };
+	enum { ID_TREE = FXMainWindow::ID_LAST, ID_CONFIGURE, ID_DEACTIVATE, ID_PROPERTIES, ID_REFRESH, ID_ABOUT,
+	       ID_LIST, ID_NEW_ROUTE, ID_DELETE_ROUTE };
 
 	RrasWindow(FXApp* a);
 	virtual void create();
@@ -395,6 +585,11 @@ public:
 	long onProperties(FXObject*, FXSelector, void*);
 	long onRefresh(FXObject*, FXSelector, void*);
 	long onAbout(FXObject*, FXSelector, void*);
+	long onListRightClick(FXObject*, FXSelector, void*);
+	long onNewRoute(FXObject*, FXSelector, void*);
+	long onDeleteRoute(FXObject*, FXSelector, void*);
+	void buildServerNodes();
+	void setColumns(const std::vector<std::pair<const char*, int>>& cols);
 
 	void reload();
 	void showFor(FXTreeItem* item);
@@ -411,6 +606,9 @@ FXDEFMAP(RrasWindow) RrasWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_PROPERTIES, RrasWindow::onProperties),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_REFRESH, RrasWindow::onRefresh),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_ABOUT, RrasWindow::onAbout),
+	FXMAPFUNC(SEL_RIGHTBUTTONRELEASE, RrasWindow::ID_LIST, RrasWindow::onListRightClick),
+	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_NEW_ROUTE, RrasWindow::onNewRoute),
+	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_DELETE_ROUTE, RrasWindow::onDeleteRoute),
 };
 FXIMPLEMENT(RrasWindow, FXMainWindow, RrasWindowMap, ARRAYNUMBER(RrasWindowMap))
 
@@ -422,7 +620,8 @@ RrasWindow::RrasWindow(FXApp* a)
 	icoServerStopped = new FXPNGIcon(a, resico_rras_server_stopped, IMAGE_NEAREST);
 	icoServerStarted = new FXPNGIcon(a, resico_rras_server_started, IMAGE_NEAREST);
 	icoInfo = new FXPNGIcon(a, resico_key, IMAGE_NEAREST);
-	for (FXIcon* i : { icoRoot, icoStatus, icoServerStopped, icoServerStarted, icoInfo }) i->create();
+	icoNetwork = new FXPNGIcon(a, resico_rras_network, IMAGE_NEAREST);
+	for (FXIcon* i : { icoRoot, icoStatus, icoServerStopped, icoServerStarted, icoInfo, icoNetwork }) i->create();
 
 	menubar = new FXMenuBar(this, LAYOUT_SIDE_TOP | LAYOUT_FILL_X);
 	vorgangmenu = new FXMenuPane(this);
@@ -487,6 +686,10 @@ RrasWindow::RrasWindow(FXApp* a)
 	statusList->appendHeader("Ports gesamt", NULL, 90);
 	statusList->appendHeader("Betriebszeit (Tage:Std.:Min.)", NULL, 160);
 
+	// Seite 2: Listen der Knoten unterhalb des Servers
+	FXPacker* itemframe = new FXPacker(rightPane, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+	itemList = new FXIconList(itemframe, this, ID_LIST, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
 	rootItem = tree->appendItem(0, "Routing und RAS", icoRoot, icoRoot);
 	statusItem = tree->appendItem(rootItem, "Serverstatus", icoStatus, icoStatus);
 	serverItem = tree->appendItem(rootItem, hostName() + " (lokal)", icoServerStopped, icoServerStopped);
@@ -499,6 +702,28 @@ void RrasWindow::create() {
 	FXMainWindow::create();
 	reload();
 	show(PLACEMENT_SCREEN);
+}
+
+// Unterhalb des Servers erscheinen die Knoten des Originals, sobald
+// Routing und RAS aktiviert ist (Namen aus mprsnap.dll: 13, 21).
+void RrasWindow::buildServerNodes() {
+	for (FXTreeItem* it : { staticRoutesItem, ipGeneralItem, ipRoutingItem, portsItem, ifacesItem })
+		if (it) tree->removeItem(it);
+	ifacesItem = portsItem = ipRoutingItem = ipGeneralItem = staticRoutesItem = nullptr;
+	if (!state.configured()) return;
+	ifacesItem = tree->appendItem(serverItem, "Routingschnittstellen", icoNetwork, icoNetwork);
+	portsItem = tree->appendItem(serverItem, "Ports", icoStatus, icoStatus);
+	ipRoutingItem = tree->appendItem(serverItem, "IP-Routing", icoNetwork, icoNetwork);
+	ipGeneralItem = tree->appendItem(ipRoutingItem, "Allgemein", icoNetwork, icoNetwork);
+	staticRoutesItem = tree->appendItem(ipRoutingItem, "Statische Routen", icoNetwork, icoNetwork);
+	tree->expandTree(serverItem);
+	tree->expandTree(ipRoutingItem);
+}
+
+void RrasWindow::setColumns(const std::vector<std::pair<const char*, int>>& cols) {
+	while (itemList->getNumHeaders() > 0) itemList->removeHeader(0);
+	for (auto& c : cols) itemList->appendHeader(c.first, NULL, c.second);
+	itemList->clearItems();
 }
 
 void RrasWindow::reload() {
@@ -519,11 +744,46 @@ void RrasWindow::reload() {
 	statusbar->setText(state.configured()
 		? FXString(" ") + roleLabel(state.role) + (state.forwarding ? ", IP-Weiterleitung aktiv" : ", IP-Weiterleitung aus")
 		: FXString(" Routing und RAS ist auf diesem Server nicht konfiguriert."));
+	buildServerNodes();
 	showFor(tree->getCurrentItem());
 }
 
 void RrasWindow::showFor(FXTreeItem* item) {
 	if (item == statusItem) { rightPane->setCurrent(1); return; }
+	if (item && (item == ifacesItem || item == portsItem || item == ipGeneralItem || item == staticRoutesItem)) {
+		rightPane->setCurrent(2);
+		shownRoutes.clear();
+		if (item == ifacesItem) {
+			// Spalten wie mprsnap.dll (14-17).
+			setColumns({ { "Schnittstelle", 200 }, { "Typ", 160 }, { "Status", 120 }, { "Status der Verbindung", 160 } });
+			for (auto& i : listInterfaces())
+				itemList->appendItem(FXString(i.name.c_str()) + "\t" + i.type.c_str() + "\t" +
+				                     (i.up ? "Aktiviert" : "Deaktiviert") + "\t" + (i.running ? "Verbunden" : "Getrennt"),
+				                     icoNetwork, icoNetwork);
+			statusbar->setText(" LAN-Schnittstellen und Schnittstellen für Wählen bei Bedarf");
+		} else if (item == portsItem) {
+			setColumns({ { "Name", 220 }, { "Gerät", 200 }, { "Status", 160 } });
+			statusbar->setText(" Einwähl- und VPN-Anschlüsse sind noch nicht umgesetzt.");
+		} else if (item == ipGeneralItem) {
+			setColumns({ { "Schnittstelle", 200 }, { "Typ", 160 }, { "IP-Adresse", 180 }, { "Verwaltungsstatus", 130 }, { "Betriebsstatus", 130 } });
+			for (auto& i : listInterfaces())
+				itemList->appendItem(FXString(i.name.c_str()) + "\t" + i.type.c_str() + "\t" +
+				                     (i.address.empty() ? FXString("-") : FXString(i.address.c_str())) + "\t" +
+				                     (i.up ? "Aktiviert" : "Deaktiviert") + "\t" + (i.running ? "Betriebsbereit" : "Nicht betriebsbereit"),
+				                     icoNetwork, icoNetwork);
+			statusbar->setText(" IP-Schnittstellen dieses Servers");
+		} else {
+			setColumns({ { "Ziel", 150 }, { "Netzwerkmaske", 140 }, { "Gateway", 150 }, { "Schnittstelle", 140 }, { "Metrik", 70 } });
+			shownRoutes = listRoutes();
+			for (auto& r : shownRoutes)
+				itemList->appendItem(FXString(r.dest.c_str()) + "\t" + r.mask.c_str() + "\t" +
+				                     (r.gateway.empty() ? FXString("Direkt verbunden") : FXString(r.gateway.c_str())) + "\t" +
+				                     r.iface.c_str() + "\t" + FXString(std::to_string(r.metric).c_str()),
+				                     icoNetwork, icoNetwork);
+			statusbar->setText(" Rechtsklick in die Liste: Neue statische Route anlegen oder eine Route löschen.");
+		}
+		return;
+	}
 	rightPane->setCurrent(0);
 	if (item == serverItem) {
 		welcomeTitle->setText(state.configured() ? "Routing und RAS ist aktiviert" : "Den Routing- und RAS-Server konfigurieren");
@@ -604,6 +864,16 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 		reload();
 		return 1;
 	}
+	// Gemerkte statische Routen wieder setzen (der Kernel hat sie nach
+	// einem Neustart nicht mehr).
+	for (auto& spec : storedRouteLines()) {
+		std::vector<FXString> args = { FXString("ip"), FXString("route"), FXString("replace") };
+		std::istringstream iss(spec);
+		std::string tok;
+		while (iss >> tok) args.push_back(FXString(tok.c_str()));
+		std::string out;
+		runAsRootCaptured(args, out);
+	}
 	reload();
 	FXMessageBox::information(this, MBOX_OK, "Routing und RAS",
 		"Routing und RAS wurde aktiviert.\n\nDie IP-Weiterleitung ist eingeschaltet und bleibt es auch nach einem Neustart.");
@@ -637,6 +907,75 @@ long RrasWindow::onProperties(FXObject*, FXSelector, void*) {
 	if (!applyForwarding(st.role != ROLE_NONE, errorMsg) || !writeState(st, errorMsg))
 		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
 	reload();
+	return 1;
+}
+
+long RrasWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
+	if (tree->getCurrentItem() != staticRoutesItem) return 1;
+	FXEvent* ev = (FXEvent*)ptr;
+	FXint idx = itemList->getItemAt(ev->win_x, ev->win_y);
+	if (idx >= 0) { itemList->setCurrentItem(idx); itemList->selectItem(idx); }
+	FXMenuPane menu(this);
+	new FXMenuCommand(&menu, "&Neue statische Route...", NULL, this, ID_NEW_ROUTE);
+	if (idx >= 0 && idx < (int)shownRoutes.size()) {
+		new FXMenuSeparator(&menu);
+		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_ROUTE);
+	}
+	menu.create();
+	menu.popup(NULL, ev->root_x, ev->root_y);
+	getApp()->runModalWhileShown(&menu);
+	return 1;
+}
+
+// Setzt die Route sofort und merkt sie sich, damit sie beim naechsten
+// Aktivieren wieder gesetzt werden kann -- der Kernel vergisst Routen
+// beim Neustart.
+long RrasWindow::onNewRoute(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	StaticRouteDialog dlg(this, listInterfaces());
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	std::string spec = dlg.routeSpec();
+	std::string out;
+	std::vector<FXString> args = { FXString("ip"), FXString("route"), FXString("add") };
+	std::istringstream iss(spec);
+	std::string tok;
+	while (iss >> tok) args.push_back(FXString(tok.c_str()));
+	if (runAsRootCaptured(args, out) != 0) {
+		FXMessageBox::error(this, MBOX_OK, "Statische Route", "Die Route konnte nicht gesetzt werden:\n\n%s", svcprobe::trimmed(out).c_str());
+		return 1;
+	}
+	std::vector<std::string> lines = storedRouteLines();
+	lines.push_back(spec);
+	FXString errorMsg;
+	if (!storeRouteLines(lines, errorMsg))
+		FXMessageBox::warning(this, MBOX_OK, "Statische Route",
+			"Die Route ist gesetzt, konnte aber nicht dauerhaft gespeichert werden:\n\n%s", errorMsg.text());
+	showFor(tree->getCurrentItem());
+	return 1;
+}
+
+long RrasWindow::onDeleteRoute(FXObject*, FXSelector, void*) {
+	int idx = itemList->getCurrentItem();
+	if (idx < 0 || idx >= (int)shownRoutes.size()) return 1;
+	const RouteInfo& r = shownRoutes[idx];
+	if (FXMessageBox::question(this, MBOX_YES_NO, "Statische Route",
+	        "Möchten Sie die Route zu %s wirklich löschen?", r.dest.c_str()) != MBOX_CLICKED_YES) return 1;
+	int bits = maskToPrefix(r.mask);
+	std::string dest = r.dest + "/" + std::to_string(bits < 0 ? 32 : bits);
+	std::vector<FXString> args = { FXString("ip"), FXString("route"), FXString("del"), FXString(dest.c_str()) };
+	if (!r.gateway.empty()) { args.push_back("via"); args.push_back(FXString(r.gateway.c_str())); }
+	if (!r.iface.empty()) { args.push_back("dev"); args.push_back(FXString(r.iface.c_str())); }
+	std::string out;
+	if (runAsRootCaptured(args, out) != 0) {
+		FXMessageBox::error(this, MBOX_OK, "Statische Route", "Die Route konnte nicht gelöscht werden:\n\n%s", svcprobe::trimmed(out).c_str());
+		return 1;
+	}
+	// Auch aus der gespeicherten Liste nehmen.
+	std::vector<std::string> keep;
+	for (auto& l : storedRouteLines()) if (l.compare(0, dest.size(), dest) != 0) keep.push_back(l);
+	FXString errorMsg;
+	storeRouteLines(keep, errorMsg);
+	showFor(tree->getCurrentItem());
 	return 1;
 }
 

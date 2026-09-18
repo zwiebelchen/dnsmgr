@@ -25,6 +25,18 @@ Aktualisieren und Eigenschaften.
   lokales Netzwerk (LAN-Routing)" bzw. "LAN- und Einwählrouting".
 - **Serverstatus**: Servername, Betriebssystem als Servertyp und der
   Status ("Gestartet" bzw. "Beendet (nicht konfiguriert)").
+- **Knoten unterhalb des Servers**, sobald Routing und RAS aktiv ist:
+  - *Routingschnittstellen*: die Netzwerkschnittstellen des Servers mit
+    Typ, Status und Verbindungsstatus (aus `ip link`)
+  - *Ports*: noch leer -- Einwähl- und VPN-Anschlüsse fehlen
+  - *IP-Routing → Allgemein*: Schnittstellen mit IP-Adresse,
+    Verwaltungs- und Betriebsstatus (aus `ip addr`)
+  - *IP-Routing → Statische Routen*: die Routingtabelle (aus
+    `ip route`), Rechtsklick legt eine Route an oder löscht sie
+- **Statische Routen** werden sofort gesetzt (`ip route add`) und in
+  `/etc/ice2k/rras-routes` gemerkt; beim nächsten "Konfigurieren und
+  aktivieren" werden sie wieder gesetzt, da der Kernel Routen beim
+  Neustart vergisst. Eine eigene systemd-Unit dafür gibt es noch nicht.
 
 Die gewählte Rolle merkt sich `/etc/ice2k/rras.conf`.
 
@@ -34,8 +46,10 @@ Die gewählte Rolle merkt sich `/etc/ice2k/rras.conf`.
   RAS-Richtlinien und Protokollierung. Der Dialog sagt das ausdrücklich,
   statt etwas vorzutäuschen.
 - Adressumsetzung (Internetverbindungsserver) und Firewallregeln.
-- Routingprotokolle (RIP, OSPF) und statische Routen -- unter Linux wäre
-  FRR der naheliegende Unterbau.
+- Routingprotokolle (RIP, OSPF) -- unter Linux wäre FRR der
+  naheliegende Unterbau.
+- Paketfilter (Ein-/Ausgangsfilter je Schnittstelle); Vorlage ist
+  `rtrfiltr.dll`, Unterbau wäre nftables.
 - "LAN- und Einwählrouting" unterscheidet sich derzeit nur im
   gespeicherten Zustand, solange es keine Einwahl gibt.
 
@@ -59,7 +73,14 @@ SP4, 5.00.2195.6609; die DLL selbst liegt nicht im Repository):
   Original
 
 `iprtrmgr.dll` (IP-Routerverwaltung) enthält nur vier Texte und keine
-Dialoge; daraus war nichts zu übernehmen.
+Dialoge, `mprapi.dll` gar keine Ressourcen und `rasmontr.dll` nur
+netsh-Hilfetexte; daraus war nichts zu übernehmen. `RASDLG.DLL` enthält
+die Dialoge des Einwahl-Clients (Verbindungen herstellen), nicht die der
+Konsole. Die Dialoge des IP-Routers -- etwa "Statische Route" -- stecken
+in `iprtrui.dll`, die bisher fehlt; die Beschriftungen dort sind deshalb
+eigene, mit den Feldern des Originals (Schnittstelle, Ziel,
+Netzwerkmaske, Gateway, Metrik). `rtrfiltr.dll` (Paketfilter) liegt vor
+und ist die Vorlage für die noch fehlenden Ein-/Ausgangsfilter.
 
 ## Bauen
 
