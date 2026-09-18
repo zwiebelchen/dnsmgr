@@ -167,9 +167,16 @@ static const char* roleKeyword(ServerRole r) {
 	return r == ROLE_ROUTER_LAN ? "router-lan" : r == ROLE_ROUTER_DIALUP ? "router-dialup" : r == ROLE_MANUAL ? "manual" : "none";
 }
 
+// Gemeinsames Wurzelsymbol fuer die Dialoge.
+static FXIcon* sharedRootIcon() {
+	static FXIcon* ico = NULL;
+	if (!ico) { ico = new FXPNGIcon(app, resico_rras_root, IMAGE_NEAREST); ico->create(); }
+	return ico;
+}
+
 static FXString roleLabel(ServerRole r) {
-	return r == ROLE_ROUTER_LAN ? "Netzwerkrouter (nur lokales Netzwerk)"
-	     : r == ROLE_ROUTER_DIALUP ? "Netzwerkrouter (LAN- und Einwählrouting)"
+	return r == ROLE_ROUTER_LAN ? "Netzwerkrouter (nur LAN-Routing)"
+	     : r == ROLE_ROUTER_DIALUP ? "Netzwerkrouter (LAN und bei Bedarf wählendes Routing)"
 	     : r == ROLE_MANUAL ? "Manuell konfigurierter Server"
 	                        : "Nicht konfiguriert";
 }
@@ -233,19 +240,28 @@ public:
 	enum { C_INTERNET = 0, C_RAS = 1, C_VPN = 2, C_ROUTER = 3, C_MANUAL = 4 };
 
 	ConfigureDialog(FXWindow* owner)
-		: FXDialogBox(owner, "Setup-Assistent für den Routing- und RAS-Server", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,520,0),
+		: FXDialogBox(owner, "Setup-Assistent für den Routing- und RAS-Server", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,600,0),
 		  choiceTarget(choice, this, ID_CHOICE) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
 		new FXLabel(main, "Allgemeine Konfigurationen", NULL, JUSTIFY_LEFT);
 		new FXLabel(main, "Sie können den Server mit einer der folgenden Konfigurationen einrichten.", NULL, JUSTIFY_LEFT);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
-		FXVerticalFrame* radios = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 12,0,4,4, 0,4);
-		new FXRadioButton(radios, "&Internetverbindungsserver", &choiceTarget, FXDataTarget::ID_OPTION + C_INTERNET);
-		new FXRadioButton(radios, "&RAS-Server", &choiceTarget, FXDataTarget::ID_OPTION + C_RAS);
-		new FXRadioButton(radios, "&VPN-Server (Virtuelles privates Netzwerk)", &choiceTarget, FXDataTarget::ID_OPTION + C_VPN);
-		new FXRadioButton(radios, "&Netzwerkrouter", &choiceTarget, FXDataTarget::ID_OPTION + C_ROUTER);
-		new FXRadioButton(radios, "&Manuell konfigurierter Server", &choiceTarget, FXDataTarget::ID_OPTION + C_MANUAL);
+		// Optionen und Beschreibungen wortgleich aus mprsnap.dll (Dialog 12611).
+		FXVerticalFrame* radios = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 12,0,4,4, 0,2);
+		auto option = [&](const char* label, int value, const char* text) {
+			new FXRadioButton(radios, label, &choiceTarget, FXDataTarget::ID_OPTION + value);
+			FXLabel* l = new FXLabel(radios, text, NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+			l->setLayoutHints(l->getLayoutHints());
+			new FXFrame(radios, LAYOUT_FIX_HEIGHT, 0,0,0,4, 0,0,0,0);
+			(void)l;
+		};
+		option("&Internetverbindungsserver", C_INTERNET, "        Ermöglicht, dass alle Computer dieses Netzwerks eine Internetverbindung haben.");
+		option("&RAS-Server", C_RAS, "        Ermöglicht Remotecomputern das Einwählen in dieses Netzwerk.");
+		option("&VPN-Server", C_VPN, "        Ermöglicht Remotecomputern eine Verbindung mit diesem Netzwerk durch das Internet.");
+		option("&Netzwerkrouter", C_ROUTER, "        Ermöglicht diesem Netzwerk die Kommunikation mit anderen Netzwerken.");
+		option("&Manuell konfigurierter Server", C_MANUAL, "        Startet den Server mit Standardeinstellungen.");
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		// Zusatzzeile: was diese Konsole daraus tatsächlich macht.
 		description = new FXLabel(main, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
 
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
@@ -310,12 +326,17 @@ public:
 		FXTabBook* tabs = new FXTabBook(outer, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		new FXTabItem(tabs, "Allgemein", NULL);
 		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
+		// Aufbau wie mprsnap.dll, Dialog 12517.
+		FXHorizontalFrame* head = new FXHorizontalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,4, 12,0);
+		new FXLabel(head, "", sharedRootIcon(), LAYOUT_CENTER_Y);
+		new FXLabel(head, "Routing und RAS", NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 		new FXLabel(page, "Diesen Computer aktivieren als:", NULL, JUSTIFY_LEFT);
 		routerCheck = new FXCheckButton(page, "&Router", this, ID_ROUTER);
 		routerCheck->setCheck(st.role != ROLE_NONE);
 		FXVerticalFrame* sub = new FXVerticalFrame(page, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
-		routerControls.push_back(new FXRadioButton(sub, "&Nur lokales Netzwerk (LAN-Routing)", &routingTarget, FXDataTarget::ID_OPTION + 0));
-		routerControls.push_back(new FXRadioButton(sub, "LAN- und &Einwählrouting", &routingTarget, FXDataTarget::ID_OPTION + 1));
+		routerControls.push_back(new FXRadioButton(sub, "&Nur LAN-Routing", &routingTarget, FXDataTarget::ID_OPTION + 0));
+		routerControls.push_back(new FXRadioButton(sub, "&LAN und bei Bedarf wählendes Routing", &routingTarget, FXDataTarget::ID_OPTION + 1));
 		(new FXCheckButton(page, "R&AS-Server"))->disable();
 		new FXLabel(page, "Einwähl- und VPN-Verbindungen sind noch nicht umgesetzt.", NULL, JUSTIFY_LEFT);
 
@@ -355,7 +376,7 @@ private:
 	FXLabel* welcomeTitle = nullptr, *welcomeText = nullptr;
 	FXLabel* statusbar = nullptr;
 	FXTreeItem *rootItem = nullptr, *statusItem = nullptr, *serverItem = nullptr;
-	FXIcon *icoRoot = nullptr, *icoStatus = nullptr, *icoServer = nullptr, *icoInfo = nullptr;
+	FXIcon *icoRoot = nullptr, *icoStatus = nullptr, *icoServerStopped = nullptr, *icoServerStarted = nullptr, *icoInfo = nullptr;
 	RrasState state;
 protected:
 	RrasWindow() {}
@@ -395,11 +416,13 @@ FXIMPLEMENT(RrasWindow, FXMainWindow, RrasWindowMap, ARRAYNUMBER(RrasWindowMap))
 
 RrasWindow::RrasWindow(FXApp* a)
 	: FXMainWindow(a, "Routing und RAS", NULL, NULL, DECOR_ALL, 0,0, 900,560) {
-	icoRoot = new FXGIFIcon(a, resico_rras);
-	icoStatus = new FXPNGIcon(a, resico_server, IMAGE_NEAREST);
-	icoServer = new FXPNGIcon(a, resico_network, IMAGE_NEAREST);
+	// Symbole aus mprsnap.dll (deutsches Windows 2000 SP4).
+	icoRoot = new FXPNGIcon(a, resico_rras_root, IMAGE_NEAREST);
+	icoStatus = new FXPNGIcon(a, resico_rras_status, IMAGE_NEAREST);
+	icoServerStopped = new FXPNGIcon(a, resico_rras_server_stopped, IMAGE_NEAREST);
+	icoServerStarted = new FXPNGIcon(a, resico_rras_server_started, IMAGE_NEAREST);
 	icoInfo = new FXPNGIcon(a, resico_key, IMAGE_NEAREST);
-	for (FXIcon* i : { icoRoot, icoStatus, icoServer, icoInfo }) i->create();
+	for (FXIcon* i : { icoRoot, icoStatus, icoServerStopped, icoServerStarted, icoInfo }) i->create();
 
 	menubar = new FXMenuBar(this, LAYOUT_SIDE_TOP | LAYOUT_FILL_X);
 	vorgangmenu = new FXMenuPane(this);
@@ -466,7 +489,7 @@ RrasWindow::RrasWindow(FXApp* a)
 
 	rootItem = tree->appendItem(0, "Routing und RAS", icoRoot, icoRoot);
 	statusItem = tree->appendItem(rootItem, "Serverstatus", icoStatus, icoStatus);
-	serverItem = tree->appendItem(rootItem, hostName() + " (lokal)", icoServer, icoServer);
+	serverItem = tree->appendItem(rootItem, hostName() + " (lokal)", icoServerStopped, icoServerStopped);
 	tree->expandTree(rootItem);
 	tree->setCurrentItem(rootItem);
 	tree->selectItem(rootItem);
@@ -482,10 +505,17 @@ void RrasWindow::reload() {
 	state = readState();
 	// Serverstatusliste
 	statusList->clearItems();
+	// Zustandstexte wie mprsnap.dll (102 "Beendet", 105 "Gestartet",
+	// 97 "%s (nicht konfiguriert)").
 	FXString status = state.configured()
-		? (state.forwarding ? FXString("Gestartet") : FXString("Beendet (konfiguriert)"))
+		? (state.forwarding ? FXString("Gestartet") : FXString("Beendet"))
 		: FXString("Beendet (nicht konfiguriert)");
-	statusList->appendItem(hostName() + "\t" + serverType() + "\t" + status + "\t-\t-\t-", icoServer, icoServer);
+	// Symbol des Serverknotens wie im Original je nach Zustand.
+	FXIcon* srvIcon = (state.configured() && state.forwarding) ? icoServerStarted : icoServerStopped;
+	serverItem->setOpenIcon(srvIcon);
+	serverItem->setClosedIcon(srvIcon);
+	tree->updateItem(serverItem);
+	statusList->appendItem(hostName() + "\t" + serverType() + "\t" + status + "\t-\t-\t-", srvIcon, srvIcon);
 	statusbar->setText(state.configured()
 		? FXString(" ") + roleLabel(state.role) + (state.forwarding ? ", IP-Weiterleitung aktiv" : ", IP-Weiterleitung aus")
 		: FXString(" Routing und RAS ist auf diesem Server nicht konfiguriert."));
@@ -501,13 +531,18 @@ void RrasWindow::showFor(FXTreeItem* item) {
 			? FXString("Dieser Server ist eingerichtet als: ") + roleLabel(state.role) + ".\n\n"
 			  "Klicken Sie im Menü \"Vorgang\" auf \"Routing und RAS deaktivieren\", um die\n"
 			  "Weiterleitung wieder abzuschalten."
+			// Texte 301 und 302 aus mprsnap.dll.
 			: FXString("Klicken Sie im Menü \"Vorgang\" auf \"Routing und RAS konfigurieren und aktivieren\",\n"
 			  "um Routing und RAS einzurichten.\n\n"
+			  "Weitere Informationen bezüglich der Einrichtung eines Routing- und RAS-Servers finden\n"
+			  "Sie in der Onlinehilfe.\n\n"
 			  "Umgesetzt sind bisher die Rollen \"Netzwerkrouter\" und \"Manuell konfigurierter Server\";\n"
 			  "beide schalten die IP-Weiterleitung des Kernels ein."));
 		return;
 	}
 	welcomeTitle->setText("Willkommen");
+	// Text 291 aus mprsnap.dll; der zweite Absatz weicht ab, weil es hier
+	// (noch) kein "Server hinzufügen" gibt.
 	welcomeText->setText("Routing und RAS bietet integriertes Multiprotokollrouting, Remotezugriff- und\n"
 	                     "VPN-Funktionalität.\n\n"
 	                     "Wählen Sie links den Server aus, um ihn zu konfigurieren, oder \"Serverstatus\",\n"

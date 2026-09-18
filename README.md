@@ -49,7 +49,7 @@ nicht im vollen Umfang des Originals.
 | 13 | Konfiguration des Servers | -- | offen (Startseite mit Verweisen auf die übrigen Programme) |
 | 14 | Lizenzierung | -- | nicht geplant |
 | 15 | Lokale Sicherheitsrichtlinie | [`secpol/`](secpol/README.md) `--local` | **umgesetzt**: bearbeitbar wie im Original, mit den Spalten "Lokale Einstellung" und "Effektive Einstellung" (lokale Werte, überschrieben von den wirksamen Gruppenrichtlinien). Lokale Werte werden gespeichert, aber noch nicht auf das Linux-System angewendet |
-| 16 | Routing und RAS | [`rras/`](rras/README.md) | **teilweise**: Konsole mit Serverstatus, "Konfigurieren und aktivieren"/"Deaktivieren" (IP-Weiterleitung des Kernels, sofort und dauerhaft) und Eigenschaften. Offen: Einwahl/VPN, Adressumsetzung, Routingprotokolle |
+| 16 | Routing und RAS | [`rras/`](rras/README.md) | **teilweise**: Konsole mit Serverstatus, "Konfigurieren und aktivieren"/"Deaktivieren" (IP-Weiterleitung des Kernels, sofort und dauerhaft) und Eigenschaften; Texte und Symbole aus `mprsnap.dll`. Offen: Einwahl/VPN, Adressumsetzung, Routingprotokolle |
 | 17 | Systemmonitor | -- | offen |
 | 18 | Telefonie | -- | nicht geplant |
 | 19 | Telnetserververwaltung | -- | nicht geplant |
@@ -87,6 +87,13 @@ gemeinsam benutzen, statt ihn doppelt zu pflegen:
 |---|---|---|
 | [`common/svc/`](common/svc/) | Dienstverwaltung: GUI-freier systemd-Kern (`svccore`) plus fertige Ansicht als FOX-Widget (`svcpanel`) | `services`, `compmgmt` |
 | [`common/svcprobe/`](common/svcprobe/) | Prüfung, ob der verwaltete Dienst läuft, samt einheitlichem Meldungstext | `dnsmgr`, `dhcpmgr`, `compmgmt` |
+
+### Offene Punkte für später
+
+- **Ja/Nein-Rückfragen sind englisch beschriftet** ("Yes"/"No"): Die
+  Beschriftung kommt aus FOX (`FXMessageBox`) und ist dort fest
+  hinterlegt. Für eine deutsche Beschriftung braucht es einen eigenen
+  Rückfragedialog, der dann in allen Programmen verwendet wird.
 
 Alle Programme teilen sich denselben Grundaufbau:
 - **FOX-Toolkit** für die GUI (Fenster/Menü/Toolbar/Baum-/Listenansicht
