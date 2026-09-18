@@ -29,6 +29,7 @@
 #include <sstream>
 #include <algorithm>
 #include "../common/svcprobe/svcprobe.h"
+#include "../common/evt/evtpanel.h"
 
 FXApp* app;
 static bool g_haveRoot = false;
@@ -778,9 +779,12 @@ private:
 	FXIconList* list;
 
 	FXTreeItem *rootItem, *sysToolsItem, *lugItem, *usersItem, *groupsItem;
+	FXTreeItem *eventViewerItem = NULL, *appLogItem = NULL, *secLogItem = NULL, *sysLogItem = NULL;
+	EvtPanel* evtPanel = NULL;
+	bool eventsLoaded = false;
 	FXTreeItem *sharedFoldersItem, *sharesItem, *sessionsItem, *openFilesItem;
 	FXTreeItem *svcAppsItem, *servicesItem;
-	FXSwitcher* rightPane;   // 0 = normale Liste, 1 = Dienste-Ansicht
+	FXSwitcher* rightPane;   // 0 = normale Liste, 1 = Dienste-Ansicht, 2 = Ereignisanzeige
 	SvcPanel* svcPanel;
 	std::vector<UserInfo> users;
 	std::vector<GroupInfo> groups;
@@ -953,6 +957,11 @@ CompMgmt::CompMgmt(FXApp* a)
 
 	rootItem = tree->appendItem(0, "Computerverwaltung (Lokal)", icoRoot, icoRoot);
 	sysToolsItem = tree->appendItem(rootItem, "Systemprogramme", icoFolder, icoFolder);
+	// Wie im Original steht die Ereignisanzeige an erster Stelle.
+	eventViewerItem = tree->appendItem(sysToolsItem, "Ereignisanzeige", icoFolder, icoFolder);
+	appLogItem = tree->appendItem(eventViewerItem, "Anwendung", icoFolder, icoFolder);
+	secLogItem = tree->appendItem(eventViewerItem, "Sicherheit", icoFolder, icoFolder);
+	sysLogItem = tree->appendItem(eventViewerItem, "System", icoFolder, icoFolder);
 	lugItem = tree->appendItem(sysToolsItem, "Lokale Benutzer und Gruppen", icoUsers, icoUsers);
 	usersItem = tree->appendItem(lugItem, "Benutzer", icoFolder, icoFolder);
 	groupsItem = tree->appendItem(lugItem, "Gruppen", icoFolder, icoFolder);
@@ -963,6 +972,8 @@ CompMgmt::CompMgmt(FXApp* a)
 	svcAppsItem = tree->appendItem(rootItem, "Dienste und Anwendungen", icoFolder, icoFolder);
 	servicesItem = tree->appendItem(svcAppsItem, "Dienste", icoKey, icoKey);
 	svcPanel = new SvcPanel(rightPane, icoKey);
+	// Dieselbe Ereignisansicht wie im eigenen Programm (common/evt).
+	evtPanel = new EvtPanel(rightPane);
 	tree->expandTree(rootItem);
 	tree->expandTree(sysToolsItem);
 	tree->expandTree(lugItem);
@@ -1057,6 +1068,22 @@ long CompMgmt::onTreeChanged(FXObject*, FXSelector, void*) {
 	if (cur == sessionsItem) { checkSamba(); showListFor(NK_SESSIONS); return 1; }
 	if (cur == openFilesItem) { checkSamba(); showListFor(NK_OPENFILES); return 1; }
 	if (cur == servicesItem) { showListFor(NK_SERVICES); return 1; }
+	if (cur == appLogItem || cur == secLogItem || cur == sysLogItem) {
+		// Erst beim ersten Aufruf einlesen -- das kostet sonst bei jedem
+		// Start Zeit.
+		if (!eventsLoaded) { evtPanel->reload(); eventsLoaded = true; }
+		evtPanel->showLog(cur == appLogItem ? evt::LOG_APPLICATION
+		                : cur == secLogItem ? evt::LOG_SECURITY : evt::LOG_SYSTEM);
+		rightPane->setCurrent(2);
+		statuslbl->setText(evtPanel->statusText());
+		return 1;
+	}
+	if (cur == eventViewerItem) {
+		rightPane->setCurrent(0);
+		list->clearItems();
+		statuslbl->setText("Wählen Sie ein Protokoll: Anwendung, Sicherheit oder System.");
+		return 1;
+	}
 	rightPane->setCurrent(0);
 	list->clearItems();
 	setListColumns(list, {});

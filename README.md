@@ -42,7 +42,7 @@ nicht im vollen Umfang des Originals.
 | 3 | Active Directory-Domänen und -Vertrauensstellungen | -- | offen (Backend: `samba-tool domain trust`) |
 | 4 | Active Directory-Standorte und -Dienste | -- | offen (Backend: LDAP unter `CN=Sites,CN=Configuration`) |
 | 5 | Clusterverwaltung | -- | nicht geplant |
-| 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Offen: Ereignisanzeige, Datenträgerverwaltung, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
+| 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Ereignisanzeige (Anwendung, Sicherheit, System), Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Offen: Datenträgerverwaltung, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
 | 7 | Datenquellen (ODBC) | -- | nicht geplant |
 | 8 | DHCP | [`dhcpmgr/`](dhcpmgr/README.md) | **umgesetzt**: Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen (Kea DHCP) |
 | 9 | Dienste | [`services/`](services/README.md) | **umgesetzt**: auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten (systemd) |
@@ -89,6 +89,7 @@ gemeinsam benutzen, statt ihn doppelt zu pflegen:
 | Ordner | Inhalt | benutzt von |
 |---|---|---|
 | [`common/svc/`](common/svc/) | Dienstverwaltung: GUI-freier systemd-Kern (`svccore`) plus fertige Ansicht als FOX-Widget (`svcpanel`) | `services`, `compmgmt` |
+| [`common/evt/`](common/evt/) | Ereignisse: GUI-freier Kern (`evtcore`, Journal bzw. /var/log) plus Ereignisliste mit Eigenschaften und Filter (`evtpanel`) | `eventvwr`, `compmgmt` |
 | [`common/svcprobe/`](common/svcprobe/) | Prüfung, ob der verwaltete Dienst läuft, samt einheitlichem Meldungstext | `dnsmgr`, `dhcpmgr`, `compmgmt` |
 
 ### Offene Punkte für später

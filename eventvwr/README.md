@@ -51,6 +51,14 @@ im Text entschieden.
 - Noch nicht umgesetzt: Protokolleigenschaften (Größe, Überschreiben),
   Speichern unter, Sortieren nach Spalten, Suchen.
 
+## Gemeinsam mit der Computerverwaltung
+
+Das Einsammeln der Ereignisse (`common/evt/evtcore`) und die Liste samt
+Eigenschaften- und Filterdialog (`common/evt/evtpanel`) liegen in
+`common/`, wie bei der Dienstverwaltung. Die Computerverwaltung zeigt
+dieselbe Ansicht in ihrem Zweig "Systemprogramme → Ereignisanzeige";
+Korrekturen wirken damit in beiden Programmen.
+
 ## Bauen
 
 ```sh
