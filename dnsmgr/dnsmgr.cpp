@@ -22,6 +22,7 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <ctype.h>
+#include "../common/svcprobe/svcprobe.h"
 
 FXApp* app;
 
@@ -52,6 +53,49 @@ static int runAsRoot(const std::vector<FXString>& args) {
 		return -1;
 	}
 	return -1;
+}
+
+// Wie runAsRoot, liefert aber zusaetzlich die Ausgabe zurueck -- fuer
+// Pruefungen, bei denen die Fehlermeldung des Befehls zaehlt.
+static int runAsRootCaptured(const std::vector<FXString>& args, std::string& output) {
+	std::vector<char*> argv;
+	argv.push_back((char*)"i2ksudo");
+	for (auto& a : args) argv.push_back((char*)a.text());
+	argv.push_back(NULL);
+
+	int pipefd[2];
+	if (pipe(pipefd) != 0) return -1;
+	pid_t pid = fork();
+	if (pid == 0) {
+		dup2(pipefd[1], STDOUT_FILENO);
+		dup2(pipefd[1], STDERR_FILENO);
+		close(pipefd[0]);
+		close(pipefd[1]);
+		execvp("i2ksudo", argv.data());
+		_exit(127);
+	} else if (pid > 0) {
+		close(pipefd[1]);
+		char buf[4096];
+		ssize_t n;
+		while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) output.append(buf, n);
+		close(pipefd[0]);
+		int status = 0;
+		waitpid(pid, &status, 0);
+		if (WIFEXITED(status)) return WEXITSTATUS(status);
+		return -1;
+	}
+	close(pipefd[0]);
+	close(pipefd[1]);
+	return -1;
+}
+
+// Root-Aufruf im Format, das svcprobe erwartet.
+static svcprobe::Runner rootRunner() {
+	return [](const std::vector<std::string>& args, std::string& out) {
+		std::vector<FXString> a;
+		for (auto& s : args) a.push_back(FXString(s.c_str()));
+		return runAsRootCaptured(a, out);
+	};
 }
 
 // Schreibt "content" als root nach "path": erst unprivilegiert in eine
@@ -953,7 +997,7 @@ protected:
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_REFRESH, ID_ABOUT, ID_NEWZONE, ID_NEWHOST,
 	       ID_DELETEZONE, ID_DELETERECORD, ID_PROPERTIES, ID_NEWCNAME, ID_NEWMX, ID_ZONEPROPS, ID_NEWPTR,
-	       ID_NEWOTHER };
+	       ID_NEWOTHER , ID_SERVICECHECK };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -985,6 +1029,9 @@ public:
 	bool modifyRecordLine(int zoneIdx, const FXString& rawName, const FXString& typeKeyword,
 	                       const FXString& newFullLine, FXString& errorMsg);
 	virtual void create();
+	bool checkService();
+	long onServiceCheck(FXObject*, FXSelector, void*);
+	bool serviceErrorShown = false;
 	virtual ~DnsManager() {}
 };
 
@@ -994,6 +1041,7 @@ FXDEFMAP(DnsManager) DnsManagerMap[] = {
 	FXMAPFUNC(SEL_DOUBLECLICKED, DnsManager::ID_LIST, DnsManager::onListDouble),
 	FXMAPFUNC(SEL_RIGHTBUTTONPRESS, DnsManager::ID_LIST, DnsManager::onListRightClick),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_REFRESH, DnsManager::onRefresh),
+	FXMAPFUNC(SEL_TIMEOUT, DnsManager::ID_SERVICECHECK, DnsManager::onServiceCheck),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_ABOUT, DnsManager::onAbout),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWZONE, DnsManager::onNewZone),
 	FXMAPFUNC(SEL_COMMAND, DnsManager::ID_NEWHOST, DnsManager::onNewHost),
@@ -2090,6 +2138,7 @@ long DnsManager::onDeleteZone(FXObject*, FXSelector, void*) {
 }
 
 long DnsManager::onRefresh(FXObject*, FXSelector, void*) {
+	checkService();
 	list->clearItems();
 	loadZones();
 	statuslbl->setText("Aktualisiert.");
@@ -2104,9 +2153,29 @@ long DnsManager::onAbout(FXObject*, FXSelector, void*) {
 	return 1;
 }
 
+// Prueft, ob BIND laeuft: "rndc status" spricht mit dem Dienst selbst.
+// Ohne den Dienst zeigt dnsmgr nur den Inhalt der Zonendateien -- das kann
+// vom laufenden Zustand abweichen, und "rndc reload" erreicht niemanden.
+bool DnsManager::checkService() {
+	svcprobe::Result r = svcprobe::probe(rootRunner(), { "rndc", "status" }, "server is up");
+	if (r.ok) { serviceErrorShown = false; return true; }
+	statuslbl->setText("Der DNS-Dienst ist nicht erreichbar -- Änderungen werden nicht wirksam.");
+	if (!serviceErrorShown && shown()) {
+		serviceErrorShown = true;
+		FXMessageBox::error(this, MBOX_OK, "DNS-Manager", "%s", svcprobe::message("Der DNS-Dienst (BIND)", "named", r.detail).c_str());
+	}
+	return false;
+}
+
+long DnsManager::onServiceCheck(FXObject*, FXSelector, void*) {
+	checkService();
+	return 1;
+}
+
 void DnsManager::create() {
 	FXMainWindow::create();
 	show(PLACEMENT_SCREEN);
+	getApp()->addTimeout(this, ID_SERVICECHECK, 300);
 }
 
 int main(int argc, char* argv[]) {
