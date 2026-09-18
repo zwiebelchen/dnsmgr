@@ -20,6 +20,7 @@ jeweiligen Unterordner.
 | [`dsadmin/`](dsadmin/README.md) | Active Directory-Benutzer und -Computer | samba-tool (user/group/ou/gpo), LDAP, SYSVOL | Domänenkonten anlegen/löschen, Gruppenmitgliedschaften, GPOs anlegen/verknüpfen; vollständiger Gruppenrichtlinienobjekt-Editor (ADM-Vorlagen → `Registry.pol`) plus Softwareinstallation, Skripte und Ordnerumleitung |
 | [`termsvc/`](termsvc/README.md) | Terminaldienstekonfiguration | xrdp + PAM/winbind | Terminaldienste aktivieren (Paketinstallation, Authentifizierung lokal/AD, Win2k-Anmeldebildschirm, Dienste starten) |
 | [`rras/`](rras/README.md) | Routing und RAS | Linux-Kernel (IP-Weiterleitung) | Serverstatus, Aktivieren/Deaktivieren, Eigenschaften |
+| [`dfs/`](dfs/README.md) | Verteiltes Dateisystem | Samba (msdfs) | Stämme, Verknüpfungen, Replikate |
 | [`eventvwr/`](eventvwr/README.md) | Ereignisanzeige | systemd-Journal, ersatzweise /var/log | drei Protokolle, Eigenschaften, Filter |
 | [`srvcfg/`](srvcfg/README.md) | Konfiguration des Servers | Zustand aus smb.conf, systemd und /etc/ice2k | Startseite mit Verweisen auf die übrigen Programme |
 | [`secpol/`](secpol/README.md) | Sicherheitsrichtlinien (Domäne, Domänencontroller, lokal) | dieselbe Quelle wie `dsadmin` (GPO-Sicherheitseinstellungen) | drei Konsolen über `--domain`, `--dc`, `--local` |
@@ -60,7 +61,7 @@ nicht im vollen Umfang des Originals.
 | 22 | Terminaldienstelizenzierung | -- | nicht geplant |
 | 23 | Terminaldiensteverwaltung | -- | offen (angemeldete Sitzungen anzeigen/trennen) |
 | 24 | Verbindungs-Manager-Verwaltungskit | -- | nicht geplant |
-| 25 | Verteiltes Dateisystem (DFS) | -- | offen (Backend: Samba `msdfs`) |
+| 25 | Verteiltes Dateisystem (DFS) | [`dfs/`](dfs/README.md) | **teilweise**: eigenständige DFS-Stämme, Verknüpfungen und Replikate über Samba `msdfs` (Freigabe mit `msdfs root = yes`, Symlinks `msdfs:server\freigabe`). Offen: domänenbasierte Stämme, Replikation der Inhalte |
 | 26 | WINS | -- | offen (Backend: Sambas WINS-Server `nmbd`) |
 | 27 | Zertifizierungsstelle | -- | offen (Backend: z.B. `openssl`/`easy-rsa`) |
 | 28 | Internetauthentifizierungsdienst | -- | offen (RADIUS, Backend: FreeRADIUS) |
@@ -127,6 +128,7 @@ cd secpol && make && ./secpol --domain
 cd rras && make && ./rras
 cd srvcfg && make && ./srvcfg
 cd eventvwr && make && ./eventvwr
+cd dfs && make && ./dfs
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,
