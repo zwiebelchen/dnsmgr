@@ -28,6 +28,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include "../common/svcprobe/svcprobe.h"
 
 FXApp* app;
 static bool g_haveRoot = false;
@@ -793,6 +794,7 @@ private:
 	NodeKind currentNodeKind;
 	FXString contextUserName, contextGroupName, contextShareName;
 	bool isDC;
+	bool sambaErrorShown = false;
 	FXLabel* dcNoticeLabel;
 
 protected:
@@ -803,6 +805,7 @@ public:
 	       ID_GROUPPROPS, ID_DELETEGROUP, ID_NEWSHARE, ID_SHAREPROPS, ID_DELETESHARE };
 
 	long onTreeChanged(FXObject*, FXSelector, void*);
+	bool checkSamba();
 	long onTreeRightClick(FXObject*, FXSelector, void*);
 	long onListRightClick(FXObject*, FXSelector, void*);
 	long onRefresh(FXObject*, FXSelector, void*);
@@ -1024,14 +1027,35 @@ void CompMgmt::showListFor(NodeKind kind) {
 	}
 }
 
+// Freigaben, Sitzungen und geoeffnete Dateien kommen aus "smbstatus" --
+// ohne laufenden Samba sind die Listen leer, obwohl Freigaben in der
+// smb.conf stehen.
+bool CompMgmt::checkSamba() {
+	svcprobe::Runner run = [](const std::vector<std::string>& args, std::string& out) {
+		std::vector<FXString> a;
+		for (auto& x : args) a.push_back(FXString(x.c_str()));
+		return runAsRootCaptured(a, out);
+	};
+	const char* unit = isDC ? "samba-ad-dc" : "smbd";
+	svcprobe::Result r = svcprobe::unitActive(run, unit);
+	if (r.ok) { sambaErrorShown = false; return true; }
+	statuslbl->setText(FXString("Der Dateiserverdienst (") + unit + ") läuft nicht -- Sitzungen und geöffnete Dateien fehlen.");
+	if (!sambaErrorShown && shown()) {
+		sambaErrorShown = true;
+		FXMessageBox::error(this, MBOX_OK, "Computerverwaltung", "%s",
+			svcprobe::message("Der Dateiserverdienst (Samba)", unit, r.detail).c_str());
+	}
+	return false;
+}
+
 long CompMgmt::onTreeChanged(FXObject*, FXSelector, void*) {
 	FXTreeItem* cur = tree->getCurrentItem();
 	if (!cur) return 1;
 	if (cur == usersItem) { showListFor(NK_USERS); return 1; }
 	if (cur == groupsItem) { showListFor(NK_GROUPS); return 1; }
-	if (cur == sharesItem) { showListFor(NK_SHARES); return 1; }
-	if (cur == sessionsItem) { showListFor(NK_SESSIONS); return 1; }
-	if (cur == openFilesItem) { showListFor(NK_OPENFILES); return 1; }
+	if (cur == sharesItem) { checkSamba(); showListFor(NK_SHARES); return 1; }
+	if (cur == sessionsItem) { checkSamba(); showListFor(NK_SESSIONS); return 1; }
+	if (cur == openFilesItem) { checkSamba(); showListFor(NK_OPENFILES); return 1; }
 	if (cur == servicesItem) { showListFor(NK_SERVICES); return 1; }
 	rightPane->setCurrent(0);
 	list->clearItems();
