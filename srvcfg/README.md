@@ -49,8 +49,15 @@ Programms, statt still nichts zu tun.
   **E-Mail-Server** nennen die Linux-Gegenstücke. Eigene
   Verwaltungsprogramme gibt es dafür (noch) nicht, und die Seiten sagen
   das.
-- Die Symbole der Navigationsleiste sind noch einheitlich; das Original
-  hat je Eintrag ein eigenes.
+- Der Kopfbereich verwendet die Originalgrafik `BANNER.GIF` aus
+  `srvwiz.dll`; der Schriftzug "Server konfigurieren" steht wie im
+  Original bei 262/37 darüber (dort per Stylesheet in `TOP.HTM`).
+  Die Symbole der Navigationsleiste (`MNU_*.GIF`) und der Verweise
+  (`WIZ.GIF` für Assistenten, `MMC.GIF` für Konsolen) stammen ebenfalls
+  von dort und liegen unter `res/srvwiz`. Die DLL selbst liegt nicht im
+  Repository.
+- Die Hintergrundgrafiken der einzelnen Seiten (`*_BG.GIF`, im Original
+  als Wasserzeichen hinterlegt) sind noch nicht übernommen.
 
 "Dialog beim Start anzeigen" merkt sich die Einstellung in
 `~/.ice2k-srvcfg-off`; ausgewertet wird sie vom Autostart in ice2k.

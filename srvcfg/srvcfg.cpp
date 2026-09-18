@@ -188,6 +188,40 @@ struct Page {
 	std::vector<FXString> after;   // Text unterhalb der Verweise
 };
 
+// Kopfbereich: die Originalgrafik aus srvwiz.dll (BANNER.GIF) mit dem
+// Schriftzug darüber -- im Original liegt er per Stylesheet bei 262/37 in
+// Arial Black, hier genauso.
+class BannerFrame : public FXFrame {
+	FXDECLARE(BannerFrame)
+private:
+	FXImage* image = nullptr;
+	FXFont* titleFont = nullptr;
+protected:
+	BannerFrame() {}
+public:
+	BannerFrame(FXComposite* p, FXImage* img)
+		: FXFrame(p, FRAME_NONE | LAYOUT_FILL_X | LAYOUT_FIX_HEIGHT, 0,0,0, img->getHeight()), image(img) {
+		titleFont = new FXFont(getApp(), "helvetica", 16, FXFont::Bold);
+		backColor = FXRGB(255,255,255);
+	}
+	virtual void create() { FXFrame::create(); titleFont->create(); }
+	long onPaint(FXObject*, FXSelector, void* ptr) {
+		FXDCWindow dc(this, (FXEvent*)ptr);
+		dc.setForeground(FXRGB(255,255,255));
+		dc.fillRectangle(0, 0, width, height);
+		dc.drawImage(image, 0, 0);
+		dc.setFont(titleFont);
+		dc.setForeground(FXRGB(0,0,0));
+		dc.drawText(262, 37 + titleFont->getFontAscent(), "Server konfigurieren", 20);
+		return 1;
+	}
+	virtual ~BannerFrame() { delete titleFont; }
+};
+FXDEFMAP(BannerFrame) BannerFrameMap[] = {
+	FXMAPFUNC(SEL_PAINT, 0, BannerFrame::onPaint),
+};
+FXIMPLEMENT(BannerFrame, FXFrame, BannerFrameMap, ARRAYNUMBER(BannerFrameMap))
+
 class SrvCfgWindow : public FXMainWindow {
 	FXDECLARE(SrvCfgWindow)
 private:
@@ -198,7 +232,11 @@ private:
 	std::map<FXTreeItem*, int> itemPage;
 	std::map<FXObject*, PageLink> linkTargets;
 	ServerFacts facts;
-	FXIcon *icoNav = nullptr, *icoLink = nullptr, *icoBanner = nullptr;
+	// Symbole der Navigationsleiste und der Verweise stammen aus srvwiz.dll.
+	FXImage* banner = nullptr;
+	FXIcon *icoLink = nullptr, *icoConsole = nullptr;
+	FXIcon *icoHome = nullptr, *icoReg = nullptr, *icoAd = nullptr, *icoFile = nullptr, *icoPrint = nullptr,
+	       *icoWeb = nullptr, *icoNet = nullptr, *icoApps = nullptr, *icoAdv = nullptr;
 protected:
 	SrvCfgWindow() {}
 public:
@@ -445,7 +483,12 @@ void SrvCfgWindow::buildPage(int id, const Page& p) {
 	for (auto& link : p.links) {
 		FXHorizontalFrame* row = new FXHorizontalFrame(body, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 8,0);
 		row->setBackColor(PAGE_BG);
-		FXLabel* ic = new FXLabel(row, "", icoLink, LAYOUT_CENTER_Y);
+		// Wie im Original: Assistenten mit dem Zauberstab, Konsolen mit dem
+		// MMC-Symbol.
+		bool console = link.program == "dsadmin" || link.program == "compmgmt" || link.program == "services" ||
+		               link.program == "dnsmgr" || link.program == "dhcpmgr" || link.program == "rras" ||
+		               link.program == "secpol" || link.program == "termsvc";
+		FXLabel* ic = new FXLabel(row, "", console ? icoConsole : icoLink, LAYOUT_CENTER_Y);
 		ic->setBackColor(PAGE_BG);
 		// Verweise wie im Original: blau und anklickbar.
 		FXButton* b = new FXButton(row, link.text, NULL, this, ID_LINK, BUTTON_TOOLBAR | FRAME_NONE | LAYOUT_CENTER_Y | JUSTIFY_LEFT, 0,0,0,0, 0,0,2,2);
@@ -463,24 +506,27 @@ void SrvCfgWindow::buildPage(int id, const Page& p) {
 SrvCfgWindow::SrvCfgWindow(FXApp* a)
 	: FXMainWindow(a, "ice2k Server konfigurieren", NULL, NULL, DECOR_ALL, 0,0, 780,560) {
 	facts = collectFacts();
-	icoNav = new FXPNGIcon(a, resico_server, IMAGE_NEAREST);
-	icoLink = new FXPNGIcon(a, resico_network, IMAGE_NEAREST);
-	icoBanner = new FXGIFIcon(a, resico_srvcfg_32);
-	for (FXIcon* i : { icoNav, icoLink, icoBanner }) i->create();
+	banner = new FXGIFImage(a, resico_srvwiz_banner);
+	banner->create();
+	auto gifIcon = [&](const unsigned char* d) {
+		FXIcon* i = new FXGIFIcon(a, d, FXRGB(255,255,255), IMAGE_NEAREST);
+		i->create();
+		return i;
+	};
+	icoLink = gifIcon(resico_srvwiz_wiz);
+	icoConsole = gifIcon(resico_srvwiz_mmc);
+	icoHome = gifIcon(resico_srvwiz_mnu_hm1);
+	icoReg = gifIcon(resico_srvwiz_mnu_reg1);
+	icoAd = gifIcon(resico_srvwiz_mnu_ad1);
+	icoFile = gifIcon(resico_srvwiz_mnu_fl1);
+	icoPrint = gifIcon(resico_srvwiz_mnu_prt1);
+	icoWeb = gifIcon(resico_srvwiz_mnu_web1);
+	icoNet = gifIcon(resico_srvwiz_mnu_net1);
+	icoApps = gifIcon(resico_srvwiz_mnu_ap1);
+	icoAdv = gifIcon(resico_srvwiz_mnu_adv1);
 
 	// ---- Kopfbanner ----
-	FXHorizontalFrame* banner = new FXHorizontalFrame(this, LAYOUT_SIDE_TOP | LAYOUT_FILL_X | FRAME_RAISED, 0,0,0,0, 16,16,10,10, 12,0);
-	banner->setBackColor(FXRGB(255,255,255));
-	FXLabel* bico = new FXLabel(banner, "", icoBanner, LAYOUT_CENTER_Y);
-	bico->setBackColor(FXRGB(255,255,255));
-	FXVerticalFrame* btext = new FXVerticalFrame(banner, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 0,0);
-	btext->setBackColor(FXRGB(255,255,255));
-	FXLabel* b1 = new FXLabel(btext, "ice2k", NULL, JUSTIFY_LEFT);
-	b1->setBackColor(FXRGB(255,255,255));
-	b1->setFont(new FXFont(getApp(), "helvetica", 16, FXFont::Bold));
-	FXLabel* b2 = new FXLabel(btext, "Server konfigurieren", NULL, JUSTIFY_LEFT);
-	b2->setBackColor(FXRGB(255,255,255));
-	b2->setFont(new FXFont(getApp(), "helvetica", 20, FXFont::Bold));
+	new BannerFrame(this, banner);
 
 	// ---- Fußzeile mit "Dialog beim Start anzeigen" ----
 	FXHorizontalFrame* foot = new FXHorizontalFrame(this, LAYOUT_SIDE_BOTTOM | LAYOUT_FILL_X, 0,0,0,0, 16,16,6,8);
@@ -505,32 +551,32 @@ SrvCfgWindow::SrvCfgWindow(FXApp* a)
 	for (int i = 0; i < PG_COUNT; i++) buildPage(i, makePage(i));
 
 	// Reihenfolge wie im Original, mit den Gruppen als aufklappbare Punkte.
-	auto add = [&](FXTreeItem* parent, const char* label, int page) {
-		FXTreeItem* it = nav->appendItem(parent, label, icoNav, icoNav);
+	auto add = [&](FXTreeItem* parent, const char* label, int page, FXIcon* icon) {
+		FXTreeItem* it = nav->appendItem(parent, label, icon, icon);
 		itemPage[it] = page;
 		return it;
 	};
-	FXTreeItem* start = add(NULL, "Startseite", PG_START);
-	add(NULL, "Jetzt registrieren", PG_REGISTER);
-	add(NULL, "Active Directory", PG_AD);
-	add(NULL, "Dateiserver", PG_FILE);
-	add(NULL, "Druckserver", PG_PRINT);
-	FXTreeItem* webmedia = add(NULL, "Web-/Mediaserver", PG_WEBMEDIA);
-	add(webmedia, "Webserver", PG_WEB);
-	add(webmedia, "Medienserver", PG_MEDIA);
-	FXTreeItem* network = add(NULL, "Netzwerk", PG_NETWORK);
-	add(network, "DHCP", PG_DHCP);
-	add(network, "DNS", PG_DNS);
-	add(network, "Remotezugriff", PG_REMOTE);
-	add(network, "Routing", PG_ROUTING);
-	FXTreeItem* apps = add(NULL, "Anwendungsserver", PG_APPS);
-	add(apps, "Komponentendienste", PG_COMPONENTS);
-	add(apps, "Terminaldienste", PG_TERMINAL);
-	add(apps, "Datenbankserver", PG_DATABASE);
-	add(apps, "E-Mail-Server", PG_MAIL);
-	FXTreeItem* adv = add(NULL, "Erweitert", PG_ADVANCED);
-	add(adv, "Computerverwaltung", PG_MANAGEMENT);
-	add(adv, "Sicherheitsrichtlinien", PG_SECURITY);
+	FXTreeItem* start = add(NULL, "Startseite", PG_START, icoHome);
+	add(NULL, "Jetzt registrieren", PG_REGISTER, icoReg);
+	add(NULL, "Active Directory", PG_AD, icoAd);
+	add(NULL, "Dateiserver", PG_FILE, icoFile);
+	add(NULL, "Druckserver", PG_PRINT, icoPrint);
+	FXTreeItem* webmedia = add(NULL, "Web-/Mediaserver", PG_WEBMEDIA, icoWeb);
+	add(webmedia, "Webserver", PG_WEB, icoWeb);
+	add(webmedia, "Medienserver", PG_MEDIA, icoWeb);
+	FXTreeItem* network = add(NULL, "Netzwerk", PG_NETWORK, icoNet);
+	add(network, "DHCP", PG_DHCP, icoNet);
+	add(network, "DNS", PG_DNS, icoNet);
+	add(network, "Remotezugriff", PG_REMOTE, icoNet);
+	add(network, "Routing", PG_ROUTING, icoNet);
+	FXTreeItem* apps = add(NULL, "Anwendungsserver", PG_APPS, icoApps);
+	add(apps, "Komponentendienste", PG_COMPONENTS, icoApps);
+	add(apps, "Terminaldienste", PG_TERMINAL, icoApps);
+	add(apps, "Datenbankserver", PG_DATABASE, icoApps);
+	add(apps, "E-Mail-Server", PG_MAIL, icoApps);
+	FXTreeItem* adv = add(NULL, "Erweitert", PG_ADVANCED, icoAdv);
+	add(adv, "Computerverwaltung", PG_MANAGEMENT, icoAdv);
+	add(adv, "Sicherheitsrichtlinien", PG_SECURITY, icoAdv);
 
 	nav->setCurrentItem(start);
 	nav->selectItem(start);
