@@ -35,19 +35,25 @@ Aktualisieren und Eigenschaften.
     `ip route`), Rechtsklick legt eine Route an oder löscht sie
 - **VPN-Server**: Die Rolle "VPN-Server" des Assistenten fragt danach,
   welcher Dienst die Aufgabe übernimmt -- Windows 2000 hat hier PPTP und
-  L2TP/IPSec:
+  L2TP/IPSec. Alle drei Dienste werden vollständig eingerichtet; das
+  Kontrollkästchen "Fehlende Zertifikate und Schlüssel anlegen" steuert
+  bei OpenVPN und strongSwan, ob eine eigene Zertifizierungsstelle
+  entsteht (bei WireGuard entfällt es, dort genügen Schlüsselpaare):
   - *WireGuard*: wird vollständig eingerichtet -- Schlüsselpaar erzeugt,
     `/etc/wireguard/<Name>.conf` geschrieben, `wg-quick@<Name>` aktiviert;
     der öffentliche Schlüssel des Servers wird angezeigt. Clients werden
     als `[Peer]`-Abschnitte ergänzt.
-  - *OpenVPN*: schreibt `/etc/openvpn/server/<Name>.conf` und legt auf
-    Wunsch (Kontrollkästchen im Dialog) mit `openssl` eine eigene
-    Zertifizierungsstelle an: CA und Serverzertifikat unter
+  - *OpenVPN*: schreibt `/etc/openvpn/server/<Name>.conf` und legt mit
+    `openssl` eine eigene Zertifizierungsstelle an: CA und Serverzertifikat unter
     `/etc/openvpn/server/pki`, die Serverdateien zusätzlich dort, wo die
     Konfiguration sie erwartet. Statt einer Diffie-Hellman-Datei steht
     `dh none` in der Konfiguration (OpenVPN 2.4+ handelt ECDHE aus).
   - *strongSwan*: schreibt `/etc/swanctl/conf.d/<Name>.conf` (IKEv2 mit
-    Adresspool). Zertifikate und Benutzer müssen vorhanden sein.
+    Adresspool), legt auf Wunsch CA und Serverzertifikat unter
+    `/etc/swanctl/x509ca`, `/etc/swanctl/x509` und `/etc/swanctl/private`
+    an (mit dem Servernamen als alternativem Antragstellernamen, sonst
+    lehnen viele Clients ab) und startet den Dienst. Benutzer kommen über
+    "RAS-Clients" dazu.
   - Der Knoten *Ports* zeigt den eingerichteten Dienst mit seinem Zustand
     und bei WireGuard zusätzlich die Peers.
   - Der Knoten *RAS-Clients* verwaltet die Gegenstellen: Rechtsklick legt

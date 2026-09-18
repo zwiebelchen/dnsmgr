@@ -599,9 +599,9 @@ public:
 			new FXLabel(radios, text, NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
 			new FXFrame(radios, LAYOUT_FIX_HEIGHT, 0,0,0,4, 0,0,0,0);
 		};
-		opt("&WireGuard", 0, "        Schlanker VPN-Dienst mit Schlüsselpaaren; wird hier vollständig eingerichtet.");
-		opt("&OpenVPN", 1, "        Benötigt Zertifikate (CA, Server) -- die Konfiguration wird geschrieben,\n        die Zertifikate müssen vorhanden sein.");
-		opt("&strongSwan (IPSec)", 2, "        IKEv2; die Verbindung wird angelegt, Zertifikate bzw. Schlüssel müssen\n        vorhanden sein.");
+		opt("&WireGuard", 0, "        Schlanker VPN-Dienst mit Schlüsselpaaren; wird vollständig eingerichtet.");
+		opt("&OpenVPN", 1, "        Wird vollständig eingerichtet; fehlende Zertifikate (eigene CA und\n        Serverzertifikat) werden angelegt.");
+		opt("&strongSwan (IPSec)", 2, "        IKEv2; wird vollständig eingerichtet, fehlende Zertifikate und Schlüssel\n        werden angelegt.");
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 		auto row = [&](const char* label, const char* value) {
 			FXHorizontalFrame* r = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
@@ -614,7 +614,7 @@ public:
 		portField = row("&Port:", "51820");
 		subnetField = row("&VPN-Netzwerk:", "10.8.0.0/24");
 		serverIpField = row("&Adresse des Servers:", "10.8.0.1");
-		pkiCheck = new FXCheckButton(main, "Bei OpenVPN eine eigene &Zertifizierungsstelle anlegen (CA und Serverzertifikat)");
+		pkiCheck = new FXCheckButton(main, "Fehlende &Zertifikate und Schlüssel anlegen (eigene Zertifizierungsstelle)");
 		pkiCheck->setCheck(TRUE);
 		hint = new FXLabel(main, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
@@ -624,10 +624,12 @@ public:
 		onBackend(NULL, 0, NULL);
 	}
 	long onBackend(FXObject*, FXSelector, void*) {
-		if (pkiCheck) { if (backend == 1) pkiCheck->enable(); else pkiCheck->disable(); }
+		// WireGuard bringt seine Schlüssel selbst mit; die Option gilt für die
+		// beiden zertifikatsbasierten Dienste.
+		if (pkiCheck) { if (backend == 0) pkiCheck->disable(); else pkiCheck->enable(); }
 		if (backend == 0) { portField->setText("51820"); hint->setText("Schreibt /etc/wireguard/<Name>.conf mit einem neuen Schlüsselpaar und startet wg-quick@<Name>."); }
-		else if (backend == 1) { portField->setText("1194"); hint->setText("Schreibt /etc/openvpn/server/<Name>.conf; erwartet ca.crt, server.crt, server.key und dh.pem in /etc/openvpn/server."); }
-		else { portField->setText("500"); hint->setText("Schreibt /etc/swanctl/conf.d/<Name>.conf (IKEv2); Zertifikate bzw. Schlüssel müssen in /etc/swanctl liegen."); }
+		else if (backend == 1) { portField->setText("1194"); hint->setText("Schreibt /etc/openvpn/server/<Name>.conf, legt fehlende Zertifikate unter /etc/openvpn/server/pki an und startet den Dienst."); }
+		else { portField->setText("500"); hint->setText("Schreibt /etc/swanctl/conf.d/<Name>.conf (IKEv2), legt fehlende Zertifikate unter /etc/swanctl an und startet strongswan."); }
 		return 1;
 	}
 	long onOk(FXObject*, FXSelector, void*) {
@@ -647,7 +649,7 @@ public:
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
-	bool createPki() const { return backend == 1 && pkiCheck->getCheck(); }
+	bool createPki() const { return backend != 0 && pkiCheck->getCheck(); }
 	VpnConfig config() const {
 		VpnConfig c;
 		c.backend = backend == 0 ? VPN_WIREGUARD : backend == 1 ? VPN_OPENVPN : VPN_STRONGSWAN;
@@ -670,7 +672,10 @@ FXIMPLEMENT(VpnSetupDialog, FXDialogBox, VpnSetupDialogMap, ARRAYNUMBER(VpnSetup
 // Serverkonfiguration geschrieben -- Zertifikate und Schluessel legt
 // diese Konsole bewusst nicht an.
 static bool createOpenvpnPki(FXString& errorMsg);
+static bool createStrongswanPki(FXString& errorMsg);
+static bool rootShell(const std::string& cmd, std::string& out);
 
+// withPki: fehlende Zertifikate und Schluessel werden angelegt.
 static bool setupVpn(const VpnConfig& c, bool withPki, std::string& note, FXString& errorMsg) {
 	note.clear();
 	if (c.backend == VPN_WIREGUARD) {
@@ -719,6 +724,7 @@ static bool setupVpn(const VpnConfig& c, bool withPki, std::string& note, FXStri
 		return true;
 	}
 	// strongSwan
+	if (withPki && !createStrongswanPki(errorMsg)) return false;
 	std::string conf = "# Von ice2k \"Routing und RAS\" erzeugt.\nconnections {\n"
 	                   "    " + c.name + " {\n"
 	                   "        version = 2\n        pools = " + c.name + "_pool\n"
@@ -728,10 +734,15 @@ static bool setupVpn(const VpnConfig& c, bool withPki, std::string& note, FXStri
 	                   "                local_ts = 0.0.0.0/0\n                esp_proposals = aes256gcm16-x25519\n            }\n        }\n    }\n}\n\n"
 	                   "pools {\n    " + c.name + "_pool {\n        addrs = " + c.subnet + "\n    }\n}\n";
 	if (!writeFileAsRoot("/etc/swanctl/conf.d/" + c.name + ".conf", conf, errorMsg)) return false;
-	note = "Die Verbindung wurde nach /etc/swanctl/conf.d/" + c.name + ".conf geschrieben.\n\n"
-	       "Serverzertifikat und Schlüssel müssen in /etc/swanctl/x509 bzw. /etc/swanctl/private\n"
-	       "liegen, die Benutzer in /etc/swanctl/swanctl.conf (secrets). Danach:\n"
-	       "systemctl restart strongswan und swanctl --load-all.";
+	std::string out;
+	runAsRootCaptured({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString("strongswan") }, out);
+	std::string loadOut;
+	rootShell("swanctl --load-all 2>&1", loadOut);
+	note = "Die Verbindung wurde nach /etc/swanctl/conf.d/" + c.name + ".conf geschrieben.\n";
+	if (withPki)
+		note += "Zertifizierungsstelle und Serverzertifikat liegen unter /etc/swanctl/x509ca bzw.\n"
+		        "/etc/swanctl/x509; das CA-Zertifikat gehört auf die Clients.\n";
+	note += "\nBenutzer legen Sie unter \"RAS-Clients\" an.";
 	return true;
 }
 
@@ -822,6 +833,41 @@ static bool createOpenvpnPki(FXString& errorMsg) {
 	return true;
 }
 
+// strongSwan braucht ein Serverzertifikat, damit sich Clients per IKEv2
+// anmelden koennen. Dieselbe kleine CA wie bei OpenVPN, nur an den
+// Stellen, an denen swanctl sucht. Der Servername kommt in den
+// alternativen Antragstellernamen -- ohne den lehnen viele Clients ab.
+static bool createStrongswanPki(FXString& errorMsg) {
+	if (!opensslAvailable()) { errorMsg = "openssl wurde nicht gefunden."; return false; }
+	std::string host = hostName().text();
+	std::string out;
+	std::string cmd =
+		"set -e\n"
+		"umask 077\n"
+		"mkdir -p /etc/swanctl/x509ca /etc/swanctl/x509 /etc/swanctl/private /etc/swanctl/conf.d\n"
+		"cd /etc/swanctl\n"
+		"if [ ! -f x509ca/ca.crt ]; then\n"
+		"  openssl req -x509 -newkey rsa:2048 -nodes -keyout private/ca.key -out x509ca/ca.crt -days 3650 \\\n"
+		"    -subj '/CN=ice2k Routing und RAS CA'\n"
+		"fi\n"
+		"if [ ! -f x509/server.crt ]; then\n"
+		"  openssl req -newkey rsa:2048 -nodes -keyout private/server.key -out server.csr -subj '/CN=" + host + "'\n"
+		"  openssl x509 -req -in server.csr -CA x509ca/ca.crt -CAkey private/ca.key -CAcreateserial \\\n"
+		"    -out x509/server.crt -days 3650 -extfile /dev/stdin <<EXT\n"
+		"keyUsage = digitalSignature, keyEncipherment\n"
+		"extendedKeyUsage = serverAuth\n"
+		"subjectAltName = DNS:" + host + "\n"
+		"EXT\n"
+		"  rm -f server.csr\n"
+		"fi\n"
+		"chmod 600 private/*.key\n";
+	if (!rootShell(cmd, out)) {
+		errorMsg = FXString("Die Zertifikate für strongSwan konnten nicht erzeugt werden:\n") + svcprobe::trimmed(out).c_str();
+		return false;
+	}
+	return true;
+}
+
 // ---------------------------------------------------------------------
 // Clients bzw. Benutzer eines VPN-Servers.
 // ---------------------------------------------------------------------
@@ -872,7 +918,7 @@ static std::vector<VpnClient> listVpnClients(const RrasState& st) {
 			if (l.rfind("id = ", 0) != 0) continue;
 			VpnClient c;
 			c.name = svcprobe::trimmed(l.substr(5));
-			c.detail = "EAP-Benutzer";
+			c.detail = "Kennwort hinterlegt";
 			out.push_back(c);
 		}
 	}
