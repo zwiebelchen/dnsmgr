@@ -20,6 +20,7 @@ jeweiligen Unterordner.
 | [`dsadmin/`](dsadmin/README.md) | Active Directory-Benutzer und -Computer | samba-tool (user/group/ou/gpo), LDAP, SYSVOL | Domänenkonten anlegen/löschen, Gruppenmitgliedschaften, GPOs anlegen/verknüpfen; vollständiger Gruppenrichtlinienobjekt-Editor (ADM-Vorlagen → `Registry.pol`) plus Softwareinstallation, Skripte und Ordnerumleitung |
 | [`termsvc/`](termsvc/README.md) | Terminaldienstekonfiguration | xrdp + PAM/winbind | Terminaldienste aktivieren (Paketinstallation, Authentifizierung lokal/AD, Win2k-Anmeldebildschirm, Dienste starten) |
 | [`rras/`](rras/README.md) | Routing und RAS | Linux-Kernel (IP-Weiterleitung) | Serverstatus, Aktivieren/Deaktivieren, Eigenschaften |
+| [`srvcfg/`](srvcfg/README.md) | Konfiguration des Servers | Zustand aus smb.conf, systemd und /etc/ice2k | Startseite mit Verweisen auf die übrigen Programme |
 | [`secpol/`](secpol/README.md) | Sicherheitsrichtlinien (Domäne, Domänencontroller, lokal) | dieselbe Quelle wie `dsadmin` (GPO-Sicherheitseinstellungen) | drei Konsolen über `--domain`, `--dc`, `--local` |
 | [`services/`](services/README.md) | Dienste (services.msc) | systemd | Dienste auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten -- Ansicht aus `common/svc`, auch in `compmgmt` eingehängt |
 
@@ -46,7 +47,7 @@ nicht im vollen Umfang des Originals.
 | 10 | DNS | [`dnsmgr/`](dnsmgr/README.md) | **umgesetzt**: Forward-/Reverse-Zonen, gängige Datensatztypen (BIND9) |
 | 11 | Ereignisanzeige | -- | offen (Backend: `journalctl`) |
 | 12 | Komponentendienste | -- | nicht geplant (COM+ hat unter Linux keine Entsprechung) |
-| 13 | Konfiguration des Servers | -- | offen (Startseite mit Verweisen auf die übrigen Programme) |
+| 13 | Konfiguration des Servers | [`srvcfg/`](srvcfg/README.md) | **umgesetzt**: Kopfbanner, Navigationsleiste und Inhaltsseiten wie im Original; jede Seite zeigt den Zustand des Dienstes und startet das passende Programm. Für Dienste ohne eigenes Programm (Druck, Web, Medien, Datenbank, E-Mail) nennt sie die Linux-Gegenstücke |
 | 14 | Lizenzierung | -- | nicht geplant |
 | 15 | Lokale Sicherheitsrichtlinie | [`secpol/`](secpol/README.md) `--local` | **umgesetzt**: bearbeitbar wie im Original, mit den Spalten "Lokale Einstellung" und "Effektive Einstellung" (lokale Werte, überschrieben von den wirksamen Gruppenrichtlinien). Lokale Werte werden gespeichert, aber noch nicht auf das Linux-System angewendet |
 | 16 | Routing und RAS | [`rras/`](rras/README.md) | **teilweise**: Serverstatus, Aktivieren/Deaktivieren, Eigenschaften, Routingschnittstellen, statische Routen, **VPN-Server** (WireGuard, OpenVPN samt eigener Zertifizierungsstelle, strongSwan) mit Client-/Benutzerverwaltung und **Paketfilter** je Schnittstelle über nftables, alles über die Unit `ice2k-rras.service` neustartfest; Texte und Symbole aus `mprsnap.dll`/`rtrfiltr.dll`. Offen: Einwahl (Modem/ISDN), Adressumsetzung, Routingprotokolle |
@@ -123,6 +124,7 @@ cd termsvc && make && ./termsvc
 cd services && make && ./services
 cd secpol && make && ./secpol --domain
 cd rras && make && ./rras
+cd srvcfg && make && ./srvcfg
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,
