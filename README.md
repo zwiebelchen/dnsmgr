@@ -47,7 +47,7 @@ nicht im vollen Umfang des Originals.
 | 12 | Komponentendienste | -- | nicht geplant (COM+ hat unter Linux keine Entsprechung) |
 | 13 | Konfiguration des Servers | -- | offen (Startseite mit Verweisen auf die übrigen Programme) |
 | 14 | Lizenzierung | -- | nicht geplant |
-| 15 | Lokale Sicherheitsrichtlinie | [`secpol/`](secpol/README.md) `--local` | **umgesetzt**: auf einem Domänencontroller stammen die Einstellungen aus den Richtlinien der Domäne -- wie im Original nur zum Ansehen, mit Verweis auf die beiden anderen Konsolen |
+| 15 | Lokale Sicherheitsrichtlinie | [`secpol/`](secpol/README.md) `--local` | **umgesetzt**: bearbeitbar wie im Original, mit den Spalten "Lokale Einstellung" und "Effektive Einstellung" (lokale Werte, überschrieben von den wirksamen Gruppenrichtlinien). Lokale Werte werden gespeichert, aber noch nicht auf das Linux-System angewendet |
 | 16 | Routing und RAS | -- | offen (Backend: nftables/FRR, WireGuard oder strongSwan) |
 | 17 | Systemmonitor | -- | offen |
 | 18 | Telefonie | -- | nicht geplant |

@@ -5151,8 +5151,12 @@ protected:
 public:
 	enum { ID_DEFINE = FXDialogBox::ID_LAST, ID_SPIN };
 
-	SecPolicyEditDialog(FXWindow* owner, const SecPolicyDef& def_, bool defined, const std::string& value)
-		: FXDialogBox(owner, "Sicherheitsrichtlinienvorlage", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0),
+	// effectiveText: nur in der lokalen Sicherheitsrichtlinie gesetzt --
+	// dann zeigt der Dialog wie im Original oben die wirksame Einstellung
+	// und unten die lokale.
+	SecPolicyEditDialog(FXWindow* owner, const SecPolicyDef& def_, bool defined, const std::string& value,
+	                    const FXString& effectiveText = FXString(), const FXString& title = "Sicherheitsrichtlinienvorlage")
+		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,460,0),
 		  def(&def_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,10,10, 0,8);
 		FXHorizontalFrame* head = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 10,0);
@@ -5160,11 +5164,21 @@ public:
 		new FXLabel(head, wrapLabel(def->label, 50), NULL, JUSTIFY_LEFT | LAYOUT_CENTER_Y);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 
+		if (!effectiveText.empty()) {
+			new FXLabel(main, "Einstellung der effektiven Richtlinie", NULL, JUSTIFY_LEFT);
+			FXPacker* ef = new FXPacker(main, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X, 0,0,0,0, 6,6,4,4);
+			new FXLabel(ef, effectiveText, NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+			new FXLabel(main, "Einstellung der lokalen Richtlinie", NULL, JUSTIFY_LEFT);
+		}
+
 		// Wortlaut je Dialogart wie in wsecedit.dll (Dialoge 180-183, 190).
-		const char* defineText = def->kind == SV_AUDIT ? "&Diese Richtlinieneinstellungen in der Vorlage definieren"
+		// In der lokalen Sicherheitsrichtlinie gibt es keine Vorlage.
+		bool local = !effectiveText.empty();
+		const char* defineText = def->kind == SV_AUDIT
+		                         ? (local ? "&Diese Richtlinieneinstellungen definieren" : "&Diese Richtlinieneinstellungen in der Vorlage definieren")
 		                       : (def->kind == SV_TEXT || def->kind == SV_RETENTION || def->kind == SV_CHOICE)
-		                         ? "&Diese Richtlinieneinstellung in der Vorlage definieren:"
-		                         : "&Diese Richtlinieneinstellung in der Vorlage definieren";
+		                         ? (local ? "&Diese Richtlinieneinstellung definieren:" : "&Diese Richtlinieneinstellung in der Vorlage definieren:")
+		                         : (local ? "&Diese Richtlinieneinstellung definieren" : "&Diese Richtlinieneinstellung in der Vorlage definieren");
 		defineCheck = new FXCheckButton(main, defineText, this, ID_DEFINE);
 		defineCheck->setCheck(defined);
 		FXVerticalFrame* body = new FXVerticalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 20,0,0,0, 0,4);
@@ -5235,6 +5249,9 @@ public:
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXButton(btnf, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		if (!effectiveText.empty())
+			new FXLabel(main, "Sind Richtlinien auf Domänenebene definiert, so überschreiben diese die\n"
+			                  "lokalen Richtlinieneinstellungen.", NULL, JUSTIFY_LEFT);
 		updateEnabled();
 	}
 
@@ -7313,6 +7330,61 @@ FXIMPLEMENT(PackagePropertiesDialog, FXDialogBox, PackagePropertiesDialogMap, AR
 // Editors: links der Baum mit Computer- und Benutzerkonfiguration,
 // rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
 // ---------------------------------------------------------------------
+// Lokale Sicherheitsrichtlinie: Windows haelt sie in der lokalen
+// Sicherheitsdatenbank (secedit.sdb). Hier tut es eine Vorlagendatei im
+// selben INF-Format, damit dieselben Dialoge damit arbeiten koennen.
+static const char* LOCAL_SECPOL_DIR = "/var/lib/ice2k/secpol";
+static const char* LOCAL_SECPOL_FILE = "/var/lib/ice2k/secpol/local.inf";
+
+static InfFile loadLocalSecurityTemplate() {
+	std::string raw;
+	if (runAsRootCaptured({ FXString("cat"), FXString(LOCAL_SECPOL_FILE) }, raw) != 0) return InfFile();
+	return parseInf(raw);
+}
+
+static bool saveLocalSecurityTemplate(InfFile& inf, FXString& errorMsg) {
+	std::string encoded = serializeInf(inf);
+	FXString tmp = "/tmp/ice2k-localsec.inf";
+	{
+		std::ofstream o(tmp.text(), std::ios::binary);
+		o.write(encoded.data(), (std::streamsize)encoded.size());
+	}
+	runAsRoot({ FXString("mkdir"), FXString("-p"), FXString(LOCAL_SECPOL_DIR) });
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("cp"), tmp, FXString(LOCAL_SECPOL_FILE) }, out);
+	runAsRoot({ FXString("rm"), FXString("-f"), tmp });
+	if (rc != 0) {
+		errorMsg = FXString("Die lokale Sicherheitsrichtlinie konnte nicht gespeichert werden:\n") + trimStr(out).c_str();
+		return false;
+	}
+	return true;
+}
+
+// Die auf diesem Computer wirksame Richtlinie: alle aktiven
+// Verknuepfungen an der Domaenenwurzel und danach die der
+// Domaenencontroller-OU, jeweils von niedriger zu hoher Prioritaet --
+// spaeter Definiertes gewinnt. Was keine Gruppenrichtlinie definiert,
+// bleibt bei der lokalen Einstellung.
+static InfFile effectiveSecurityTemplate(const DomainInfo& domain, const InfFile& local) {
+	InfFile eff = local;
+	auto mergeGpo = [&](const std::string& containerDn) {
+		for (auto& l : parseGpLink(ldapiReadAttr(containerDn, "gPLink"))) {
+			if (l.options & GPLINK_OPT_DISABLE) continue;
+			std::string gpoDn = "CN=" + l.guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
+			long flags = 0;
+			try { flags = std::stol(ldapiReadAttr(gpoDn, "flags")); } catch (...) {}
+			if (flags & 2) continue; // Computerkonfiguration deaktiviert
+			InfFile gpo = loadGptTmpl(domain, l.guid);
+			for (auto& sec : gpo.sections)
+				for (auto& kv : sec.second)
+					if (kv.second != INF_BARE_LINE) eff.set(sec.first, kv.first, kv.second);
+		}
+	};
+	mergeGpo(domain.baseDN.text());
+	mergeGpo("OU=Domain Controllers," + std::string(domain.baseDN.text()));
+	return eff;
+}
+
 // Betriebsart des Gruppenrichtlinienfensters: das ganze
 // Gruppenrichtlinienobjekt oder -- fuer die Sicherheitsrichtlinien-
 // Konsolen -- nur der Zweig "Sicherheitseinstellungen", wahlweise
@@ -7320,6 +7392,10 @@ FXIMPLEMENT(PackagePropertiesDialog, FXDialogBox, PackagePropertiesDialogMap, AR
 struct GpoEditorOptions {
 	bool securityOnly = false;
 	bool readOnly = false;
+	// Lokale Sicherheitsrichtlinie: bearbeitet die lokale Vorlage statt
+	// eines Gruppenrichtlinienobjekts und zeigt zusaetzlich die wirksame
+	// Einstellung an.
+	bool localMode = false;
 	FXString windowTitle = "Gruppenrichtlinie";
 	FXString rootLabel;          // leer = "Sicherheitseinstellungen"
 	FXString readOnlyNote;
@@ -7378,7 +7454,9 @@ public:
 		  domain(domain_), guid(guid_), gpoName(gpoName_), opts(opts_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
 		FXSplitter* splitter = new FXSplitter(main, LAYOUT_FILL_X | LAYOUT_FILL_Y | SPLITTER_TRACKING);
-		FXPacker* treeframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_Y, 0,0,340,0, 0,0,0,0);
+		// In den Sicherheitsrichtlinien-Konsolen ist der Baum flacher, dafuer
+		// braucht die Liste mehr Platz.
+		FXPacker* treeframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_Y, 0,0, opts_.securityOnly ? 270 : 340, 0, 0,0,0,0);
 		tree = new FXTreeList(treeframe, this, ID_TREE,
 		                      LAYOUT_FILL_X | LAYOUT_FILL_Y | TREELIST_SHOWS_BOXES | TREELIST_SHOWS_LINES | TREELIST_BROWSESELECT | TREELIST_ROOT_BOXES);
 		rightSwitcher = new FXSwitcher(splitter, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
@@ -7545,12 +7623,16 @@ public:
 				break;
 			}
 			case GN_SECPOL: {
-				setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 200 } });
-				inf = loadGptTmpl(domain, guid);
+				// Lokale Sicherheitsrichtlinie: zwei Spalten wie im Original.
+				if (opts.localMode) setHeaders({ { "Richtlinie", 300 }, { "Lokale Einstellung", 150 }, { "Effektive Einstellung", 150 } });
+				else setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 200 } });
+				inf = loadTemplate();
 				// Haeufiger Stolperstein: Kennwort- und Sperrrichtlinien in einem
 				// GPO an einer Organisationseinheit gelten nur fuer lokale Konten
 				// der Computer dort, nicht fuer Domaenenkonten.
-				if ((node.defs == &SEC_PASSWORD_POLICIES || node.defs == &SEC_LOCKOUT_POLICIES || node.defs == &SEC_KERBEROS_POLICIES) &&
+				if (opts.localMode)
+					status->setText(" Sind Richtlinien auf Domänenebene definiert, so überschreiben diese die lokalen Richtlinieneinstellungen.");
+				else if ((node.defs == &SEC_PASSWORD_POLICIES || node.defs == &SEC_LOCKOUT_POLICIES || node.defs == &SEC_KERBEROS_POLICIES) &&
 				    !gpoLinkedToDomainRoot(domain, guid))
 					status->setText(" Hinweis: Dieses Gruppenrichtlinienobjekt ist nicht mit der Domäne verknüpft. "
 					                "Kontorichtlinien gelten hier nur für lokale Konten der Computer, nicht für Domänenkonten.");
@@ -7564,37 +7646,47 @@ public:
 					const SecPolicyDef& def = (*node.defs)[i];
 					std::string v;
 					bool defined = readSecValue(inf, def, v);
-					list->appendItem(FXString(def.label) + "\t" + secValueText(def, defined, v), ic, ic);
+					FXString text = FXString(def.label) + "\t" + secValueText(def, defined, v);
+					if (opts.localMode) {
+						std::string ev;
+						bool eDefined = readSecValue(effective(), def, ev);
+						text += "\t" + secValueText(def, eDefined, ev);
+					}
+					list->appendItem(text, ic, ic);
 				}
 				break;
 			}
 			case GN_RIGHTS: {
-				setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 260 } });
-				inf = loadGptTmpl(domain, guid);
+				if (opts.localMode) setHeaders({ { "Richtlinie", 300 }, { "Lokale Einstellung", 150 }, { "Effektive Einstellung", 150 } });
+				else setHeaders({ { "Richtlinie", 330 }, { "Computereinstellung", 260 } });
+				inf = loadTemplate();
 				ensurePrincipals();
 				FXIcon* ic = sharedPngIcon(resico_key);
 				for (size_t i = 0; i < USER_RIGHTS.size(); i++) rowDefs.push_back((int)i);
 				std::sort(rowDefs.begin(), rowDefs.end(), [&](int a, int b) {
 					return germanLess(USER_RIGHTS[a].label, USER_RIGHTS[b].label);
 				});
-				for (int i : rowDefs) {
+				auto rightText = [&](InfFile& source, int i) {
 					std::string v;
-					FXString shown = "Nicht definiert";
-					if (inf.get("Privilege Rights", USER_RIGHTS[i].key, v)) {
-						shown = "";
-						for (auto& t : splitAccountList(v)) {
-							if (!shown.empty()) shown += ", ";
-							shown += accountTokenDisplay(t, principals);
-						}
+					if (!source.get("Privilege Rights", USER_RIGHTS[i].key, v)) return FXString("Nicht definiert");
+					FXString shown;
+					for (auto& t : splitAccountList(v)) {
+						if (!shown.empty()) shown += ", ";
+						shown += accountTokenDisplay(t, principals);
 					}
-					list->appendItem(FXString(USER_RIGHTS[i].label) + "\t" + shown, ic, ic);
+					return shown;
+				};
+				for (int i : rowDefs) {
+					FXString text = FXString(USER_RIGHTS[i].label) + "\t" + rightText(inf, i);
+					if (opts.localMode) text += "\t" + rightText(effective(), i);
+					list->appendItem(text, ic, ic);
 				}
 				break;
 			}
 			case GN_REGKEYS:
 			case GN_FILES: {
 				setHeaders({ { "Objektname", 360 }, { "Berechtigung", 160 }, { "Überwachen", 120 } });
-				inf = loadGptTmpl(domain, guid);
+				inf = loadTemplate();
 				SecObjectKind k = node.kind == GN_REGKEYS ? SECOBJ_REGISTRY : SECOBJ_FILE;
 				rowObjects = listObjectPolicies(inf, k);
 				FXIcon* ic = sharedPngIcon(k == SECOBJ_REGISTRY ? resico_key : resico_folder);
@@ -7609,7 +7701,7 @@ public:
 			}
 			case GN_SERVICES: {
 				// Jedes Mal frisch: Vorlage und alle installierten Dienste.
-				inf = loadGptTmpl(domain, guid);
+				inf = loadTemplate();
 				rightSwitcher->setCurrent(1);
 				getApp()->beginWaitCursor();
 				servicePanel->reload();
@@ -7618,7 +7710,7 @@ public:
 			}
 			case GN_RESTRICTED: {
 				setHeaders({ { "Gruppenname", 220 }, { "Mitglieder", 200 }, { "Mitglied von", 200 } });
-				inf = loadGptTmpl(domain, guid);
+				inf = loadTemplate();
 				ensurePrincipals();
 				FXIcon* ic = sharedPngIcon(resico_users);
 				if (auto* sec = inf.find("Group Membership")) {
@@ -7849,7 +7941,7 @@ public:
 	}
 	virtual void svcActivate(FXWindow*, const svc::ServiceInfo& info) {
 		if (!requireRoot()) return;
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		std::string name = info.displayName();
 		ServicePolicy sp = findServicePolicy(inf, name);
 		ensurePrincipals();
@@ -7862,7 +7954,7 @@ public:
 		changed.sddl = dlg.getSddl();
 		setServicePolicy(inf, name, changed);
 		saveTemplate(false);
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 	}
 
 	SecObjectKind shownObjectKind() {
@@ -7878,7 +7970,7 @@ public:
 		ObjectPolicyDialog dlg(this, k, op, principals);
 		if (!dlg.execute(PLACEMENT_OWNER)) return;
 		if (dlg.getMode() == op.mode && dlg.getSddl() == op.sddl) return;
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		op.mode = dlg.getMode();
 		op.sddl = dlg.getSddl();
 		storeObjectPolicy(inf, k, op, false);
@@ -7934,7 +8026,7 @@ public:
 		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 		op.mode = dlg.getMode();
 		op.sddl = dlg.getSddl();
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		storeObjectPolicy(inf, k, op, false);
 		saveTemplate(false);
 		showNode(shownItem);
@@ -7947,7 +8039,7 @@ public:
 		if (row < 0 || row >= (int)rowObjects.size() || !requireRoot()) return 1;
 		if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
 		        "Möchten Sie \"%s\" wirklich aus der Richtlinie löschen?", rowObjects[row].path.c_str()) != MBOX_CLICKED_YES) return 1;
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		storeObjectPolicy(inf, shownObjectKind(), rowObjects[row], true);
 		saveTemplate(false);
 		reselect(row);
@@ -7998,10 +8090,26 @@ public:
 		return out;
 	}
 
+	// In der lokalen Sicherheitsrichtlinie wird die lokale Vorlage gelesen
+	// und geschrieben, sonst die GptTmpl.inf des Gruppenrichtlinienobjekts.
+	InfFile loadTemplate() {
+		haveEffective = false;
+		return opts.localMode ? loadLocalSecurityTemplate() : loadGptTmpl(domain, guid);
+	}
+
+	// Wirksame Einstellungen (nur lokale Sicherheitsrichtlinie).
+	InfFile effectiveInf;
+	bool haveEffective = false;
+	InfFile& effective() {
+		if (!haveEffective) { effectiveInf = effectiveSecurityTemplate(domain, inf); haveEffective = true; }
+		return effectiveInf;
+	}
+
 	bool saveTemplate(bool accountPolicy) {
 		FXString errorMsg;
 		getApp()->beginWaitCursor();
-		bool ok = saveGptTmpl(this, domain, guid, inf, accountPolicy, errorMsg);
+		bool ok = opts.localMode ? saveLocalSecurityTemplate(inf, errorMsg)
+		                         : saveGptTmpl(this, domain, guid, inf, accountPolicy, errorMsg);
 		getApp()->endWaitCursor();
 		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 		return ok;
@@ -8028,11 +8136,18 @@ public:
 	void editSecurityPolicy(const Node& node, int row) {
 		if (row >= (int)rowDefs.size() || !requireRoot()) return;
 		const SecPolicyDef& def = (*node.defs)[rowDefs[row]];
-		inf = loadGptTmpl(domain, guid); // frisch lesen -- ein anderes Fenster koennte geschrieben haben
+		inf = loadTemplate(); // frisch lesen -- ein anderes Fenster koennte geschrieben haben
 		std::string v;
 		bool defined = readSecValue(inf, def, v);
 
-		SecPolicyEditDialog dlg(this, def, defined, v);
+		FXString effectiveText, dialogTitle = "Sicherheitsrichtlinienvorlage";
+		if (opts.localMode) {
+			std::string ev;
+			bool eDefined = readSecValue(effective(), def, ev);
+			effectiveText = secValueText(def, eDefined, ev);
+			dialogTitle = "Lokale Sicherheitsrichtlinie";
+		}
+		SecPolicyEditDialog dlg(this, def, defined, v, effectiveText, dialogTitle);
 		if (!dlg.execute(PLACEMENT_OWNER)) return;
 		if (dlg.isDefined() == defined && (!defined || dlg.getValue() == v)) return;
 
@@ -8045,7 +8160,7 @@ public:
 	void editUserRight(int row) {
 		if (row >= (int)rowDefs.size() || !requireRoot()) return;
 		const UserRightDef& def = USER_RIGHTS[rowDefs[row]];
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		ensurePrincipals();
 		std::string v;
 		bool defined = inf.get("Privilege Rights", def.key, v);
@@ -8064,7 +8179,7 @@ public:
 	void editRestrictedGroup(int row) {
 		if (row < 0 || row >= (int)rowGroups.size() || !requireRoot()) return;
 		std::string g = rowGroups[row];
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		ensurePrincipals();
 		std::string members, memberOf;
 		inf.get("Group Membership", g + "__Members", members);
@@ -8088,7 +8203,7 @@ public:
 		getApp()->endWaitCursor();
 		GroupPickerDialog dlg(this, domain.realm, groups, "Gruppen auswählen", resico_users);
 		if (!dlg.execute(PLACEMENT_OWNER) || dlg.getResult().empty()) return 1;
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		std::string added;
 		for (int idx : dlg.getResult()) {
 			std::string tok = "*" + groups[idx].sid;
@@ -8113,7 +8228,7 @@ public:
 		if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
 		        "Möchten Sie die Gruppe \"%s\" wirklich aus den eingeschränkten Gruppen löschen?",
 		        accountTokenDisplay(g, principals).text()) != MBOX_CLICKED_YES) return 1;
-		inf = loadGptTmpl(domain, guid);
+		inf = loadTemplate();
 		inf.erase("Group Membership", g + "__Members");
 		inf.erase("Group Membership", g + "__Memberof");
 		saveTemplate(false);
@@ -11050,16 +11165,11 @@ int main(int argc, char* argv[]) {
 		opts.windowTitle = "Sicherheitsrichtlinie für Domänencontroller";
 		opts.rootLabel = "Sicherheitseinstellungen für Domänencontroller [" + serverFqdn(domain) + "]";
 	} else {
-		guid = findDefaultGpoGuid(domain, "Default Domain Controllers Policy", "{6AC1786C-016F-11D2-945F-00C04FB984F9}");
-		gpoName = "Default Domain Controllers Policy";
+		// Wie im Original bleibt die lokale Richtlinie auch auf einem
+		// Domänencontroller bearbeitbar; die Domäne überschreibt sie nur.
+		opts.localMode = true;
 		opts.windowTitle = "Lokale Sicherheitseinstellungen";
-		opts.rootLabel = "Sicherheitseinstellungen [" + serverFqdn(domain) + "]";
-		opts.readOnly = true;
-		opts.readOnlyNote =
-			"Dieser Server ist ein Domänencontroller. Seine Sicherheitseinstellungen stammen aus den\n"
-			"Gruppenrichtlinien der Domäne und lassen sich hier nicht ändern.\n\n"
-			"Ändern Sie sie in \"Sicherheitsrichtlinie für Domänencontroller\" bzw.\n"
-			"\"Sicherheitsrichtlinie für Domänen\".";
+		opts.rootLabel = "Sicherheitseinstellungen";
 	}
 
 	if (!g_haveRoot)
