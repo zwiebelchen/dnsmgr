@@ -19,6 +19,7 @@ jeweiligen Unterordner.
 | [`dcpromo/`](dcpromo/README.md) | Assistent zum Installieren von Active Directory | Samba als AD-Domain-Controller | Neue Domäne (Windows-2000-kompatibel oder moderne BIND9-DLZ-Integration), Migration zwischen beiden |
 | [`dsadmin/`](dsadmin/README.md) | Active Directory-Benutzer und -Computer | samba-tool (user/group/ou/gpo), LDAP, SYSVOL | Domänenkonten anlegen/löschen, Gruppenmitgliedschaften, GPOs anlegen/verknüpfen; vollständiger Gruppenrichtlinienobjekt-Editor (ADM-Vorlagen → `Registry.pol`) plus Softwareinstallation, Skripte und Ordnerumleitung |
 | [`termsvc/`](termsvc/README.md) | Terminaldienstekonfiguration | xrdp + PAM/winbind | Terminaldienste aktivieren (Paketinstallation, Authentifizierung lokal/AD, Win2k-Anmeldebildschirm, Dienste starten) |
+| [`secpol/`](secpol/README.md) | Sicherheitsrichtlinien (Domäne, Domänencontroller, lokal) | dieselbe Quelle wie `dsadmin` (GPO-Sicherheitseinstellungen) | drei Konsolen über `--domain`, `--dc`, `--local` |
 | [`services/`](services/README.md) | Dienste (services.msc) | systemd | Dienste auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten -- Ansicht aus `common/svc`, auch in `compmgmt` eingehängt |
 
 ## Stand gegenüber "Start → Programme → Verwaltung"
@@ -32,7 +33,7 @@ nicht im vollen Umfang des Originals.
 
 | # | Menüpunkt (Verwaltung) | Hier | Stand |
 |---|---|---|---|
-| 1 | Terminaldiensteclient | -- | offen (unter Linux: ein RDP-Client wie `xfreerdp`; im ice2k-Repo verortet, nicht hier) |
+| 1 | Terminaldiensteclient | -- | nicht geplant (unter Linux ein gewöhnlicher RDP-Client, z.B. `xfreerdp`) |
 | 2 | Active Directory-Benutzer und -Computer | [`dsadmin/`](dsadmin/README.md) | **umgesetzt**: Baum/Listen, Benutzer (Allgemein, Adresse, Konto, Profil, Rufnummern, Organisation, Mitglied von), Gruppen (Allgemein, Mitglieder, Mitglied von, Verwaltet von), OU/Domäne (Allgemein, Verwaltet von, Gruppenrichtlinie), Computer, Kontakte, freigegebene Ordner, Suchen, Verschieben/Umbenennen/Löschen, Werkzeugleiste und Menü "Vorgang"; darin der vollständige Gruppenrichtlinienobjekt-Editor (siehe unten) |
 | 3 | Active Directory-Domänen und -Vertrauensstellungen | -- | offen (Backend: `samba-tool domain trust`) |
 | 4 | Active Directory-Standorte und -Dienste | -- | offen (Backend: LDAP unter `CN=Sites,CN=Configuration`) |
@@ -46,7 +47,7 @@ nicht im vollen Umfang des Originals.
 | 12 | Komponentendienste | -- | nicht geplant (COM+ hat unter Linux keine Entsprechung) |
 | 13 | Konfiguration des Servers | -- | offen (Startseite mit Verweisen auf die übrigen Programme) |
 | 14 | Lizenzierung | -- | nicht geplant |
-| 15 | Lokale Sicherheitsrichtlinie | -- | offen; dieselben Einstellungen sind heute über den Gruppenrichtlinien-Editor in `dsadmin` erreichbar |
+| 15 | Lokale Sicherheitsrichtlinie | [`secpol/`](secpol/README.md) `--local` | **umgesetzt**: auf einem Domänencontroller stammen die Einstellungen aus den Richtlinien der Domäne -- wie im Original nur zum Ansehen, mit Verweis auf die beiden anderen Konsolen |
 | 16 | Routing und RAS | -- | offen (Backend: nftables/FRR, WireGuard oder strongSwan) |
 | 17 | Systemmonitor | -- | offen |
 | 18 | Telefonie | -- | nicht geplant |
@@ -63,8 +64,8 @@ nicht im vollen Umfang des Originals.
 | 29 | Internetdienste-Manager | -- | offen (Backend: Apache oder nginx) |
 | 30 | QoS-Zugangssteuerung | -- | nicht geplant |
 | 31 | Remotespeicher | -- | nicht geplant |
-| 32 | Sicherheitsrichtlinie für Domänen | (über `dsadmin/`) | **teilweise**: entspricht der Default Domain Policy im Gruppenrichtlinien-Editor; eigenes Snap-in fehlt |
-| 33 | Sicherheitsrichtlinie für Domänencontroller | (über `dsadmin/`) | **teilweise**: entspricht der Default Domain Controllers Policy im Gruppenrichtlinien-Editor; eigenes Snap-in fehlt |
+| 32 | Sicherheitsrichtlinie für Domänen | [`secpol/`](secpol/README.md) `--domain` | **umgesetzt**: Zweig "Sicherheitseinstellungen" der Default Domain Policy |
+| 33 | Sicherheitsrichtlinie für Domänencontroller | [`secpol/`](secpol/README.md) `--dc` | **umgesetzt**: Zweig "Sicherheitseinstellungen" der Default Domain Controllers Policy |
 
 Nicht im Verwaltungsmenü, aber Teil dieses Repos:
 
@@ -112,6 +113,7 @@ cd dcpromo && make && ./dcpromo
 cd dsadmin && make && ./dsadmin
 cd termsvc && make && ./termsvc
 cd services && make && ./services
+cd secpol && make && ./secpol --domain
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,

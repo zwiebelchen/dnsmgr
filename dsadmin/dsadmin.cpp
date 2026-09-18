@@ -7313,6 +7313,18 @@ FXIMPLEMENT(PackagePropertiesDialog, FXDialogBox, PackagePropertiesDialogMap, AR
 // Editors: links der Baum mit Computer- und Benutzerkonfiguration,
 // rechts der Inhalt des gewaehlten Knotens. Doppelklick bearbeitet.
 // ---------------------------------------------------------------------
+// Betriebsart des Gruppenrichtlinienfensters: das ganze
+// Gruppenrichtlinienobjekt oder -- fuer die Sicherheitsrichtlinien-
+// Konsolen -- nur der Zweig "Sicherheitseinstellungen", wahlweise
+// schreibgeschuetzt.
+struct GpoEditorOptions {
+	bool securityOnly = false;
+	bool readOnly = false;
+	FXString windowTitle = "Gruppenrichtlinie";
+	FXString rootLabel;          // leer = "Sicherheitseinstellungen"
+	FXString readOnlyNote;
+};
+
 class GpoEditorWindow : public FXDialogBox, public SvcPanelDelegate {
 	FXDECLARE(GpoEditorWindow)
 private:
@@ -7358,9 +7370,12 @@ protected:
 public:
 	enum { ID_TREE = FXDialogBox::ID_LAST, ID_LIST, ID_NEW_PACKAGE, ID_REMOVE_PACKAGE, ID_ADD_RGROUP, ID_DELETE_RGROUP, ID_EDIT_RGROUP, ID_ADD_OBJECT, ID_DELETE_OBJECT, ID_EDIT_OBJECT, ID_PACKAGE_PROPS };
 
-	GpoEditorWindow(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const FXString& gpoName_)
-		: FXDialogBox(owner, "Gruppenrichtlinie", DECOR_ALL, 0,0,900,620),
-		  domain(domain_), guid(guid_), gpoName(gpoName_) {
+	GpoEditorOptions opts;
+
+	GpoEditorWindow(FXWindow* owner, const DomainInfo& domain_, const std::string& guid_, const FXString& gpoName_,
+	                const GpoEditorOptions& opts_ = GpoEditorOptions())
+		: FXDialogBox(owner, opts_.windowTitle, DECOR_ALL, 0,0,900,620),
+		  domain(domain_), guid(guid_), gpoName(gpoName_), opts(opts_) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
 		FXSplitter* splitter = new FXSplitter(main, LAYOUT_FILL_X | LAYOUT_FILL_Y | SPLITTER_TRACKING);
 		FXPacker* treeframe = new FXPacker(splitter, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_Y, 0,0,340,0, 0,0,0,0);
@@ -7409,15 +7424,10 @@ public:
 		addAdmCategories(item, h.categories, {}, hive);
 	}
 
-	void buildTree() {
-		FXTreeItem* root = add(NULL, (gpoName + " [" + serverFqdn(domain) + "]").text(), resico_gpedit_gpo, GN_FOLDER, true);
-
-		FXTreeItem* comp = add(root, "Computerkonfiguration", resico_gpedit_computer_config, GN_FOLDER, true);
-		FXTreeItem* cSw = add(comp, "Softwareeinstellungen", resico_folder, GN_FOLDER, true);
-		add(cSw, "Softwareinstallation", resico_folder, GN_SOFTWARE, true);
-		FXTreeItem* cWin = add(comp, "Windows-Einstellungen", resico_folder, GN_FOLDER, true);
-		add(cWin, "Skripts (Start/Herunterfahren)", resico_folder, GN_SCRIPTS, true);
-		FXTreeItem* cSec = add(cWin, "Sicherheitseinstellungen", resico_key, GN_FOLDER, true);
+	// Der Zweig "Sicherheitseinstellungen" -- als Unterknoten der
+	// Computerkonfiguration oder (in den Sicherheitsrichtlinien-Konsolen)
+	// direkt als Wurzel.
+	void buildSecurityNodes(FXTreeItem* cSec) {
 		FXTreeItem* kto = add(cSec, "Kontorichtlinien", resico_key, GN_FOLDER, true);
 		add(kto, "Kennwortrichtlinien", resico_key, GN_SECPOL, true, &SEC_PASSWORD_POLICIES);
 		add(kto, "Kontosperrungsrichtlinien", resico_key, GN_SECPOL, true, &SEC_LOCKOUT_POLICIES);
@@ -7438,6 +7448,29 @@ public:
 		add(pk, "Vertrauenswürdige Stammzertifizierungsstellen", resico_folder, GN_TODO, true);
 		add(pk, "Organisationsvertrauen", resico_folder, GN_TODO, true);
 		add(cSec, "IP-Sicherheitsrichtlinien auf Active Directory", resico_key, GN_TODO, true);
+		for (FXTreeItem* it : { kto, lok, evt, pk }) tree->expandTree(it);
+	}
+
+	void buildTree() {
+		if (opts.securityOnly) {
+			FXString label = opts.rootLabel.empty() ? FXString("Sicherheitseinstellungen") : opts.rootLabel;
+			FXTreeItem* root = add(NULL, label.text(), resico_key, GN_FOLDER, true);
+			buildSecurityNodes(root);
+			tree->expandTree(root);
+			tree->setCurrentItem(root);
+			tree->selectItem(root);
+			showNode(root);
+			return;
+		}
+		FXTreeItem* root = add(NULL, (gpoName + " [" + serverFqdn(domain) + "]").text(), resico_gpedit_gpo, GN_FOLDER, true);
+
+		FXTreeItem* comp = add(root, "Computerkonfiguration", resico_gpedit_computer_config, GN_FOLDER, true);
+		FXTreeItem* cSw = add(comp, "Softwareeinstellungen", resico_folder, GN_FOLDER, true);
+		add(cSw, "Softwareinstallation", resico_folder, GN_SOFTWARE, true);
+		FXTreeItem* cWin = add(comp, "Windows-Einstellungen", resico_folder, GN_FOLDER, true);
+		add(cWin, "Skripts (Start/Herunterfahren)", resico_folder, GN_SCRIPTS, true);
+		FXTreeItem* cSec = add(cWin, "Sicherheitseinstellungen", resico_key, GN_FOLDER, true);
+		buildSecurityNodes(cSec);
 		FXTreeItem* admMachine = add(comp, "Administrative Vorlagen", resico_folder, GN_ADM, true);
 
 		FXTreeItem* usr = add(root, "Benutzerkonfiguration", resico_gpedit_user_config, GN_FOLDER, false);
@@ -7471,8 +7504,11 @@ public:
 		// Aufgeklappt wie im Original beim Oeffnen: die Computerkonfiguration
 		// bis in die Sicherheitseinstellungen, die Benutzerkonfiguration eine
 		// Ebene tiefer.
-		for (FXTreeItem* it : { root, comp, cSw, cWin, cSec, kto, lok, evt, pk, usr, uSw, uWin })
+		for (FXTreeItem* it : { root, comp, cSw, cWin, cSec, usr, uSw, uWin })
 			tree->expandTree(it);
+		// Die Knoten unterhalb von "Sicherheitseinstellungen" stehen in
+		// buildSecurityNodes -- dort aufklappen.
+		for (FXTreeItem* it = cSec->getFirst(); it; it = it->getNext()) tree->expandTree(it);
 		tree->setCurrentItem(root);
 		tree->selectItem(root);
 		showNode(root);
@@ -7977,6 +8013,13 @@ public:
 	}
 
 	bool requireRoot() {
+		if (opts.readOnly) {
+			FXMessageBox::information(this, MBOX_OK, opts.windowTitle.text(), "%s",
+				opts.readOnlyNote.empty()
+					? "Diese Einstellungen können hier nicht geändert werden."
+					: opts.readOnlyNote.text());
+			return false;
+		}
 		if (g_haveRoot) return true;
 		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Richtlinien geändert werden.");
 		return false;
@@ -10945,6 +10988,92 @@ void DsAdminWindow::create() {
 // definiert, siehe PolicyState/RegLookup/determinePolicyState.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Zweites Programm aus derselben Quelle: die drei Sicherheitsrichtlinien-
+// Konsolen aus "Start -> Programme -> Verwaltung". Sie zeigen denselben
+// Zweig "Sicherheitseinstellungen" wie der Gruppenrichtlinien-Editor, nur
+// fest auf ein Gruppenrichtlinienobjekt gerichtet:
+//   secpol --domain   Sicherheitsrichtlinie für Domänen (Default Domain Policy)
+//   secpol --dc       Sicherheitsrichtlinie für Domänencontroller
+//                     (Default Domain Controllers Policy)
+//   secpol --local    Lokale Sicherheitseinstellungen -- auf einem
+//                     Domänencontroller stammen sie aus den Richtlinien der
+//                     Domäne, deshalb nur zum Ansehen (wie im Original, wo
+//                     die Einträge dort grau sind).
+// ---------------------------------------------------------------------
+#ifdef SECPOL_BUILD
+
+static std::string findDefaultGpoGuid(const DomainInfo& domain, const char* displayName, const char* fallbackGuid) {
+	for (auto& g : listGposLdapi(domain.baseDN))
+		if (strcasecmp(g.displayName.c_str(), displayName) == 0) return g.guid;
+	return fallbackGuid;
+}
+
+int main(int argc, char* argv[]) {
+	FXApp application("SecPol", "Ice2KProj");
+	app = &application;
+	application.init(argc, argv);
+
+	enum Mode { MODE_LOCAL, MODE_DOMAIN, MODE_DC } mode = MODE_LOCAL;
+	for (int i = 1; i < argc; i++) {
+		std::string a = argv[i];
+		if (a == "--domain") mode = MODE_DOMAIN;
+		else if (a == "--dc") mode = MODE_DC;
+		else if (a == "--local") mode = MODE_LOCAL;
+	}
+
+	g_haveRoot = (runAsRoot({ FXString("true") }) == 0);
+
+	FXMainWindow* shell = new FXMainWindow(&application, "SecPol", NULL, NULL, DECOR_ALL, 0,0,1,1);
+	application.create();
+
+	DomainInfo domain = detectDomain();
+	if (!domain.isDC) {
+		FXMessageBox::error(shell, MBOX_OK, "Sicherheitsrichtlinie",
+			"Dieser Server ist kein Domänencontroller.\n\n"
+			"Die Sicherheitsrichtlinien der Domäne stehen nur auf einem Domänencontroller zur Verfügung.");
+		return 1;
+	}
+
+	GpoEditorOptions opts;
+	opts.securityOnly = true;
+	std::string guid;
+	FXString gpoName;
+	if (mode == MODE_DOMAIN) {
+		guid = findDefaultGpoGuid(domain, "Default Domain Policy", "{31B2F340-016D-11D2-945F-00C04FB984F9}");
+		gpoName = "Default Domain Policy";
+		opts.windowTitle = "Sicherheitsrichtlinie für Domänen";
+		opts.rootLabel = "Sicherheitseinstellungen für Domänen [" + serverFqdn(domain) + "]";
+	} else if (mode == MODE_DC) {
+		guid = findDefaultGpoGuid(domain, "Default Domain Controllers Policy", "{6AC1786C-016F-11D2-945F-00C04FB984F9}");
+		gpoName = "Default Domain Controllers Policy";
+		opts.windowTitle = "Sicherheitsrichtlinie für Domänencontroller";
+		opts.rootLabel = "Sicherheitseinstellungen für Domänencontroller [" + serverFqdn(domain) + "]";
+	} else {
+		guid = findDefaultGpoGuid(domain, "Default Domain Controllers Policy", "{6AC1786C-016F-11D2-945F-00C04FB984F9}");
+		gpoName = "Default Domain Controllers Policy";
+		opts.windowTitle = "Lokale Sicherheitseinstellungen";
+		opts.rootLabel = "Sicherheitseinstellungen [" + serverFqdn(domain) + "]";
+		opts.readOnly = true;
+		opts.readOnlyNote =
+			"Dieser Server ist ein Domänencontroller. Seine Sicherheitseinstellungen stammen aus den\n"
+			"Gruppenrichtlinien der Domäne und lassen sich hier nicht ändern.\n\n"
+			"Ändern Sie sie in \"Sicherheitsrichtlinie für Domänencontroller\" bzw.\n"
+			"\"Sicherheitsrichtlinie für Domänen\".";
+	}
+
+	if (!g_haveRoot)
+		FXMessageBox::warning(shell, MBOX_OK, "Keine Root-Rechte",
+			"Es wurden keine Root-Rechte erlangt.\n\n"
+			"Die Einstellungen können angezeigt, aber nicht geändert werden.");
+
+	GpoEditorWindow win(shell, domain, guid, gpoName, opts);
+	win.execute(PLACEMENT_SCREEN);
+	return 0;
+}
+
+#else
+
 int main(int argc, char* argv[]) {
 	FXApp application("DsAdmin", "Ice2KProj");
 	app = &application;
@@ -10978,3 +11107,5 @@ int main(int argc, char* argv[]) {
 
 	return application.run();
 }
+
+#endif // SECPOL_BUILD
