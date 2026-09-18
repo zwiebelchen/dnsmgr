@@ -631,6 +631,19 @@ Wie bei Benutzern führen Mitgliederlisten keine Mitgliedschaft über die
 primäre Gruppe (`primaryGroupID`) -- das Original zeigt sie dort auch
 nicht.
 
+## Wenn der Verzeichnisdienst nicht läuft
+
+Die LDAP-Abfragen über den ldapi-Socket liefern bei gestopptem
+`samba-ad-dc` einfach leere Ergebnisse, während `samba-tool` die
+Datenbank weiterhin direkt liest -- die Anzeige wäre also unvollständig,
+ohne dass etwas auffällt (Gruppen ohne Typ, fehlende Beschreibungen).
+Deshalb prüft `dsadmin` beim Start und bei jedem Laden eines Containers
+per RootDSE-Abfrage, ob der Dienst antwortet. Ist er nicht erreichbar,
+steht das in der Statuszeile, und einmal je Ausfall erscheint eine
+Meldung mit dem Hinweis auf `systemctl status samba-ad-dc` und der
+Ausgabe des fehlgeschlagenen Befehls. Sobald der Dienst wieder
+antwortet, verschwindet beides.
+
 ## Anzeigename vs. Anmeldename
 
 Der Anzeigename eines Objekts (CN, z.B. "Max Mustermann") und sein

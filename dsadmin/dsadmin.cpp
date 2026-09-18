@@ -4562,6 +4562,27 @@ FXIMPLEMENT(SecuritySettingsDialog, FXDialogBox, NULL, 0)
 // Allgemeine LDAP-Suche ueber den privilegierten ldapi-Socket (nur
 // lesend, ohne Anmeldedaten -- siehe ldapListChildren).
 // ---------------------------------------------------------------------
+// Ist der Verzeichnisdienst erreichbar? Ohne diese Probe liefern die
+// LDAP-Abfragen bei gestopptem samba-ad-dc einfach leere Listen, und die
+// Oberflaeche zeigt unvollstaendige Daten, ohne dass etwas auffaellt.
+// detail enthaelt im Fehlerfall die Ausgabe des Befehls.
+static bool directoryReachable(std::string& detail) {
+	detail.clear();
+	if (access("/usr/bin/ldapsearch", X_OK) != 0) {
+		detail = "Das Programm ldapsearch wurde nicht gefunden (Paket ldap-utils).";
+		return false;
+	}
+	std::string raw;
+	int rc = runAsRootCaptured({
+		FXString("ldapsearch"), FXString("-x"), FXString("-LLL"), FXString("-o"), FXString("ldif-wrap=no"),
+		FXString("-H"), FXString(SAMBA_LDAPI_URL), FXString("-b"), FXString(""), FXString("-s"), FXString("base"),
+		FXString("(objectClass=*)"), FXString("namingContexts")
+	}, raw);
+	if (rc == 0 && lowerCopy(raw).find("namingcontexts") != std::string::npos) return true;
+	detail = trimStr(raw);
+	return false;
+}
+
 static std::vector<std::multimap<std::string, std::string>> ldapiSearch(const std::string& base, const char* scope,
                                                                         const std::string& filter,
                                                                         const std::vector<std::string>& attrs) {
@@ -9811,6 +9832,7 @@ private:
 	FXToolBar* toolbar;
 	FXSplitter* splitter;
 	FXPacker* treeframe = nullptr;
+	bool directoryErrorShown = false;  // Meldung nur einmal je Ausfall
 	// Verlauf fuer Zurueck/Vor -- relative DNs der besuchten Container.
 	std::vector<FXString> history;
 	int historyPos = -1;
@@ -9837,7 +9859,7 @@ public:
 		ID_NEW_USER, ID_NEW_GROUP, ID_NEW_OU, ID_NEW_COMPUTER, ID_DELETE_OBJECT, ID_PROPERTIES, ID_GROUP_PROPS,
 		ID_USER_PROPS, ID_MOVE_OBJECT, ID_RENAME_OBJECT, ID_RESET_PASSWORD, ID_ADVANCED_VIEW,
 		ID_BACK, ID_FORWARD, ID_UP, ID_TOGGLE_TREE, ID_TOOL_PROPERTIES, ID_EXPORT_LIST, ID_FIND,
-		ID_ADD_TO_GROUP, ID_NEW_CONTACT, ID_NEW_SHARED_FOLDER, ID_SEL_OBJECT
+		ID_ADD_TO_GROUP, ID_NEW_CONTACT, ID_NEW_SHARED_FOLDER, ID_SEL_OBJECT, ID_DIRCHECK
 	};
 	long onTreeChanged(FXObject*, FXSelector, void*);
 	long onTreeRightClick(FXObject*, FXSelector, void*);
@@ -9874,6 +9896,8 @@ public:
 	long onNewContact(FXObject*, FXSelector, void*);
 	long onNewSharedFolder(FXObject*, FXSelector, void*);
 	void selectContainer(const FXString& relDN);
+	bool checkDirectory();
+	long onDirectoryCheck(FXObject*, FXSelector, void*);
 	int selectedListIndex() const;
 	void fillNewMenu(FXMenuPane* pane);
 
@@ -9921,6 +9945,7 @@ FXDEFMAP(DsAdminWindow) DsAdminWindowMap[] = {
 	FXMAPFUNC(SEL_UPDATE, DsAdminWindow::ID_DELETE_OBJECT, DsAdminWindow::onUpdSelObject),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_CONTACT, DsAdminWindow::onNewContact),
 	FXMAPFUNC(SEL_COMMAND, DsAdminWindow::ID_NEW_SHARED_FOLDER, DsAdminWindow::onNewSharedFolder),
+	FXMAPFUNC(SEL_TIMEOUT, DsAdminWindow::ID_DIRCHECK, DsAdminWindow::onDirectoryCheck),
 };
 FXIMPLEMENT(DsAdminWindow, FXMainWindow, DsAdminWindowMap, ARRAYNUMBER(DsAdminWindowMap))
 
@@ -10011,9 +10036,34 @@ DsAdminWindow::DsAdminWindow(FXApp* a)
 	loadTree();
 }
 
+// Prueft vor dem Laden, ob der Verzeichnisdienst antwortet, und meldet
+// den Ausfall einmal pro Ausfall statt stillschweigend leere Listen zu
+// zeigen.
+bool DsAdminWindow::checkDirectory() {
+	if (!domain.isDC) return true;
+	std::string detail;
+	if (directoryReachable(detail)) {
+		directoryErrorShown = false;
+		return true;
+	}
+	statusLabel->setText(" Der Verzeichnisdienst ist nicht erreichbar -- die Anzeige ist unvollständig.");
+	// Beim Aufbau des Fensters gibt es noch kein Fenster fuer die Meldung --
+	// die holt create() nach.
+	if (!directoryErrorShown && shown()) {
+		directoryErrorShown = true;
+		FXMessageBox::error(this, MBOX_OK, "Active Directory-Benutzer und -Computer",
+			"Der Verzeichnisdienst ist nicht erreichbar. Die angezeigten Daten sind unvollständig\n"
+			"oder fehlen ganz.\n\n"
+			"Prüfen Sie, ob der Domänencontroller läuft:\n"
+			"    systemctl status samba-ad-dc\n\n%s", detail.empty() ? "" : detail.c_str());
+	}
+	return false;
+}
+
 void DsAdminWindow::loadTree() {
 	tree->clearItems();
 	itemToRelDN.clear();
+	checkDirectory();
 	if (!domain.isDC) {
 		FXTreeItem* it = tree->appendItem(0, "Kein Domänencontroller -- dieser Server hat keine Active-Directory-Domäne.", icoRoot, icoRoot);
 		(void)it;
@@ -10084,6 +10134,7 @@ void DsAdminWindow::showContainer(FXString relDN) {
 		historyPos = (int)history.size() - 1;
 	}
 	currentContainerRelDN = relDN;
+	bool directoryOk = checkDirectory();
 	currentObjects = listContainerObjects(relDN, domain);
 	enrichFromLdap(currentObjects, relDN.empty() ? domain.baseDN : relDN + "," + domain.baseDN, domain.baseDN);
 	if (!g_advancedView) {
@@ -10131,6 +10182,7 @@ void DsAdminWindow::showContainer(FXString relDN) {
 		FXString txt = obj.name + "\t" + typeName + "\t" + obj.description;
 		list->appendItem(txt, ic, ic);
 	}
+	if (!directoryOk) return; // Statuszeile nennt bereits den Ausfall
 	char buf[64];
 	snprintf(buf, sizeof(buf), "%d Objekt(e)", (int)currentObjects.size());
 	statusLabel->setText(buf);
@@ -10700,8 +10752,16 @@ long DsAdminWindow::onNewSharedFolder(FXObject*, FXSelector, void*) {
 	return 1;
 }
 
+// Beim Start ist das Fenster noch nicht sichtbar; die Meldung kommt
+// deshalb kurz danach.
+long DsAdminWindow::onDirectoryCheck(FXObject*, FXSelector, void*) {
+	checkDirectory();
+	return 1;
+}
+
 void DsAdminWindow::create() {
 	FXMainWindow::create();
+	getApp()->addTimeout(this, ID_DIRCHECK, 300); // FOX 1.6: Millisekunden
 	show(PLACEMENT_SCREEN);
 }
 
