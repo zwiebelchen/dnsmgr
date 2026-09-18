@@ -21,37 +21,60 @@ jeweiligen Unterordner.
 | [`termsvc/`](termsvc/README.md) | Terminaldienstekonfiguration | xrdp + PAM/winbind | Terminaldienste aktivieren (Paketinstallation, Authentifizierung lokal/AD, Win2k-Anmeldebildschirm, Dienste starten) |
 | [`services/`](services/README.md) | Dienste (services.msc) | systemd | Dienste auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten -- Ansicht aus `common/svc`, auch in `compmgmt` eingehängt |
 
-## Stand gegenüber Windows 2000 Server
+## Stand gegenüber "Start → Programme → Verwaltung"
 
-Gemessen an "Start → Programme → Verwaltung" eines Windows 2000 Servers
-(plus den Werkzeugen, die dort nicht im Menü stehen). "teilweise" heißt:
-nutzbar, aber noch nicht im vollen Umfang des Originals.
+Alle Einträge des Verwaltungsmenüs eines Windows 2000 Servers, in der
+Reihenfolge des Originalmenüs. "teilweise" heißt: nutzbar, aber noch
+nicht im vollen Umfang des Originals.
 
-| Windows-2000-Programm | Hier | Stand |
+**Diese Tabelle ist bei jeder Änderung mitzupflegen** -- sie ist der
+Überblick über den Projektstand.
+
+| # | Menüpunkt (Verwaltung) | Hier | Stand |
+|---|---|---|---|
+| 1 | Terminaldiensteclient | -- | offen (unter Linux: ein RDP-Client wie `xfreerdp`; im ice2k-Repo verortet, nicht hier) |
+| 2 | Active Directory-Benutzer und -Computer | [`dsadmin/`](dsadmin/README.md) | **umgesetzt**: Baum/Listen, Benutzer (Allgemein, Adresse, Konto, Profil, Rufnummern, Organisation, Mitglied von), Gruppen (Allgemein, Mitglieder, Mitglied von, Verwaltet von), OU/Domäne (Allgemein, Verwaltet von, Gruppenrichtlinie), Computer, Kontakte, freigegebene Ordner, Suchen, Verschieben/Umbenennen/Löschen, Werkzeugleiste und Menü "Vorgang"; darin der vollständige Gruppenrichtlinienobjekt-Editor (siehe unten) |
+| 3 | Active Directory-Domänen und -Vertrauensstellungen | -- | offen (Backend: `samba-tool domain trust`) |
+| 4 | Active Directory-Standorte und -Dienste | -- | offen (Backend: LDAP unter `CN=Sites,CN=Configuration`) |
+| 5 | Clusterverwaltung | -- | nicht geplant |
+| 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Offen: Ereignisanzeige, Datenträgerverwaltung, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
+| 7 | Datenquellen (ODBC) | -- | nicht geplant |
+| 8 | DHCP | [`dhcpmgr/`](dhcpmgr/README.md) | **umgesetzt**: Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen (Kea DHCP) |
+| 9 | Dienste | [`services/`](services/README.md) | **umgesetzt**: auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten (systemd) |
+| 10 | DNS | [`dnsmgr/`](dnsmgr/README.md) | **umgesetzt**: Forward-/Reverse-Zonen, gängige Datensatztypen (BIND9) |
+| 11 | Ereignisanzeige | -- | offen (Backend: `journalctl`) |
+| 12 | Komponentendienste | -- | nicht geplant (COM+ hat unter Linux keine Entsprechung) |
+| 13 | Konfiguration des Servers | -- | offen (Startseite mit Verweisen auf die übrigen Programme) |
+| 14 | Lizenzierung | -- | nicht geplant |
+| 15 | Lokale Sicherheitsrichtlinie | -- | offen; dieselben Einstellungen sind heute über den Gruppenrichtlinien-Editor in `dsadmin` erreichbar |
+| 16 | Routing und RAS | -- | offen (Backend: nftables/FRR, WireGuard oder strongSwan) |
+| 17 | Systemmonitor | -- | offen |
+| 18 | Telefonie | -- | nicht geplant |
+| 19 | Telnetserververwaltung | -- | nicht geplant |
+| 20 | Terminaldienste-Clientinstallation | -- | nicht geplant (verteilte die Windows-Clientdateien) |
+| 21 | Terminaldienstekonfiguration | [`termsvc/`](termsvc/README.md) | **teilweise**: Terminaldienste einrichten (xrdp, Authentifizierung lokal/AD, Win2k-Anmeldebildschirm, Dienste starten). Offen: Verbindungseigenschaften, Sitzungsgrenzen, Berechtigungen |
+| 22 | Terminaldienstelizenzierung | -- | nicht geplant |
+| 23 | Terminaldiensteverwaltung | -- | offen (angemeldete Sitzungen anzeigen/trennen) |
+| 24 | Verbindungs-Manager-Verwaltungskit | -- | nicht geplant |
+| 25 | Verteiltes Dateisystem (DFS) | -- | offen (Backend: Samba `msdfs`) |
+| 26 | WINS | -- | offen (Backend: Sambas WINS-Server `nmbd`) |
+| 27 | Zertifizierungsstelle | -- | offen (Backend: z.B. `openssl`/`easy-rsa`) |
+| 28 | Internetauthentifizierungsdienst | -- | offen (RADIUS, Backend: FreeRADIUS) |
+| 29 | Internetdienste-Manager | -- | offen (Backend: Apache oder nginx) |
+| 30 | QoS-Zugangssteuerung | -- | nicht geplant |
+| 31 | Remotespeicher | -- | nicht geplant |
+| 32 | Sicherheitsrichtlinie für Domänen | (über `dsadmin/`) | **teilweise**: entspricht der Default Domain Policy im Gruppenrichtlinien-Editor; eigenes Snap-in fehlt |
+| 33 | Sicherheitsrichtlinie für Domänencontroller | (über `dsadmin/`) | **teilweise**: entspricht der Default Domain Controllers Policy im Gruppenrichtlinien-Editor; eigenes Snap-in fehlt |
+
+Nicht im Verwaltungsmenü, aber Teil dieses Repos:
+
+| Programm | Hier | Stand |
 |---|---|---|
-| Active Directory-Benutzer und -Computer | `dsadmin/` | umgesetzt: Baum und Objektlisten, Benutzer (Allgemein, Adresse, Konto, Profil, Rufnummern, Organisation, Mitglied von), Gruppen (Allgemein, Mitglieder, Mitglied von, Verwaltet von), Organisationseinheiten und Domäne (Allgemein, Verwaltet von, Gruppenrichtlinie), Kontakte und freigegebene Ordner, Computer, Suchen, Verschieben/Umbenennen/Löschen, Werkzeugleiste und Menü "Vorgang" |
-| Gruppenrichtlinienobjekt-Editor (in AD-Benutzer und -Computer) | `dsadmin/` | umgesetzt: Softwareinstallation, Skripts, Sicherheitseinstellungen (Kennwort-, Kontosperrungs-, Kerberos-, Überwachungs-, Ereignisprotokoll-Richtlinien, Benutzerrechte, Sicherheitsoptionen, eingeschränkte Gruppen, Systemdienste, Registrierung, Dateisystem), Administrative Vorlagen, Ordnerumleitung. Offen: Richtlinien öffentlicher Schlüssel, IP-Sicherheit, Internet Explorer-Wartung, Remoteinstallationsdienste |
-| DNS | `dnsmgr/` | umgesetzt (Zonen, gängige Datensatztypen) |
-| DHCP | `dhcpmgr/` | umgesetzt (Bereiche, Reservierungen, Ausschlüsse, Optionen) |
-| Computerverwaltung | `compmgmt/` | teilweise: Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste. Offen: Ereignisanzeige, Datenträgerverwaltung, Systeminformationen, Leistungsprotokolle |
-| Dienste | `services/` | umgesetzt (auflisten, starten/beenden, Starttyp, Konto, Wiederherstellung, Abhängigkeiten) |
-| Terminaldienstekonfiguration | `termsvc/` | teilweise: Terminaldienste einrichten (xrdp, Authentifizierung, Win2k-Anmeldebildschirm) |
-| Active Directory installieren (dcpromo) | `dcpromo/` | umgesetzt (neue Domäne, Migration zwischen klassischer und BIND9-DLZ-Anbindung) |
-| Domänencontroller-, Domänen- und lokale Sicherheitsrichtlinie | (über `dsadmin/`) | teilweise: dieselben Einstellungen über den Gruppenrichtlinien-Editor; eigene Snap-ins fehlen |
-| Active Directory-Domänen und -Vertrauensstellungen | -- | offen |
-| Active Directory-Standorte und -Dienste | -- | offen |
-| Ereignisanzeige | -- | offen |
-| Verteiltes Dateisystem (DFS) | -- | offen |
-| Routing und RAS | -- | offen |
-| Leistung | -- | offen |
-| Terminaldienste-Manager | -- | offen |
-| Konfigurieren des Servers / Serververwaltung | -- | offen |
-| Internetdienste-Manager (IIS) | -- | offen |
-| Komponentendienste, Lizenzierung, Terminaldienste-Lizenzierung, Telefondienste, Wechselmedien | -- | nicht geplant |
+| Active Directory installieren (`dcpromo`) | [`dcpromo/`](dcpromo/README.md) | **umgesetzt**: neue Domäne (Windows-2000-kompatibel oder BIND9-DLZ), Migration zwischen beiden |
+| Gruppenrichtlinienobjekt-Editor (aus AD-Benutzer und -Computer heraus) | [`dsadmin/`](dsadmin/README.md) | **umgesetzt**: Softwareinstallation, Skripts, Sicherheitseinstellungen (Kennwort-, Kontosperrungs-, Kerberos-, Überwachungs- und Ereignisprotokoll-Richtlinien, Benutzerrechte, Sicherheitsoptionen, eingeschränkte Gruppen, Systemdienste, Registrierung, Dateisystem), Administrative Vorlagen, Ordnerumleitung. Offen: Richtlinien öffentlicher Schlüssel, IP-Sicherheitsrichtlinien, Internet Explorer-Wartung, Remoteinstallationsdienste |
 
-Geräte-Manager, Systemeigenschaften, Datums-/Zeiteinstellungen und
-ähnliche Systemsteuerungs-Werkzeuge kommen aus ice2k selbst und sind
-nicht Teil dieses Repos.
+Geräte-Manager, Systemeigenschaften und ähnliche Systemsteuerungs-
+Werkzeuge kommen aus ice2k selbst und sind nicht Teil dieses Repos.
 
 ## Gemeinsame Bausteine
 
