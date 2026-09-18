@@ -487,6 +487,64 @@ FXDEFMAP(ServerPropertiesDialog) ServerPropertiesDialogMap[] = {
 FXIMPLEMENT(ServerPropertiesDialog, FXDialogBox, ServerPropertiesDialogMap, ARRAYNUMBER(ServerPropertiesDialogMap))
 
 // ---------------------------------------------------------------------
+// systemd-Unit: Routen und Paketfilter ueberleben einen Neustart nur,
+// wenn sie beim Hochfahren wieder gesetzt werden. Die Konsole legt dazu
+// ein kleines Skript und eine oneshot-Unit an und schaltet sie mit
+// "Konfigurieren und aktivieren" ein bzw. mit "Deaktivieren" aus.
+// ---------------------------------------------------------------------
+static const char* RRAS_APPLY_SCRIPT = "/usr/local/sbin/ice2k-rras-apply";
+static const char* RRAS_UNIT = "/etc/systemd/system/ice2k-rras.service";
+
+static bool installRrasUnit(FXString& errorMsg) {
+	std::string script =
+		"#!/bin/sh\n"
+		"# Von ice2k \"Routing und RAS\" erzeugt -- setzt beim Systemstart die\n"
+		"# IP-Weiterleitung, die statischen Routen und die Paketfilter.\n"
+		"set -e\n"
+		"conf=/etc/ice2k/rras.conf\n"
+		"[ -f \"$conf\" ] || exit 0\n"
+		"role=$(sed -n 's/^role *= *//p' \"$conf\")\n"
+		"[ \"$role\" = \"none\" ] && exit 0\n"
+		"sysctl -q -w net.ipv4.ip_forward=1\n"
+		"if [ -f /etc/ice2k/rras-routes ]; then\n"
+		"  while read -r line; do\n"
+		"    case \"$line\" in ''|\\#*) continue;; esac\n"
+		"    ip route replace $line || true\n"
+		"  done < /etc/ice2k/rras-routes\n"
+		"fi\n"
+		"[ -f /etc/ice2k/rras-filter.nft ] && nft -f /etc/ice2k/rras-filter.nft\n"
+		"exit 0\n";
+	if (!writeFileAsRoot(RRAS_APPLY_SCRIPT, script, errorMsg)) return false;
+	runAsRoot({ FXString("chmod"), FXString("755"), FXString(RRAS_APPLY_SCRIPT) });
+
+	std::string unit =
+		"# Von ice2k \"Routing und RAS\" erzeugt.\n"
+		"[Unit]\n"
+		"Description=ice2k Routing und RAS (Weiterleitung, statische Routen, Paketfilter)\n"
+		"After=network-online.target\n"
+		"Wants=network-online.target\n\n"
+		"[Service]\n"
+		"Type=oneshot\n"
+		"RemainAfterExit=yes\n"
+		"ExecStart=" + std::string(RRAS_APPLY_SCRIPT) + "\n\n"
+		"[Install]\n"
+		"WantedBy=multi-user.target\n";
+	if (!writeFileAsRoot(RRAS_UNIT, unit, errorMsg)) return false;
+	std::string out;
+	runAsRootCaptured({ FXString("systemctl"), FXString("daemon-reload") }, out);
+	return true;
+}
+
+// note bleibt leer, wenn alles geklappt hat.
+static void enableRrasUnit(bool on, std::string& note) {
+	std::string out;
+	int rc = runAsRootCaptured({ FXString("systemctl"), FXString(on ? "enable" : "disable"), FXString("ice2k-rras.service") }, out);
+	if (rc != 0)
+		note = std::string(on ? "Die Unit ice2k-rras.service konnte nicht aktiviert werden:\n"
+		                      : "Die Unit ice2k-rras.service konnte nicht deaktiviert werden:\n") + svcprobe::trimmed(out);
+}
+
+// ---------------------------------------------------------------------
 // VPN-Server. Windows 2000 kennt hier PPTP und L2TP/IPSec; unter Linux
 // treten WireGuard, OpenVPN und strongSwan an deren Stelle. Der Dialog
 // hält sich an den Aufbau des Assistenten, die Felder sind die des
@@ -522,6 +580,7 @@ private:
 	FXDataTarget backendTarget;
 	FXTextField *nameField = nullptr, *portField = nullptr, *subnetField = nullptr, *serverIpField = nullptr;
 	FXLabel* hint = nullptr;
+	FXCheckButton* pkiCheck = nullptr;
 protected:
 	VpnSetupDialog() {}
 public:
@@ -555,6 +614,8 @@ public:
 		portField = row("&Port:", "51820");
 		subnetField = row("&VPN-Netzwerk:", "10.8.0.0/24");
 		serverIpField = row("&Adresse des Servers:", "10.8.0.1");
+		pkiCheck = new FXCheckButton(main, "Bei OpenVPN eine eigene &Zertifizierungsstelle anlegen (CA und Serverzertifikat)");
+		pkiCheck->setCheck(TRUE);
 		hint = new FXLabel(main, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
@@ -563,6 +624,7 @@ public:
 		onBackend(NULL, 0, NULL);
 	}
 	long onBackend(FXObject*, FXSelector, void*) {
+		if (pkiCheck) { if (backend == 1) pkiCheck->enable(); else pkiCheck->disable(); }
 		if (backend == 0) { portField->setText("51820"); hint->setText("Schreibt /etc/wireguard/<Name>.conf mit einem neuen Schlüsselpaar und startet wg-quick@<Name>."); }
 		else if (backend == 1) { portField->setText("1194"); hint->setText("Schreibt /etc/openvpn/server/<Name>.conf; erwartet ca.crt, server.crt, server.key und dh.pem in /etc/openvpn/server."); }
 		else { portField->setText("500"); hint->setText("Schreibt /etc/swanctl/conf.d/<Name>.conf (IKEv2); Zertifikate bzw. Schlüssel müssen in /etc/swanctl liegen."); }
@@ -585,6 +647,7 @@ public:
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
+	bool createPki() const { return backend == 1 && pkiCheck->getCheck(); }
 	VpnConfig config() const {
 		VpnConfig c;
 		c.backend = backend == 0 ? VPN_WIREGUARD : backend == 1 ? VPN_OPENVPN : VPN_STRONGSWAN;
@@ -606,7 +669,9 @@ FXIMPLEMENT(VpnSetupDialog, FXDialogBox, VpnSetupDialogMap, ARRAYNUMBER(VpnSetup
 // Konfiguration, Dienst), bei OpenVPN und strongSwan wird die
 // Serverkonfiguration geschrieben -- Zertifikate und Schluessel legt
 // diese Konsole bewusst nicht an.
-static bool setupVpn(const VpnConfig& c, std::string& note, FXString& errorMsg) {
+static bool createOpenvpnPki(FXString& errorMsg);
+
+static bool setupVpn(const VpnConfig& c, bool withPki, std::string& note, FXString& errorMsg) {
 	note.clear();
 	if (c.backend == VPN_WIREGUARD) {
 		std::string key, pub;
@@ -631,20 +696,23 @@ static bool setupVpn(const VpnConfig& c, std::string& note, FXString& errorMsg) 
 		return true;
 	}
 	if (c.backend == VPN_OPENVPN) {
+		if (withPki && !createOpenvpnPki(errorMsg)) return false;
 		std::string conf = "# Von ice2k \"Routing und RAS\" erzeugt.\n"
 		                   "port " + c.port + "\nproto udp\ndev tun\n"
-		                   "ca ca.crt\ncert server.crt\nkey server.key\ndh dh.pem\n"
+		                   // Ohne Diffie-Hellman-Datei: OpenVPN 2.4+ handelt ECDHE aus.
+		                   "ca ca.crt\ncert server.crt\nkey server.key\ndh none\n"
 		                   "server " + c.subnet.substr(0, c.subnet.find('/')) + " " + prefixToMask(atoi(c.subnet.c_str() + c.subnet.find('/') + 1)) + "\n"
 		                   "topology subnet\nkeepalive 10 120\npersist-key\npersist-tun\nuser nobody\ngroup nogroup\nverb 3\n";
 		if (!writeFileAsRoot("/etc/openvpn/server/" + c.name + ".conf", conf, errorMsg)) return false;
 		bool haveCerts = runAsRoot({ FXString("test"), FXString("-f"), FXString("/etc/openvpn/server/server.crt") }) == 0;
 		if (!haveCerts) {
 			note = "Die Konfiguration wurde nach /etc/openvpn/server/" + c.name + ".conf geschrieben.\n\n"
-			       "Es fehlen noch die Zertifikate (ca.crt, server.crt, server.key, dh.pem) in\n"
-			       "/etc/openvpn/server. Legen Sie sie z.B. mit easy-rsa an; danach lässt sich der\n"
-			       "Dienst openvpn-server@" + c.name + " starten.";
+			       "Es fehlen noch die Zertifikate (ca.crt, server.crt, server.key) in /etc/openvpn/server.\n"
+			       "Legen Sie sie an oder wiederholen Sie die Einrichtung mit der Option\n"
+			       "\"Eine eigene Zertifizierungsstelle anlegen\".";
 			return true;
 		}
+		note = "Zertifizierungsstelle und Serverzertifikat liegen unter /etc/openvpn/server/pki.";
 		std::string out;
 		if (runAsRootCaptured({ FXString("systemctl"), FXString("enable"), FXString("--now"), FXString(vpnUnit(c.backend, c.name)) }, out) != 0)
 			note = "Die Konfiguration wurde geschrieben, der Dienst konnte aber nicht gestartet werden:\n\n" + svcprobe::trimmed(out);
@@ -702,6 +770,325 @@ static std::vector<VpnPort> listVpnPorts(const VpnConfig& c) {
 	}
 	return out;
 }
+
+// ---------------------------------------------------------------------
+// OpenVPN: eigene kleine Zertifizierungsstelle. Windows 2000 hat dafuer
+// die Zertifikatdienste; hier genuegt openssl. Alles liegt unter
+// /etc/openvpn/server/pki, die Serverdateien zusaetzlich dort, wo die
+// Konfiguration sie erwartet.
+// ---------------------------------------------------------------------
+static const char* OVPN_DIR = "/etc/openvpn/server";
+static const char* OVPN_PKI = "/etc/openvpn/server/pki";
+
+static bool opensslAvailable() {
+	std::string out;
+	return runAsRootCaptured({ FXString("bash"), FXString("-c"), FXString("command -v openssl") }, out) == 0;
+}
+
+// Fuehrt ein Shell-Kommando als root aus und liefert Ausgabe/Erfolg.
+static bool rootShell(const std::string& cmd, std::string& out) {
+	return runAsRootCaptured({ FXString("bash"), FXString("-c"), FXString(cmd.c_str()) }, out) == 0;
+}
+
+static bool createOpenvpnPki(FXString& errorMsg) {
+	if (!opensslAvailable()) { errorMsg = "openssl wurde nicht gefunden."; return false; }
+	std::string out;
+	std::string cmd =
+		"set -e\n"
+		"umask 077\n"
+		"mkdir -p " + std::string(OVPN_PKI) + "/private " + OVPN_PKI + "/issued\n"
+		"cd " + OVPN_PKI + "\n"
+		"if [ ! -f ca.crt ]; then\n"
+		"  openssl req -x509 -newkey rsa:2048 -nodes -keyout private/ca.key -out ca.crt -days 3650 \\\n"
+		"    -subj '/CN=ice2k Routing und RAS CA'\n"
+		"fi\n"
+		"if [ ! -f issued/server.crt ]; then\n"
+		"  openssl req -newkey rsa:2048 -nodes -keyout private/server.key -out server.csr -subj '/CN=server'\n"
+		"  openssl x509 -req -in server.csr -CA ca.crt -CAkey private/ca.key -CAcreateserial \\\n"
+		"    -out issued/server.crt -days 3650 -extfile /dev/stdin <<'EXT'\n"
+		"keyUsage = digitalSignature, keyEncipherment\n"
+		"extendedKeyUsage = serverAuth\n"
+		"EXT\n"
+		"  rm -f server.csr\n"
+		"fi\n"
+		"cp ca.crt " + std::string(OVPN_DIR) + "/ca.crt\n"
+		"cp issued/server.crt " + OVPN_DIR + "/server.crt\n"
+		"cp private/server.key " + OVPN_DIR + "/server.key\n"
+		"chmod 600 " + OVPN_DIR + "/server.key\n";
+	if (!rootShell(cmd, out)) {
+		errorMsg = FXString("Die Zertifikate konnten nicht erzeugt werden:\n") + svcprobe::trimmed(out).c_str();
+		return false;
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// Clients bzw. Benutzer eines VPN-Servers.
+// ---------------------------------------------------------------------
+struct VpnClient {
+	std::string name;
+	std::string detail;   // WireGuard: Adresse, OpenVPN: gueltig bis, strongSwan: Anmeldung
+};
+
+static std::vector<VpnClient> listVpnClients(const RrasState& st) {
+	std::vector<VpnClient> out;
+	if (st.vpnBackend == "wireguard") {
+		// Die Konsole schreibt vor jedem Peer eine Kennzeile "# Client: <Name>".
+		std::string raw;
+		runAsRootCaptured({ FXString("cat"), FXString(("/etc/wireguard/" + st.vpnName + ".conf").c_str()) }, raw);
+		VpnClient cur;
+		bool inPeer = false;
+		for (auto& line : splitLines(raw)) {
+			std::string l = svcprobe::trimmed(line);
+			if (l.rfind("# Client:", 0) == 0) { cur = VpnClient(); cur.name = svcprobe::trimmed(l.substr(9)); continue; }
+			if (l == "[Peer]") { inPeer = true; continue; }
+			if (l.rfind("AllowedIPs", 0) == 0 && inPeer) {
+				size_t eq = l.find('=');
+				cur.detail = eq == std::string::npos ? "" : svcprobe::trimmed(l.substr(eq + 1));
+				if (cur.name.empty()) cur.name = cur.detail;
+				out.push_back(cur);
+				cur = VpnClient();
+				inPeer = false;
+			}
+		}
+	} else if (st.vpnBackend == "openvpn") {
+		std::string raw;
+		rootShell("ls -1 " + std::string(OVPN_PKI) + "/issued 2>/dev/null", raw);
+		for (auto& line : splitLines(raw)) {
+			std::string n = svcprobe::trimmed(line);
+			if (n.size() < 5 || n.substr(n.size() - 4) != ".crt" || n == "server.crt") continue;
+			VpnClient c;
+			c.name = n.substr(0, n.size() - 4);
+			std::string end;
+			rootShell("openssl x509 -enddate -noout -in " + std::string(OVPN_PKI) + "/issued/" + n + " | cut -d= -f2", end);
+			c.detail = "gültig bis " + svcprobe::trimmed(end);
+			out.push_back(c);
+		}
+	} else if (st.vpnBackend == "strongswan") {
+		std::string raw;
+		runAsRootCaptured({ FXString("cat"), FXString("/etc/swanctl/conf.d/ice2k-users.conf") }, raw);
+		for (auto& line : splitLines(raw)) {
+			std::string l = svcprobe::trimmed(line);
+			if (l.rfind("id = ", 0) != 0) continue;
+			VpnClient c;
+			c.name = svcprobe::trimmed(l.substr(5));
+			c.detail = "EAP-Benutzer";
+			out.push_back(c);
+		}
+	}
+	return out;
+}
+
+// Naechste freie Adresse im VPN-Netz (x.x.x.2 aufwaerts).
+static std::string nextClientAddress(const RrasState& st, const std::vector<VpnClient>& clients) {
+	unsigned a = 0, b = 0, c = 0, d = 0;
+	if (sscanf(st.vpnSubnet.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return "";
+	for (unsigned host = 2; host < 255; host++) {
+		char buf[24];
+		snprintf(buf, sizeof(buf), "%u.%u.%u.%u", a, b, c, host);
+		bool used = false;
+		for (auto& cl : clients) if (cl.detail.rfind(buf, 0) == 0) used = true;
+		if (st.vpnServerIp == buf) used = true;
+		if (!used) return buf;
+	}
+	return "";
+}
+
+// Legt einen Client an. clientConfig bekommt bei WireGuard/OpenVPN die
+// fertige Clientkonfiguration zum Weitergeben.
+static bool addVpnClient(const RrasState& st, const std::string& name, const std::string& password,
+                         std::string& clientConfig, FXString& errorMsg) {
+	clientConfig.clear();
+	if (st.vpnBackend == "wireguard") {
+		std::string key, pub, serverPub, out;
+		if (!rootShell("wg genkey", key)) { errorMsg = "wg genkey ist fehlgeschlagen."; return false; }
+		key = svcprobe::trimmed(key);
+		rootShell("echo '" + key + "' | wg pubkey", pub);
+		pub = svcprobe::trimmed(pub);
+		rootShell("sed -n 's/^PrivateKey *= *//p' /etc/wireguard/" + st.vpnName + ".conf | head -1 | wg pubkey", serverPub);
+		serverPub = svcprobe::trimmed(serverPub);
+		std::vector<VpnClient> existing = listVpnClients(st);
+		std::string addr = nextClientAddress(st, existing);
+		if (addr.empty()) { errorMsg = "Im VPN-Netzwerk ist keine Adresse mehr frei."; return false; }
+		std::string peer = "\n# Client: " + name + "\n[Peer]\nPublicKey = " + pub + "\nAllowedIPs = " + addr + "/32\n";
+		if (!rootShell("cat >> /etc/wireguard/" + st.vpnName + ".conf <<'PEEREOF'" + peer + "PEEREOF", out)) {
+			errorMsg = FXString("Der Peer konnte nicht eingetragen werden:\n") + svcprobe::trimmed(out).c_str();
+			return false;
+		}
+		// Sofort wirksam, falls die Schnittstelle laeuft.
+		rootShell("wg set " + st.vpnName + " peer " + pub + " allowed-ips " + addr + "/32 2>/dev/null", out);
+		clientConfig =
+			"[Interface]\nPrivateKey = " + key + "\nAddress = " + addr + "/32\n\n"
+			"[Peer]\nPublicKey = " + serverPub + "\nEndpoint = <Serveradresse>:" + st.vpnPort + "\n"
+			"AllowedIPs = " + st.vpnSubnet + "\nPersistentKeepalive = 25\n";
+		return true;
+	}
+	if (st.vpnBackend == "openvpn") {
+		std::string out;
+		std::string cmd =
+			"set -e\numask 077\ncd " + std::string(OVPN_PKI) + "\n"
+			"openssl req -newkey rsa:2048 -nodes -keyout private/" + name + ".key -out " + name + ".csr -subj '/CN=" + name + "'\n"
+			"openssl x509 -req -in " + name + ".csr -CA ca.crt -CAkey private/ca.key -CAcreateserial "
+			"-out issued/" + name + ".crt -days 3650\n"
+			"rm -f " + name + ".csr\n";
+		if (!rootShell(cmd, out)) {
+			errorMsg = FXString("Das Clientzertifikat konnte nicht erzeugt werden:\n") + svcprobe::trimmed(out).c_str();
+			return false;
+		}
+		std::string ca, crt, keyText;
+		rootShell("cat " + std::string(OVPN_PKI) + "/ca.crt", ca);
+		rootShell("cat " + std::string(OVPN_PKI) + "/issued/" + name + ".crt", crt);
+		rootShell("cat " + std::string(OVPN_PKI) + "/private/" + name + ".key", keyText);
+		clientConfig =
+			"client\ndev tun\nproto udp\nremote <Serveradresse> " + st.vpnPort + "\n"
+			"resolv-retry infinite\nnobind\npersist-key\npersist-tun\nremote-cert-tls server\nverb 3\n\n"
+			"<ca>\n" + ca + "</ca>\n<cert>\n" + crt + "</cert>\n<key>\n" + keyText + "</key>\n";
+		return true;
+	}
+	// strongSwan: EAP-Benutzer in einer eigenen Datei
+	if (password.empty()) { errorMsg = "Für strongSwan wird ein Kennwort benötigt."; return false; }
+	std::string existing;
+	runAsRootCaptured({ FXString("cat"), FXString("/etc/swanctl/conf.d/ice2k-users.conf") }, existing);
+	std::string body = existing.find("secrets") == std::string::npos ? "# Von ice2k \"Routing und RAS\" verwaltet.\nsecrets {\n}\n" : existing;
+	size_t close = body.rfind("}");
+	std::string entry = "    eap-" + name + " {\n        id = " + name + "\n        secret = \"" + password + "\"\n    }\n";
+	body.insert(close, entry);
+	if (!writeFileAsRoot("/etc/swanctl/conf.d/ice2k-users.conf", body, errorMsg)) return false;
+	std::string out;
+	rootShell("chmod 600 /etc/swanctl/conf.d/ice2k-users.conf; swanctl --load-creds 2>/dev/null", out);
+	return true;
+}
+
+static bool removeVpnClient(const RrasState& st, const VpnClient& client, FXString& errorMsg) {
+	std::string out;
+	if (st.vpnBackend == "wireguard") {
+		// Den Block "# Client: <Name>" bis zur naechsten Leerzeile entfernen.
+		std::string raw;
+		runAsRootCaptured({ FXString("cat"), FXString(("/etc/wireguard/" + st.vpnName + ".conf").c_str()) }, raw);
+		std::string result;
+		bool skip = false;
+		std::string pub;
+		for (auto& line : splitLines(raw)) {
+			std::string l = svcprobe::trimmed(line);
+			if (l == "# Client: " + client.name) { skip = true; continue; }
+			if (skip) {
+				if (l.rfind("PublicKey", 0) == 0) { size_t eq = l.find('='); pub = svcprobe::trimmed(l.substr(eq + 1)); }
+				if (l.rfind("AllowedIPs", 0) == 0) { skip = false; continue; }
+				continue;
+			}
+			result += line + "\n";
+		}
+		if (!writeFileAsRoot("/etc/wireguard/" + st.vpnName + ".conf", result, errorMsg)) return false;
+		runAsRoot({ FXString("chmod"), FXString("600"), FXString(("/etc/wireguard/" + st.vpnName + ".conf").c_str()) });
+		if (!pub.empty()) rootShell("wg set " + st.vpnName + " peer " + pub + " remove 2>/dev/null", out);
+		return true;
+	}
+	if (st.vpnBackend == "openvpn") {
+		rootShell("rm -f " + std::string(OVPN_PKI) + "/issued/" + client.name + ".crt " +
+		          OVPN_PKI + "/private/" + client.name + ".key", out);
+		return true;
+	}
+	std::string raw;
+	runAsRootCaptured({ FXString("cat"), FXString("/etc/swanctl/conf.d/ice2k-users.conf") }, raw);
+	std::string result;
+	bool skip = false;
+	for (auto& line : splitLines(raw)) {
+		std::string l = svcprobe::trimmed(line);
+		if (l == "eap-" + client.name + " {") { skip = true; continue; }
+		if (skip) { if (l == "}") skip = false; continue; }
+		result += line + "\n";
+	}
+	if (!writeFileAsRoot("/etc/swanctl/conf.d/ice2k-users.conf", result, errorMsg)) return false;
+	rootShell("swanctl --load-creds 2>/dev/null", out);
+	return true;
+}
+
+// Dialog "Neuer Client" -- Name und (nur bei strongSwan) Kennwort.
+class NewVpnClientDialog : public FXDialogBox {
+	FXDECLARE(NewVpnClientDialog)
+private:
+	FXTextField *nameField = nullptr, *passField = nullptr;
+protected:
+	NewVpnClientDialog() {}
+public:
+	enum { ID_OK = FXDialogBox::ID_LAST };
+	NewVpnClientDialog(FXWindow* owner, const FXString& backendLabel, bool needPassword)
+		: FXDialogBox(owner, "Neuer Client", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,420,0) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,4);
+		new FXLabel(main, "Neuer Client für " + backendLabel, NULL, JUSTIFY_LEFT);
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		auto row = [&](const char* label) {
+			FXHorizontalFrame* r = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+			new FXLabel(r, label, NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,110,0);
+			return new FXTextField(r, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		};
+		nameField = row("&Name:");
+		if (needPassword) {
+			passField = row("&Kennwort:");
+			passField->setTextStyle(TEXTFIELD_PASSWD);
+		}
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0, 6,0);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	long onOk(FXObject*, FXSelector, void*) {
+		std::string n = svcprobe::trimmed(nameField->getText().text());
+		if (n.empty() || n.find_first_of(" /\\\"'") != std::string::npos) {
+			FXMessageBox::error(this, MBOX_OK, "Neuer Client", "Geben Sie einen Namen ohne Leer- und Sonderzeichen an.");
+			return 1;
+		}
+		if (passField && svcprobe::trimmed(passField->getText().text()).empty()) {
+			FXMessageBox::error(this, MBOX_OK, "Neuer Client", "Geben Sie ein Kennwort an.");
+			return 1;
+		}
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	std::string name() const { return svcprobe::trimmed(nameField->getText().text()); }
+	std::string password() const { return passField ? svcprobe::trimmed(passField->getText().text()) : std::string(); }
+	virtual ~NewVpnClientDialog() {}
+};
+FXDEFMAP(NewVpnClientDialog) NewVpnClientDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, NewVpnClientDialog::ID_OK, NewVpnClientDialog::onOk),
+};
+FXIMPLEMENT(NewVpnClientDialog, FXDialogBox, NewVpnClientDialogMap, ARRAYNUMBER(NewVpnClientDialogMap))
+
+// Zeigt die Clientkonfiguration und speichert sie auf Wunsch.
+class ClientConfigDialog : public FXDialogBox {
+	FXDECLARE(ClientConfigDialog)
+private:
+	FXText* text = nullptr;
+	std::string suggested;
+protected:
+	ClientConfigDialog() {}
+public:
+	enum { ID_SAVE = FXDialogBox::ID_LAST };
+	ClientConfigDialog(FXWindow* owner, const FXString& title, const std::string& content, const std::string& suggestedFile)
+		: FXDialogBox(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE | DECOR_RESIZE, 0,0,620,460), suggested(suggestedFile) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
+		new FXLabel(main, "Diese Konfiguration gehört auf den Client:", NULL, JUSTIFY_LEFT);
+		FXPacker* tf = new FXPacker(main, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		text = new FXText(tf, NULL, 0, TEXT_READONLY | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		text->setText(content.c_str());
+		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXButton(btnf, "&Speichern unter...", NULL, this, ID_SAVE, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 10,10,3,3);
+		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
+		new FXButton(btnf, "Schließen", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
+	}
+	long onSave(FXObject*, FXSelector, void*) {
+		FXString file = FXFileDialog::getSaveFilename(this, "Speichern unter", suggested.c_str());
+		if (file.empty()) return 1;
+		std::ofstream out(file.text(), std::ios::binary);
+		if (!out) { FXMessageBox::error(this, MBOX_OK, "Speichern", "Die Datei konnte nicht geschrieben werden."); return 1; }
+		out << text->getText().text();
+		return 1;
+	}
+	virtual ~ClientConfigDialog() {}
+};
+FXDEFMAP(ClientConfigDialog) ClientConfigDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, ClientConfigDialog::ID_SAVE, ClientConfigDialog::onSave),
+};
+FXIMPLEMENT(ClientConfigDialog, FXDialogBox, ClientConfigDialogMap, ARRAYNUMBER(ClientConfigDialogMap))
 
 // ---------------------------------------------------------------------
 // Paketfilter je Schnittstelle -- Dialoge nach rtrfiltr.dll (14002
@@ -1076,7 +1463,8 @@ private:
 	// Knoten unterhalb des Servers -- nur, solange Routing und RAS aktiv ist
 	// (wie im Original).
 	FXTreeItem *ifacesItem = nullptr, *portsItem = nullptr, *ipRoutingItem = nullptr,
-	           *ipGeneralItem = nullptr, *staticRoutesItem = nullptr;
+	           *ipGeneralItem = nullptr, *staticRoutesItem = nullptr, *clientsItem = nullptr;
+	std::vector<VpnClient> shownClients;
 	FXIconList* itemList = nullptr;
 	std::vector<RouteInfo> shownRoutes;
 	FXIcon *icoRoot = nullptr, *icoStatus = nullptr, *icoServerStopped = nullptr, *icoServerStarted = nullptr,
@@ -1086,7 +1474,7 @@ protected:
 	RrasWindow() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_CONFIGURE, ID_DEACTIVATE, ID_PROPERTIES, ID_REFRESH, ID_ABOUT,
-	       ID_LIST, ID_NEW_ROUTE, ID_DELETE_ROUTE, ID_IN_FILTER, ID_OUT_FILTER };
+	       ID_LIST, ID_NEW_ROUTE, ID_DELETE_ROUTE, ID_IN_FILTER, ID_OUT_FILTER, ID_NEW_CLIENT, ID_DELETE_CLIENT };
 
 	RrasWindow(FXApp* a);
 	virtual void create();
@@ -1103,6 +1491,8 @@ public:
 	long onListRightClick(FXObject*, FXSelector, void*);
 	long onNewRoute(FXObject*, FXSelector, void*);
 	long onFilter(FXObject*, FXSelector, void*);
+	long onNewClient(FXObject*, FXSelector, void*);
+	long onDeleteClient(FXObject*, FXSelector, void*);
 	long onDeleteRoute(FXObject*, FXSelector, void*);
 	void buildServerNodes();
 	void setColumns(const std::vector<std::pair<const char*, int>>& cols);
@@ -1125,6 +1515,8 @@ FXDEFMAP(RrasWindow) RrasWindowMap[] = {
 	FXMAPFUNC(SEL_RIGHTBUTTONRELEASE, RrasWindow::ID_LIST, RrasWindow::onListRightClick),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_NEW_ROUTE, RrasWindow::onNewRoute),
 	FXMAPFUNCS(SEL_COMMAND, RrasWindow::ID_IN_FILTER, RrasWindow::ID_OUT_FILTER, RrasWindow::onFilter),
+	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_NEW_CLIENT, RrasWindow::onNewClient),
+	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_DELETE_CLIENT, RrasWindow::onDeleteClient),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_DELETE_ROUTE, RrasWindow::onDeleteRoute),
 };
 FXIMPLEMENT(RrasWindow, FXMainWindow, RrasWindowMap, ARRAYNUMBER(RrasWindowMap))
@@ -1224,12 +1616,15 @@ void RrasWindow::create() {
 // Unterhalb des Servers erscheinen die Knoten des Originals, sobald
 // Routing und RAS aktiviert ist (Namen aus mprsnap.dll: 13, 21).
 void RrasWindow::buildServerNodes() {
-	for (FXTreeItem* it : { staticRoutesItem, ipGeneralItem, ipRoutingItem, portsItem, ifacesItem })
+	for (FXTreeItem* it : { staticRoutesItem, ipGeneralItem, ipRoutingItem, clientsItem, portsItem, ifacesItem })
 		if (it) tree->removeItem(it);
-	ifacesItem = portsItem = ipRoutingItem = ipGeneralItem = staticRoutesItem = nullptr;
+	ifacesItem = portsItem = ipRoutingItem = ipGeneralItem = staticRoutesItem = clientsItem = nullptr;
 	if (!state.configured()) return;
 	ifacesItem = tree->appendItem(serverItem, "Routingschnittstellen", icoNetwork, icoNetwork);
 	portsItem = tree->appendItem(serverItem, "Ports", icoStatus, icoStatus);
+	// "RAS-Clients" (mprsnap.dll, Text 20) -- hier die Peers bzw. Benutzer
+	// des eingerichteten VPN-Dienstes.
+	if (state.role == ROLE_VPN) clientsItem = tree->appendItem(serverItem, "RAS-Clients", icoNetwork, icoNetwork);
 	ipRoutingItem = tree->appendItem(serverItem, "IP-Routing", icoNetwork, icoNetwork);
 	ipGeneralItem = tree->appendItem(ipRoutingItem, "Allgemein", icoNetwork, icoNetwork);
 	staticRoutesItem = tree->appendItem(ipRoutingItem, "Statische Routen", icoNetwork, icoNetwork);
@@ -1267,9 +1662,20 @@ void RrasWindow::reload() {
 
 void RrasWindow::showFor(FXTreeItem* item) {
 	if (item == statusItem) { rightPane->setCurrent(1); return; }
-	if (item && (item == ifacesItem || item == portsItem || item == ipGeneralItem || item == staticRoutesItem)) {
+	if (item && (item == ifacesItem || item == portsItem || item == ipGeneralItem || item == staticRoutesItem || item == clientsItem)) {
 		rightPane->setCurrent(2);
 		shownRoutes.clear();
+		shownClients.clear();
+		if (item == clientsItem) {
+			setColumns({ { "Name", 220 }, { "Typ", 180 }, { "Details", 300 } });
+			shownClients = listVpnClients(state);
+			FXString typeName = state.vpnBackend == "wireguard" ? "WireGuard-Peer"
+			                  : state.vpnBackend == "openvpn" ? "OpenVPN-Zertifikat" : "EAP-Benutzer";
+			for (auto& c : shownClients)
+				itemList->appendItem(FXString(c.name.c_str()) + "\t" + typeName + "\t" + c.detail.c_str(), icoNetwork, icoNetwork);
+			statusbar->setText(" Rechtsklick in die Liste: Neuen Client anlegen oder einen Client löschen.");
+			return;
+		}
 		if (item == ifacesItem) {
 			// Spalten wie mprsnap.dll (14-17).
 			setColumns({ { "Schnittstelle", 200 }, { "Typ", 160 }, { "Status", 120 }, { "Status der Verbindung", 160 } });
@@ -1389,7 +1795,7 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 		VpnSetupDialog vdlg(this);
 		if (!vdlg.execute(PLACEMENT_OWNER)) return 1;
 		VpnConfig c = vdlg.config();
-		if (!setupVpn(c, vpnNote, errorMsg)) {
+		if (!setupVpn(c, vdlg.createPki(), vpnNote, errorMsg)) {
 			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "%s", errorMsg.text());
 			return 1;
 		}
@@ -1403,6 +1809,17 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
 		reload();
 		return 1;
+	}
+	// Damit Routen und Filter einen Neustart überstehen.
+	{
+		FXString e;
+		if (installRrasUnit(e)) {
+			std::string note;
+			enableRrasUnit(true, note);
+			if (!note.empty()) vpnNote += (vpnNote.empty() ? "" : "\n\n") + note;
+		} else {
+			vpnNote += (vpnNote.empty() ? "" : "\n\n") + std::string(e.text());
+		}
 	}
 	// Gemerkte Paketfilter wieder laden.
 	{
@@ -1433,6 +1850,8 @@ long RrasWindow::onDeactivate(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	RrasState st = state;
 	st.role = ROLE_NONE;
+	std::string note;
+	enableRrasUnit(false, note);
 	if (!applyForwarding(false, errorMsg) || !writeState(st, errorMsg))
 		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
 	reload();
@@ -1467,6 +1886,20 @@ long RrasWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 		FXMenuPane menu(this);
 		new FXMenuCommand(&menu, "&Eingabefilter...", NULL, this, ID_IN_FILTER);
 		new FXMenuCommand(&menu, "&Ausgabefilter...", NULL, this, ID_OUT_FILTER);
+		menu.create();
+		menu.popup(NULL, ev->root_x, ev->root_y);
+		getApp()->runModalWhileShown(&menu);
+		return 1;
+	}
+	if (tree->getCurrentItem() == clientsItem) {
+		FXint idx = itemList->getItemAt(ev->win_x, ev->win_y);
+		if (idx >= 0) { itemList->setCurrentItem(idx); itemList->selectItem(idx); }
+		FXMenuPane menu(this);
+		new FXMenuCommand(&menu, "&Neuer Client...", NULL, this, ID_NEW_CLIENT);
+		if (idx >= 0 && idx < (int)shownClients.size()) {
+			new FXMenuSeparator(&menu);
+			new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_CLIENT);
+		}
 		menu.create();
 		menu.popup(NULL, ev->root_x, ev->root_y);
 		getApp()->runModalWhileShown(&menu);
@@ -1558,6 +1991,43 @@ long RrasWindow::onFilter(FXObject* , FXSelector sel, void*) {
 	FXString errorMsg;
 	if (!saveFilters(result, errorMsg))
 		FXMessageBox::error(this, MBOX_OK, input ? "Eingabefilter" : "Ausgabefilter", "%s", errorMsg.text());
+	return 1;
+}
+
+// Neuer Peer (WireGuard), neues Clientzertifikat (OpenVPN) oder neuer
+// EAP-Benutzer (strongSwan).
+long RrasWindow::onNewClient(FXObject*, FXSelector, void*) {
+	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	bool needPassword = state.vpnBackend == "strongswan";
+	FXString backendLabel = state.vpnBackend == "wireguard" ? "WireGuard" : state.vpnBackend == "openvpn" ? "OpenVPN" : "strongSwan";
+	NewVpnClientDialog dlg(this, backendLabel, needPassword);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	std::string config;
+	FXString errorMsg;
+	getApp()->beginWaitCursor();
+	bool ok = addVpnClient(state, dlg.name(), dlg.password(), config, errorMsg);
+	getApp()->endWaitCursor();
+	if (!ok) { FXMessageBox::error(this, MBOX_OK, "Neuer Client", "%s", errorMsg.text()); return 1; }
+	showFor(tree->getCurrentItem());
+	if (!config.empty()) {
+		std::string file = dlg.name() + (state.vpnBackend == "wireguard" ? ".conf" : ".ovpn");
+		ClientConfigDialog cfg(this, FXString("Clientkonfiguration für ") + dlg.name().c_str(), config, file);
+		cfg.execute(PLACEMENT_OWNER);
+	} else {
+		FXMessageBox::information(this, MBOX_OK, "Neuer Client", "Der Benutzer wurde angelegt.");
+	}
+	return 1;
+}
+
+long RrasWindow::onDeleteClient(FXObject*, FXSelector, void*) {
+	int idx = itemList->getCurrentItem();
+	if (idx < 0 || idx >= (int)shownClients.size()) return 1;
+	if (FXMessageBox::question(this, MBOX_YES_NO, "Client löschen",
+	        "Möchten Sie den Client \"%s\" wirklich löschen?", shownClients[idx].name.c_str()) != MBOX_CLICKED_YES) return 1;
+	FXString errorMsg;
+	if (!removeVpnClient(state, shownClients[idx], errorMsg))
+		FXMessageBox::error(this, MBOX_OK, "Client löschen", "%s", errorMsg.text());
+	showFor(tree->getCurrentItem());
 	return 1;
 }
 

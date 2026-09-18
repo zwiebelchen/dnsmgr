@@ -40,13 +40,28 @@ Aktualisieren und Eigenschaften.
     `/etc/wireguard/<Name>.conf` geschrieben, `wg-quick@<Name>` aktiviert;
     der öffentliche Schlüssel des Servers wird angezeigt. Clients werden
     als `[Peer]`-Abschnitte ergänzt.
-  - *OpenVPN*: schreibt `/etc/openvpn/server/<Name>.conf`. Zertifikate
-    (ca.crt, server.crt, server.key, dh.pem) legt die Konsole **nicht**
-    an; fehlen sie, sagt sie das und startet den Dienst nicht.
+  - *OpenVPN*: schreibt `/etc/openvpn/server/<Name>.conf` und legt auf
+    Wunsch (Kontrollkästchen im Dialog) mit `openssl` eine eigene
+    Zertifizierungsstelle an: CA und Serverzertifikat unter
+    `/etc/openvpn/server/pki`, die Serverdateien zusätzlich dort, wo die
+    Konfiguration sie erwartet. Statt einer Diffie-Hellman-Datei steht
+    `dh none` in der Konfiguration (OpenVPN 2.4+ handelt ECDHE aus).
   - *strongSwan*: schreibt `/etc/swanctl/conf.d/<Name>.conf` (IKEv2 mit
     Adresspool). Zertifikate und Benutzer müssen vorhanden sein.
   - Der Knoten *Ports* zeigt den eingerichteten Dienst mit seinem Zustand
     und bei WireGuard zusätzlich die Peers.
+  - Der Knoten *RAS-Clients* verwaltet die Gegenstellen: Rechtsklick legt
+    einen Client an oder löscht ihn.
+    - *WireGuard*: erzeugt ein Schlüsselpaar, vergibt die nächste freie
+      Adresse aus dem VPN-Netz, trägt den Peer in die Serverkonfiguration
+      ein (und sofort per `wg set`) und zeigt die fertige
+      Clientkonfiguration zum Speichern.
+    - *OpenVPN*: erzeugt Schlüssel und Zertifikat des Clients und zeigt
+      eine fertige `.ovpn`-Datei mit eingebettetem CA, Zertifikat und
+      Schlüssel.
+    - *strongSwan*: legt einen EAP-Benutzer mit Kennwort in
+      `/etc/swanctl/conf.d/ice2k-users.conf` an und lädt die Zugangsdaten
+      neu.
 - **Paketfilter** je Schnittstelle (Rechtsklick auf eine Schnittstelle →
   "Eingabefilter..." / "Ausgabefilter..."), Dialoge nach `rtrfiltr.dll`:
   "Alle Pakete empfangen/übertragen, mit Ausnahme..." bzw. "Alle Pakete
@@ -56,20 +71,22 @@ Aktualisieren und Eigenschaften.
   `/etc/ice2k/rras-filter.nft` (Tabelle `inet ice2k_rras`), das mit
   `nft -f` geladen wird.
 - **Statische Routen** werden sofort gesetzt (`ip route add`) und in
-  `/etc/ice2k/rras-routes` gemerkt; beim nächsten "Konfigurieren und
-  aktivieren" werden sie wieder gesetzt, da der Kernel Routen beim
-  Neustart vergisst. Eine eigene systemd-Unit dafür gibt es noch nicht.
+  `/etc/ice2k/rras-routes` gemerkt.
+- **Beim Systemstart** setzt die Unit `ice2k-rras.service` die
+  IP-Weiterleitung, die gemerkten Routen und die Paketfilter wieder.
+  Beides -- Unit und das Skript `/usr/local/sbin/ice2k-rras-apply` --
+  legt "Konfigurieren und aktivieren" an und schaltet sie ein;
+  "Deaktivieren" schaltet sie wieder aus.
 
 Die gewählte Rolle merkt sich `/etc/ice2k/rras.conf`.
 
 ## Was noch fehlt
 
 - Einwählserver (Modem/ISDN), RAS-Richtlinien und Protokollierung.
-- VPN-Clientverwaltung: Peers bzw. Benutzer werden noch nicht über die
-  Oberfläche angelegt (bei WireGuard also keine Peer-Verwaltung).
-- Die Paketfilter kennen nur IPv4 und werden beim Systemstart erst mit
-  "Konfigurieren und aktivieren" wieder geladen; eine eigene
-  systemd-Unit dafür fehlt.
+- Die Paketfilter kennen nur IPv4.
+- Bei OpenVPN gibt es keine Sperrliste (CRL): ein gelöschter Client
+  verliert seine Dateien, ein bereits ausgeliefertes Zertifikat bleibt
+  aber gültig.
 - Adressumsetzung (Internetverbindungsserver) und Firewallregeln.
 - Routingprotokolle (RIP, OSPF) -- unter Linux wäre FRR der
   naheliegende Unterbau.
