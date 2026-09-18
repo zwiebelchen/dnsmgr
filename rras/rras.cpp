@@ -1049,6 +1049,44 @@ static bool removeVpnClient(const RrasState& st, const VpnClient& client, FXStri
 	return true;
 }
 
+// Liest eine Datei als root und legt sie dort ab, wo der Benutzer sie
+// haben will (die Oberflaeche laeuft nicht als root).
+static bool exportFileAsRoot(const std::string& source, const FXString& target, FXString& errorMsg) {
+	std::string content;
+	if (runAsRootCaptured({ FXString("cat"), FXString(source.c_str()) }, content) != 0) {
+		errorMsg = FXString("Die Datei konnte nicht gelesen werden:\n") + source.c_str();
+		return false;
+	}
+	std::ofstream out(target.text(), std::ios::binary);
+	if (!out) { errorMsg = FXString("Die Datei konnte nicht geschrieben werden:\n") + target; return false; }
+	out << content;
+	return true;
+}
+
+// Was ein Client jeweils braucht -- das CA-Zertifikat ist bei OpenVPN und
+// strongSwan Pflicht, WireGuard kennt keine Zertifikate.
+static std::string caCertificatePath(const RrasState& st) {
+	if (st.vpnBackend == "openvpn") return std::string(OVPN_PKI) + "/ca.crt";
+	if (st.vpnBackend == "strongswan") return "/etc/swanctl/x509ca/ca.crt";
+	return "";
+}
+
+// Baut die OpenVPN-Clientdatei aus den gespeicherten Dateien neu auf.
+static bool buildOvpnProfile(const RrasState& st, const std::string& name, std::string& config, FXString& errorMsg) {
+	std::string ca, crt, key;
+	if (!rootShell("cat " + std::string(OVPN_PKI) + "/ca.crt", ca) ||
+	    !rootShell("cat " + std::string(OVPN_PKI) + "/issued/" + name + ".crt", crt) ||
+	    !rootShell("cat " + std::string(OVPN_PKI) + "/private/" + name + ".key", key)) {
+		errorMsg = "Zertifikat oder Schlüssel des Clients wurden nicht gefunden.";
+		return false;
+	}
+	config =
+		"client\ndev tun\nproto udp\nremote <Serveradresse> " + st.vpnPort + "\n"
+		"resolv-retry infinite\nnobind\npersist-key\npersist-tun\nremote-cert-tls server\nverb 3\n\n"
+		"<ca>\n" + ca + "</ca>\n<cert>\n" + crt + "</cert>\n<key>\n" + key + "</key>\n";
+	return true;
+}
+
 // Dialog "Neuer Client" -- Name und (nur bei strongSwan) Kennwort.
 class NewVpnClientDialog : public FXDialogBox {
 	FXDECLARE(NewVpnClientDialog)
@@ -1152,6 +1190,10 @@ struct PacketFilter {
 };
 
 static const char* RRAS_FILTERS = "/etc/ice2k/rras-filters";
+// Ports, die fuer den VPN-Dienst freigegeben wurden ("udp 51820",
+// "esp" ...). Stehen im selben Regelwerk wie die Paketfilter, damit die
+// Unit sie beim Systemstart mitlaedt.
+static const char* RRAS_VPNPORTS = "/etc/ice2k/rras-vpnports";
 static const char* RRAS_FILTER_NFT = "/etc/ice2k/rras-filter.nft";
 
 static std::vector<std::string> splitFields(const std::string& line, char sep) {
@@ -1177,14 +1219,35 @@ static std::vector<PacketFilter> loadFilters() {
 	return out;
 }
 
+static std::vector<std::string> loadVpnPorts() {
+	std::vector<std::string> out;
+	for (auto& line : splitLines(readFileUnprivileged(RRAS_VPNPORTS))) {
+		std::string l = svcprobe::trimmed(line);
+		if (!l.empty() && l[0] != '#') out.push_back(l);
+	}
+	return out;
+}
+
 // Erzeugt das nftables-Regelwerk und laedt es.
 static bool applyFilters(const std::vector<PacketFilter>& filters, FXString& errorMsg) {
 	std::string content = "# Von ice2k \"Routing und RAS\" erzeugt -- nicht von Hand ändern.\n"
 	                      "table inet ice2k_rras\ndelete table inet ice2k_rras\n"
 	                      "table inet ice2k_rras {\n";
+	std::vector<std::string> vpnPorts = loadVpnPorts();
 	auto rulesFor = [&](bool input) {
 		std::string hook = input ? "input" : "output";
 		std::string chain = "\tchain " + hook + " {\n\t\ttype filter hook " + hook + " priority 0; policy accept;\n";
+		// Die fuer den VPN-Dienst freigegebenen Ports zuerst -- sie sollen
+		// auch dann durchkommen, wenn eine Schnittstelle sonst alles verwirft.
+		if (input)
+			for (auto& p : vpnPorts) {
+				if (p == "esp") chain += "\t\tip protocol esp accept\n";
+				else {
+					size_t sp = p.find(' ');
+					if (sp == std::string::npos) continue;
+					chain += "\t\t" + p.substr(0, sp) + " dport " + p.substr(sp + 1) + " accept\n";
+				}
+			}
 		// Je Schnittstelle: die Kriterien zuerst, danach die Grundregel.
 		std::vector<std::string> ifaces;
 		for (auto& f : filters) {
@@ -1221,6 +1284,17 @@ static bool applyFilters(const std::vector<PacketFilter>& filters, FXString& err
 		return false;
 	}
 	return true;
+}
+
+// Gibt die Ports eines VPN-Dienstes frei (und legt das Regelwerk an,
+// falls es noch keines gibt).
+static bool openVpnPorts(const std::vector<std::string>& ports, FXString& errorMsg) {
+	std::vector<std::string> have = loadVpnPorts();
+	for (auto& p : ports) if (std::find(have.begin(), have.end(), p) == have.end()) have.push_back(p);
+	std::string content = "# Für den VPN-Dienst freigegebene Ports, von ice2k \"Routing und RAS\" verwaltet.\n";
+	for (auto& p : have) content += p + "\n";
+	if (!writeFileAsRoot(RRAS_VPNPORTS, content, errorMsg)) return false;
+	return applyFilters(loadFilters(), errorMsg);
 }
 
 static bool saveFilters(const std::vector<PacketFilter>& filters, FXString& errorMsg) {
@@ -1520,7 +1594,8 @@ protected:
 	RrasWindow() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_CONFIGURE, ID_DEACTIVATE, ID_PROPERTIES, ID_REFRESH, ID_ABOUT,
-	       ID_LIST, ID_NEW_ROUTE, ID_DELETE_ROUTE, ID_IN_FILTER, ID_OUT_FILTER, ID_NEW_CLIENT, ID_DELETE_CLIENT };
+	       ID_LIST, ID_NEW_ROUTE, ID_DELETE_ROUTE, ID_IN_FILTER, ID_OUT_FILTER, ID_NEW_CLIENT, ID_DELETE_CLIENT,
+	       ID_EXPORT_CLIENT, ID_EXPORT_CA, ID_EXPORT_SERVER };
 
 	RrasWindow(FXApp* a);
 	virtual void create();
@@ -1539,6 +1614,9 @@ public:
 	long onFilter(FXObject*, FXSelector, void*);
 	long onNewClient(FXObject*, FXSelector, void*);
 	long onDeleteClient(FXObject*, FXSelector, void*);
+	long onExportClient(FXObject*, FXSelector, void*);
+	long onExportCa(FXObject*, FXSelector, void*);
+	long onExportServer(FXObject*, FXSelector, void*);
 	long onDeleteRoute(FXObject*, FXSelector, void*);
 	void buildServerNodes();
 	void setColumns(const std::vector<std::pair<const char*, int>>& cols);
@@ -1563,6 +1641,9 @@ FXDEFMAP(RrasWindow) RrasWindowMap[] = {
 	FXMAPFUNCS(SEL_COMMAND, RrasWindow::ID_IN_FILTER, RrasWindow::ID_OUT_FILTER, RrasWindow::onFilter),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_NEW_CLIENT, RrasWindow::onNewClient),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_DELETE_CLIENT, RrasWindow::onDeleteClient),
+	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_EXPORT_CLIENT, RrasWindow::onExportClient),
+	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_EXPORT_CA, RrasWindow::onExportCa),
+	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_EXPORT_SERVER, RrasWindow::onExportServer),
 	FXMAPFUNC(SEL_COMMAND, RrasWindow::ID_DELETE_ROUTE, RrasWindow::onDeleteRoute),
 };
 FXIMPLEMENT(RrasWindow, FXMainWindow, RrasWindowMap, ARRAYNUMBER(RrasWindowMap))
@@ -1845,6 +1926,23 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "%s", errorMsg.text());
 			return 1;
 		}
+		// Ohne offene Ports nützt der beste VPN-Dienst nichts -- wie im
+		// Original nachfragen, statt stillschweigend Regeln zu setzen.
+		std::vector<std::string> ports;
+		FXString portText;
+		if (c.backend == VPN_WIREGUARD) { ports = { "udp " + c.port }; portText = FXString("UDP ") + c.port.c_str(); }
+		else if (c.backend == VPN_OPENVPN) { ports = { "udp " + c.port }; portText = FXString("UDP ") + c.port.c_str(); }
+		else { ports = { "udp 500", "udp 4500", "esp" }; portText = "UDP 500 und UDP 4500 sowie das Protokoll ESP"; }
+		if (FXMessageBox::question(this, MBOX_YES_NO, "Routing und RAS",
+		        "Für %s werden %s benötigt.\n\n"
+		        "Sollen diese Ports in der Firewall geöffnet werden?",
+		        vpnLabel(c.backend).text(), portText.text()) == MBOX_CLICKED_YES) {
+			FXString e;
+			if (!openVpnPorts(ports, e))
+				FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Die Ports konnten nicht geöffnet werden:\n\n%s", e.text());
+			else
+				vpnNote += (vpnNote.empty() ? "" : "\n\n") + std::string("Freigegeben: ") + portText.text() + ".";
+		}
 		st.vpnBackend = vpnKeyword(c.backend);
 		st.vpnName = c.name;
 		st.vpnPort = c.port;
@@ -1943,8 +2041,14 @@ long RrasWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 		FXMenuPane menu(this);
 		new FXMenuCommand(&menu, "&Neuer Client...", NULL, this, ID_NEW_CLIENT);
 		if (idx >= 0 && idx < (int)shownClients.size()) {
+			new FXMenuCommand(&menu, "&Konfiguration exportieren...", NULL, this, ID_EXPORT_CLIENT);
 			new FXMenuSeparator(&menu);
 			new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_CLIENT);
+		}
+		if (!caCertificatePath(state).empty()) {
+			new FXMenuSeparator(&menu);
+			new FXMenuCommand(&menu, "&CA-Zertifikat exportieren...", NULL, this, ID_EXPORT_CA);
+			new FXMenuCommand(&menu, "&Serverzertifikat exportieren...", NULL, this, ID_EXPORT_SERVER);
 		}
 		menu.create();
 		menu.popup(NULL, ev->root_x, ev->root_y);
@@ -2074,6 +2178,70 @@ long RrasWindow::onDeleteClient(FXObject*, FXSelector, void*) {
 	if (!removeVpnClient(state, shownClients[idx], errorMsg))
 		FXMessageBox::error(this, MBOX_OK, "Client löschen", "%s", errorMsg.text());
 	showFor(tree->getCurrentItem());
+	return 1;
+}
+
+// Alles, was eine Gegenstelle braucht: bei OpenVPN die fertige
+// .ovpn-Datei, bei WireGuard der Peer-Eintrag (der private Schlüssel des
+// Clients wird bewusst nicht gespeichert), bei strongSwan der Hinweis auf
+// Benutzer und CA.
+long RrasWindow::onExportClient(FXObject*, FXSelector, void*) {
+	int idx = itemList->getCurrentItem();
+	if (idx < 0 || idx >= (int)shownClients.size()) return 1;
+	const VpnClient& c = shownClients[idx];
+	FXString errorMsg;
+	if (state.vpnBackend == "openvpn") {
+		std::string config;
+		if (!buildOvpnProfile(state, c.name, config, errorMsg)) {
+			FXMessageBox::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
+			return 1;
+		}
+		ClientConfigDialog dlg(this, FXString("Clientkonfiguration für ") + c.name.c_str(), config, c.name + ".ovpn");
+		dlg.execute(PLACEMENT_OWNER);
+		return 1;
+	}
+	if (state.vpnBackend == "wireguard") {
+		std::string serverPub;
+		rootShell("sed -n 's/^PrivateKey *= *//p' /etc/wireguard/" + state.vpnName + ".conf | head -1 | wg pubkey", serverPub);
+		std::string config =
+			"# Vorlage für " + c.name + " -- der private Schlüssel dieses Clients wird auf dem\n"
+			"# Server nicht gespeichert. Tragen Sie ihn hier ein oder legen Sie den Client neu an.\n"
+			"[Interface]\nPrivateKey = <privater Schlüssel des Clients>\nAddress = " + c.detail + "\n\n"
+			"[Peer]\nPublicKey = " + svcprobe::trimmed(serverPub) + "\nEndpoint = <Serveradresse>:" + state.vpnPort + "\n"
+			"AllowedIPs = " + state.vpnSubnet + "\nPersistentKeepalive = 25\n";
+		ClientConfigDialog dlg(this, FXString("Clientkonfiguration für ") + c.name.c_str(), config, c.name + ".conf");
+		dlg.execute(PLACEMENT_OWNER);
+		return 1;
+	}
+	std::string config =
+		"# Angaben für " + c.name + " (strongSwan, IKEv2/EAP)\n"
+		"Server:        <Serveradresse>\n"
+		"Benutzername:  " + c.name + "\n"
+		"Kennwort:      <beim Anlegen vergeben>\n"
+		"Zertifikat:    das CA-Zertifikat dieses Servers (siehe \"CA-Zertifikat exportieren...\")\n";
+	ClientConfigDialog dlg(this, FXString("Angaben für ") + c.name.c_str(), config, c.name + ".txt");
+	dlg.execute(PLACEMENT_OWNER);
+	return 1;
+}
+
+long RrasWindow::onExportCa(FXObject*, FXSelector, void*) {
+	std::string path = caCertificatePath(state);
+	if (path.empty()) return 1;
+	FXString target = FXFileDialog::getSaveFilename(this, "CA-Zertifikat exportieren", "ca.crt");
+	if (target.empty()) return 1;
+	FXString errorMsg;
+	if (!exportFileAsRoot(path, target, errorMsg)) FXMessageBox::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
+	return 1;
+}
+
+long RrasWindow::onExportServer(FXObject*, FXSelector, void*) {
+	std::string path = state.vpnBackend == "openvpn" ? std::string(OVPN_PKI) + "/issued/server.crt"
+	                 : state.vpnBackend == "strongswan" ? "/etc/swanctl/x509/server.crt" : "";
+	if (path.empty()) return 1;
+	FXString target = FXFileDialog::getSaveFilename(this, "Serverzertifikat exportieren", "server.crt");
+	if (target.empty()) return 1;
+	FXString errorMsg;
+	if (!exportFileAsRoot(path, target, errorMsg)) FXMessageBox::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
 	return 1;
 }
 

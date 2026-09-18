@@ -56,8 +56,14 @@ Aktualisieren und Eigenschaften.
     "RAS-Clients" dazu.
   - Der Knoten *Ports* zeigt den eingerichteten Dienst mit seinem Zustand
     und bei WireGuard zusätzlich die Peers.
+  - Nach der Einrichtung fragt die Konsole, ob die benötigten Ports in
+    der Firewall geöffnet werden sollen: UDP 51820 (WireGuard), UDP 1194
+    (OpenVPN) bzw. UDP 500, UDP 4500 und das Protokoll ESP (strongSwan).
+    Die Freigaben stehen in `/etc/ice2k/rras-vpnports` und landen im
+    selben nftables-Regelwerk wie die Paketfilter -- die Unit lädt sie
+    beim Systemstart mit.
   - Der Knoten *RAS-Clients* verwaltet die Gegenstellen: Rechtsklick legt
-    einen Client an oder löscht ihn.
+    einen Client an, exportiert ihn oder löscht ihn.
     - *WireGuard*: erzeugt ein Schlüsselpaar, vergibt die nächste freie
       Adresse aus dem VPN-Netz, trägt den Peer in die Serverkonfiguration
       ein (und sofort per `wg set`) und zeigt die fertige
@@ -68,6 +74,14 @@ Aktualisieren und Eigenschaften.
     - *strongSwan*: legt einen EAP-Benutzer mit Kennwort in
       `/etc/swanctl/conf.d/ice2k-users.conf` an und lädt die Zugangsdaten
       neu.
+  - **Exportieren** über das Kontextmenü: "Konfiguration exportieren..."
+    baut für OpenVPN die vollständige `.ovpn`-Datei aus den gespeicherten
+    Dateien neu auf, für WireGuard eine Vorlage mit Serverschlüssel und
+    Adresse (der private Schlüssel des Clients wird auf dem Server nicht
+    gespeichert) und für strongSwan die Angaben für die Verbindung. Dazu
+    "CA-Zertifikat exportieren..." und "Serverzertifikat exportieren..."
+    bei OpenVPN und strongSwan; beides lässt sich direkt in eine Datei
+    speichern.
 - **Paketfilter** je Schnittstelle (Rechtsklick auf eine Schnittstelle →
   "Eingabefilter..." / "Ausgabefilter..."), Dialoge nach `rtrfiltr.dll`:
   "Alle Pakete empfangen/übertragen, mit Ausnahme..." bzw. "Alle Pakete
@@ -90,6 +104,9 @@ Die gewählte Rolle merkt sich `/etc/ice2k/rras.conf`.
 
 - Einwählserver (Modem/ISDN), RAS-Richtlinien und Protokollierung.
 - Die Paketfilter kennen nur IPv4.
+- Der private Schlüssel eines WireGuard-Clients wird bewusst nicht
+  gespeichert; nach dem Anlegen lässt sich die fertige Konfiguration nur
+  in diesem Moment abholen.
 - Bei OpenVPN gibt es keine Sperrliste (CRL): ein gelöschter Client
   verliert seine Dateien, ein bereits ausgeliefertes Zertifikat bleibt
   aber gültig.
