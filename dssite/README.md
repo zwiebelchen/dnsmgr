@@ -21,6 +21,16 @@ Gelesen wird der Konfigurationsteil des Verzeichnisses unter
 | Server im Standort | `objectClass=server` unter `CN=Servers` |
 | Subnetz | `objectClass=subnet` unter `CN=Subnets`, Standort über `siteObject` |
 | Standortverknüpfung | `objectClass=siteLink` unter `CN=IP` bzw. `CN=SMTP`, mit `siteList`, `cost` und `replInterval` |
+| Verbindung (Replikationstopologie) | `objectClass=nTDSConnection` unter `CN=NTDS Settings` des Servers, Quelle über `fromServer` |
+
+Unter jedem Server liegt "NTDS Settings" mit den Verbindungen: Name,
+Von Server, Von Standort und Typ ("Automatisch erzeugt", wenn das
+unterste Bit von `options` gesetzt ist, sonst "Manuell"). Das
+Kontextmenü legt Verbindungen an, löscht sie, repliziert sofort
+(`samba-tool drs replicate`) und lässt die Topologie neu berechnen
+(`samba-tool drs kcc`). Beide DRS-Aufrufe laufen mit einer Zeitgrenze
+von 60 Sekunden -- antwortet die Schnittstelle nicht, sagt das eine
+Meldung, statt das Fenster hängen zu lassen.
 
 Geändert wird über `samba-tool sites` (Standort anlegen und löschen,
 Subnetz anlegen, löschen und einem Standort zuweisen). Für
@@ -35,9 +45,9 @@ direkt in `sam.ldb`.
   (`dssite.dll`) vorliegen, werden Beschriftungen und Symbole
   angeglichen.
 - Noch nicht umgesetzt: neue Standortverknüpfungen und
-  Standortverknüpfungsbrücken anlegen, Verbindungen unter "NTDS
-  Settings" (Replikationstopologie), Server zwischen Standorten
-  verschieben, Zeitplan der Replikation, "Jetzt replizieren".
+  Standortverknüpfungsbrücken anlegen, Server zwischen Standorten
+  verschieben, Zeitpläne (weder für Verknüpfungen noch für
+  Verbindungen), Eigenschaften einer Verbindung.
 - Die Symbole sind noch die allgemeinen aus dem Projektbestand.
 
 ## Bauen

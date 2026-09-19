@@ -172,8 +172,21 @@ struct SiteInfo {
 	std::vector<std::string> servers;   // Namen der Server im Standort
 };
 
+// Eine Verbindung unterhalb von "NTDS Settings" -- im Original die
+// Replikationstopologie. Von der KCC erzeugte Verbindungen tragen im
+// Feld "options" das unterste Bit.
+struct ConnectionInfo {
+	std::string dn, name, fromServer, fromSite, description;
+	bool generated = false;
+	bool enabled = true;
+};
+
 struct SubnetInfo {
 	std::string dn, name, site, description;
+};
+
+struct ServerRef {
+	std::string name, site, ntdsDn;
 };
 
 struct SiteLinkInfo {
@@ -196,6 +209,52 @@ static std::vector<SiteInfo> listSites() {
 		out.push_back(s);
 	}
 	std::sort(out.begin(), out.end(), [](const SiteInfo& a, const SiteInfo& b) { return a.name < b.name; });
+	return out;
+}
+
+// Alle Domänencontroller der Gesamtstruktur mit ihrem NTDS-Objekt.
+static std::vector<ServerRef> listAllServers() {
+	std::vector<ServerRef> out;
+	for (auto& e : ldapSearch(sitesDN(), "sub", "(objectClass=nTDSDSA)", { "cn" })) {
+		ServerRef r;
+		r.ntdsDn = e.dn;
+		// CN=NTDS Settings,CN=<Server>,CN=Servers,CN=<Standort>,...
+		std::string rest = e.dn;
+		size_t comma = rest.find(',');
+		if (comma == std::string::npos) continue;
+		rest = rest.substr(comma + 1);
+		r.name = dnLeaf(rest);
+		size_t serversPos = rest.find(",CN=Servers,");
+		if (serversPos != std::string::npos) r.site = dnLeaf(rest.substr(serversPos + 12));
+		out.push_back(r);
+	}
+	std::sort(out.begin(), out.end(), [](const ServerRef& a, const ServerRef& b) { return a.name < b.name; });
+	return out;
+}
+
+static std::vector<ConnectionInfo> listConnections(const std::string& serverName, const std::string& siteName,
+                                                   const std::vector<ServerRef>& servers) {
+	std::vector<ConnectionInfo> out;
+	std::string base = "CN=NTDS Settings,CN=" + serverName + ",CN=Servers,CN=" + siteName + "," + sitesDN();
+	for (auto& e : ldapSearch(base, "one", "(objectClass=nTDSConnection)", { "cn", "fromServer", "options", "enabledConnection", "description" })) {
+		ConnectionInfo c;
+		c.dn = e.dn;
+		c.name = e.first("cn");
+		c.description = e.first("description");
+		std::string opts = e.first("options");
+		c.generated = !opts.empty() && (atoi(opts.c_str()) & 1);
+		std::string enabled = e.first("enabledConnection");
+		c.enabled = enabled.empty() || enabled == "TRUE";
+		std::string from = e.first("fromServer");
+		for (auto& srv : servers)
+			if (srv.ntdsDn == from) { c.fromServer = srv.name; c.fromSite = srv.site; }
+		if (c.fromServer.empty() && !from.empty()) {
+			std::string rest = from.substr(from.find(',') + 1);
+			c.fromServer = dnLeaf(rest);
+		}
+		out.push_back(c);
+	}
+	std::sort(out.begin(), out.end(), [](const ConnectionInfo& a, const ConnectionInfo& b) { return a.name < b.name; });
 	return out;
 }
 
@@ -281,6 +340,11 @@ static bool setSubnetSite(const std::string& subnet, const std::string& site, FX
 	return true;
 }
 
+// Auch Verbindungen legt samba-tool nicht an -- direkt über ldb.
+static bool createConnection(const std::string& serverName, const std::string& siteName,
+                             const std::string& name, const std::string& fromNtdsDn, FXString& errorMsg);
+static bool deleteObject(const std::string& dn, FXString& errorMsg);
+
 // samba-tool kennt keine Standortverknüpfungen -- daher direkt über ldb.
 static bool applyLdif(const std::string& ldif, FXString& errorMsg) {
 	std::string tmp = "/tmp/ice2k-dssite.ldif";
@@ -294,6 +358,43 @@ static bool applyLdif(const std::string& ldif, FXString& errorMsg) {
 	runAsRoot({ "rm", "-f", tmp });
 	if (rc != 0) {
 		errorMsg = FXString("Die Änderung wurde abgelehnt:\n") + trimStr(out).c_str();
+		return false;
+	}
+	return true;
+}
+
+static bool createConnection(const std::string& serverName, const std::string& siteName,
+                             const std::string& name, const std::string& fromNtdsDn, FXString& errorMsg) {
+	std::string dn = "CN=" + name + ",CN=NTDS Settings,CN=" + serverName + ",CN=Servers,CN=" + siteName + "," + sitesDN();
+	std::string ldif = "dn: " + dn + "\n"
+	                   "changetype: add\n"
+	                   "objectClass: nTDSConnection\n"
+	                   "fromServer: " + fromNtdsDn + "\n"
+	                   "enabledConnection: TRUE\n"
+	                   "options: 0\n"
+	                   // Zeitplan des Originals: dreimal pro Stunde, wie bei
+	                   // von der KCC erzeugten Verbindungen.
+	                   "\n";
+	std::string tmp = "/tmp/ice2k-dssite-add.ldif";
+	{
+		std::ofstream out(tmp);
+		if (!out) { errorMsg = "Temporäre Datei konnte nicht geschrieben werden."; return false; }
+		out << ldif;
+	}
+	std::string out;
+	int rc = runAsRootCaptured({ "sh", "-c", std::string("ldbadd -H ") + SAM_LDB + " " + tmp + " 2>&1" }, out);
+	runAsRoot({ "rm", "-f", tmp });
+	if (rc != 0) {
+		errorMsg = FXString("Die Verbindung konnte nicht angelegt werden:\n") + trimStr(out).c_str();
+		return false;
+	}
+	return true;
+}
+
+static bool deleteObject(const std::string& dn, FXString& errorMsg) {
+	std::string out;
+	if (runAsRootCaptured({ "sh", "-c", std::string("ldbdel -H ") + SAM_LDB + " '" + dn + "' 2>&1" }, out) != 0) {
+		errorMsg = FXString("Das Objekt konnte nicht gelöscht werden:\n") + trimStr(out).c_str();
 		return false;
 	}
 	return true;
@@ -451,7 +552,7 @@ FXIMPLEMENT(SiteLinkDialog, FXDialogBox, SiteLinkDialogMap, ARRAYNUMBER(SiteLink
 // ---------------------------------------------------------------------
 // Hauptfenster
 // ---------------------------------------------------------------------
-enum NodeKind { NK_ROOT, NK_SITE, NK_SERVERS, NK_SERVER, NK_SUBNETS, NK_TRANSPORTS, NK_TRANSPORT };
+enum NodeKind { NK_ROOT, NK_SITE, NK_SERVERS, NK_SERVER, NK_NTDS, NK_SUBNETS, NK_TRANSPORTS, NK_TRANSPORT };
 
 struct NodeInfo {
 	NodeKind kind = NK_ROOT;
@@ -469,13 +570,16 @@ private:
 	std::vector<SiteInfo> sites;
 	std::vector<SubnetInfo> subnets;
 	std::vector<SiteLinkInfo> ipLinks, smtpLinks;
+	std::vector<ServerRef> allServers;
+	std::vector<ConnectionInfo> connections;   // die des gerade gewählten Servers
 	std::map<FXTreeItem*, NodeInfo> nodes;
 	FXTreeItem* rootItem = nullptr;
 protected:
 	DsSiteWindow() {}
 public:
 	enum { ID_TREE = FXMainWindow::ID_LAST, ID_LIST, ID_NEW_SITE, ID_DELETE_SITE, ID_NEW_SUBNET,
-	       ID_DELETE_SUBNET, ID_SUBNET_SITE, ID_PROPERTIES, ID_REFRESH, ID_ABOUT };
+	       ID_DELETE_SUBNET, ID_SUBNET_SITE, ID_PROPERTIES, ID_REFRESH, ID_ABOUT,
+	       ID_NEW_CONNECTION, ID_DELETE_CONNECTION, ID_REPLICATE, ID_CHECK_TOPOLOGY };
 
 	DsSiteWindow(FXApp* a);
 	virtual void create();
@@ -489,6 +593,10 @@ public:
 	long onDeleteSubnet(FXObject*, FXSelector, void*);
 	long onSubnetSite(FXObject*, FXSelector, void*);
 	long onProperties(FXObject*, FXSelector, void*);
+	long onNewConnection(FXObject*, FXSelector, void*);
+	long onDeleteConnection(FXObject*, FXSelector, void*);
+	long onReplicate(FXObject*, FXSelector, void*);
+	long onCheckTopology(FXObject*, FXSelector, void*);
 	long onRefresh(FXObject*, FXSelector, void*);
 	long onAbout(FXObject*, FXSelector, void*);
 	void reload();
@@ -509,6 +617,10 @@ FXDEFMAP(DsSiteWindow) DsSiteWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_DELETE_SUBNET, DsSiteWindow::onDeleteSubnet),
 	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_SUBNET_SITE, DsSiteWindow::onSubnetSite),
 	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_PROPERTIES, DsSiteWindow::onProperties),
+	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_NEW_CONNECTION, DsSiteWindow::onNewConnection),
+	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_DELETE_CONNECTION, DsSiteWindow::onDeleteConnection),
+	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_REPLICATE, DsSiteWindow::onReplicate),
+	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_CHECK_TOPOLOGY, DsSiteWindow::onCheckTopology),
 	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_REFRESH, DsSiteWindow::onRefresh),
 	FXMAPFUNC(SEL_COMMAND, DsSiteWindow::ID_ABOUT, DsSiteWindow::onAbout),
 };
@@ -528,6 +640,10 @@ DsSiteWindow::DsSiteWindow(FXApp* a)
 	new FXMenuTitle(menubar, "&Vorgang", NULL, vorgang);
 	new FXMenuCommand(vorgang, "Neuer &Standort...", NULL, this, ID_NEW_SITE);
 	new FXMenuCommand(vorgang, "Neues S&ubnetz...", NULL, this, ID_NEW_SUBNET);
+	new FXMenuCommand(vorgang, "Neue Active Directory-&Verbindung...", NULL, this, ID_NEW_CONNECTION);
+	new FXMenuSeparator(vorgang);
+	new FXMenuCommand(vorgang, "&Jetzt replizieren", NULL, this, ID_REPLICATE);
+	new FXMenuCommand(vorgang, "&Topologie prüfen", NULL, this, ID_CHECK_TOPOLOGY);
 	new FXMenuSeparator(vorgang);
 	new FXMenuCommand(vorgang, "&Aktualisieren", NULL, this, ID_REFRESH);
 	new FXMenuSeparator(vorgang);
@@ -577,6 +693,7 @@ std::vector<std::string> DsSiteWindow::siteNames() const {
 void DsSiteWindow::reload() {
 	getApp()->beginWaitCursor();
 	sites = listSites();
+	allServers = listAllServers();
 	subnets = listSubnets();
 	ipLinks = listSiteLinks("IP");
 	smtpLinks = listSiteLinks("SMTP");
@@ -597,7 +714,11 @@ void DsSiteWindow::reload() {
 		for (auto& srv : s.servers) {
 			FXTreeItem* item = tree->appendItem(servers, srv.c_str(), icoServer, icoServer);
 			nodes[item] = { NK_SERVER, srv, s.name };
+			// Darunter die Replikationstopologie wie im Original.
+			FXTreeItem* ntds = tree->appendItem(item, "NTDS Settings", icoLink, icoLink);
+			nodes[ntds] = { NK_NTDS, srv, s.name };
 			if (sel.kind == NK_SERVER && sel.name == srv) selectItem = item;
+			if (sel.kind == NK_NTDS && sel.name == srv) selectItem = ntds;
 		}
 		tree->expandTree(si);
 		if (sel.kind == NK_SITE && sel.name == s.name) selectItem = si;
@@ -659,6 +780,23 @@ void DsSiteWindow::showFor(FXTreeItem* item) {
 			statusbar->setText(FXString(" Server im Standort ") + n.site.c_str());
 			break;
 		}
+		case NK_NTDS: {
+			// Spalten wie im Original.
+			list->appendHeader("Name", NULL, 200);
+			list->appendHeader("Von Server", NULL, 160);
+			list->appendHeader("Von Standort", NULL, 160);
+			list->appendHeader("Typ", NULL, 170);
+			connections = listConnections(n.name, n.site, allServers);
+			for (auto& c : connections)
+				list->appendItem(FXString(c.name.c_str()) + "\t" + (c.fromServer.empty() ? "-" : c.fromServer.c_str()) + "\t" +
+				                 (c.fromSite.empty() ? "-" : c.fromSite.c_str()) + "\t" +
+				                 (c.generated ? "Automatisch erzeugt" : "Manuell") +
+				                 (c.enabled ? "" : " (deaktiviert)"), icoLink, icoLink);
+			statusbar->setText(connections.empty()
+				? FXString(" Keine Verbindung. Rechtsklick: Neue Active Directory-Verbindung.")
+				: FXString(" ") + FXString(std::to_string(connections.size()).c_str()) + " Verbindung(en) für " + n.name.c_str());
+			break;
+		}
 		case NK_SUBNETS:
 			list->appendHeader("Name", NULL, 200);
 			list->appendHeader("Standort", NULL, 200);
@@ -714,6 +852,11 @@ long DsSiteWindow::onTreeRight(FXObject*, FXSelector, void* ptr) {
 		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_SITE);
 	} else if (n.kind == NK_SUBNETS) new FXMenuCommand(&menu, "Neues S&ubnetz...", NULL, this, ID_NEW_SUBNET);
+	else if (n.kind == NK_NTDS) {
+		new FXMenuCommand(&menu, "Neue Active Directory-&Verbindung...", NULL, this, ID_NEW_CONNECTION);
+		new FXMenuSeparator(&menu);
+		new FXMenuCommand(&menu, "&Topologie prüfen", NULL, this, ID_CHECK_TOPOLOGY);
+	}
 	new FXMenuSeparator(&menu);
 	new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
 	menu.create();
@@ -740,6 +883,13 @@ long DsSiteWindow::onListRight(FXObject*, FXSelector, void* ptr) {
 		if (idx >= 0 && idx < (int)sites.size()) {
 			new FXMenuSeparator(&menu);
 			new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_SITE);
+		}
+	} else if (n.kind == NK_NTDS) {
+		new FXMenuCommand(&menu, "Neue Active Directory-&Verbindung...", NULL, this, ID_NEW_CONNECTION);
+		if (idx >= 0 && idx < (int)connections.size()) {
+			new FXMenuCommand(&menu, "&Jetzt replizieren", NULL, this, ID_REPLICATE);
+			new FXMenuSeparator(&menu);
+			new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_CONNECTION);
 		}
 	} else if (n.kind == NK_TRANSPORT && idx >= 0) {
 		new FXMenuCommand(&menu, "Ei&genschaften", NULL, this, ID_PROPERTIES);
@@ -831,6 +981,101 @@ long DsSiteWindow::onProperties(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	if (!updateSiteLink(links[idx], dlg.costValue(), dlg.intervalValue(), dlg.siteNames(), errorMsg))
 		ice2kui::error(this, MBOX_OK, "Standortverknüpfung", "%s", errorMsg.text());
+	reload();
+	return 1;
+}
+
+// Neue Verbindung: Quelle ist ein anderer Domänencontroller der
+// Gesamtstruktur.
+long DsSiteWindow::onNewConnection(FXObject*, FXSelector, void*) {
+	NodeInfo n = currentNode();
+	if (n.kind != NK_NTDS) {
+		ice2kui::information(this, MBOX_OK, "Active Directory",
+			"Wählen Sie zuerst \"NTDS Settings\" des Servers, der die Daten abholen soll.");
+		return 1;
+	}
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Active Directory", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	std::vector<std::string> sources;
+	for (auto& s : allServers) if (s.name != n.name) sources.push_back(s.name + " (" + s.site + ")");
+	if (sources.empty()) {
+		ice2kui::information(this, MBOX_OK, "Neue Verbindung",
+			"Es gibt nur einen Domänencontroller. Eine Verbindung braucht eine Gegenstelle.");
+		return 1;
+	}
+	NameDialog dlg(this, "Neues Objekt - Verbindung",
+		FXString("Die Verbindung holt Änderungen für ") + n.name.c_str() + " von einem anderen\n"
+		"Domänencontroller ab.", "&Name:", "", "&Von Server:", sources);
+	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
+	std::string pick = dlg.choice();
+	std::string fromName = pick.substr(0, pick.find(" ("));
+	std::string fromDn;
+	for (auto& s : allServers) if (s.name == fromName) fromDn = s.ntdsDn;
+	FXString errorMsg;
+	if (!createConnection(n.name, n.site, dlg.value(), fromDn, errorMsg))
+		ice2kui::error(this, MBOX_OK, "Neue Verbindung", "%s", errorMsg.text());
+	reload();
+	return 1;
+}
+
+long DsSiteWindow::onDeleteConnection(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	if (currentNode().kind != NK_NTDS || idx < 0 || idx >= (int)connections.size()) return 1;
+	const ConnectionInfo& c = connections[idx];
+	if (c.generated && ice2kui::question(this, MBOX_YES_NO, "Active Directory",
+	        "Die Verbindung \"%s\" wurde automatisch erzeugt.\n\n"
+	        "Sie wird bei der nächsten Prüfung der Topologie neu angelegt.\n"
+	        "Trotzdem löschen?", c.name.c_str()) != MBOX_CLICKED_YES) return 1;
+	if (!c.generated && ice2kui::question(this, MBOX_YES_NO, "Active Directory",
+	        "Möchten Sie die Verbindung \"%s\" wirklich löschen?", c.name.c_str()) != MBOX_CLICKED_YES) return 1;
+	FXString errorMsg;
+	if (!deleteObject(c.dn, errorMsg)) ice2kui::error(this, MBOX_OK, "Verbindung löschen", "%s", errorMsg.text());
+	reload();
+	return 1;
+}
+
+// "Jetzt replizieren" repliziert die Namenskontexte von der Gegenstelle
+// zu diesem Server -- im Original derselbe Befehl im Kontextmenü der
+// Verbindung.
+long DsSiteWindow::onReplicate(FXObject*, FXSelector, void*) {
+	int idx = list->getCurrentItem();
+	NodeInfo n = currentNode();
+	if (n.kind != NK_NTDS || idx < 0 || idx >= (int)connections.size()) return 1;
+	const ConnectionInfo& c = connections[idx];
+	if (c.fromServer.empty()) return 1;
+	if (g_baseDN.empty()) return 1;
+	getApp()->beginWaitCursor();
+	std::string out;
+	// Mit Zeitgrenze: antwortet die DRS-Schnittstelle nicht, hinge das
+	// Fenster sonst minutenlang.
+	int rc = runAsRootCaptured({ "timeout", "60", "samba-tool", "drs", "replicate", n.name, c.fromServer, g_baseDN }, out);
+	if (rc == 124) out = "Zeitüberschreitung: Die Replikationsschnittstelle (DRS) hat nicht geantwortet.";
+	getApp()->endWaitCursor();
+	if (rc != 0)
+		ice2kui::error(this, MBOX_OK, "Jetzt replizieren",
+			"Die Replikation von %s nach %s ist fehlgeschlagen:\n\n%s",
+			c.fromServer.c_str(), n.name.c_str(), condenseError(out).c_str());
+	else
+		ice2kui::information(this, MBOX_OK, "Jetzt replizieren",
+			"Die Replikation von %s nach %s wurde ausgeführt.", c.fromServer.c_str(), n.name.c_str());
+	return 1;
+}
+
+// Entspricht "Topologie prüfen": die KCC neu rechnen lassen.
+long DsSiteWindow::onCheckTopology(FXObject*, FXSelector, void*) {
+	NodeInfo n = currentNode();
+	std::string server = n.kind == NK_NTDS || n.kind == NK_SERVER ? n.name : "";
+	if (server.empty() && !allServers.empty()) server = allServers[0].name;
+	if (server.empty()) return 1;
+	getApp()->beginWaitCursor();
+	std::string out;
+	int rc = runAsRootCaptured({ "timeout", "60", "samba-tool", "drs", "kcc", server }, out);
+	if (rc == 124) out = "Zeitüberschreitung: Die Replikationsschnittstelle (DRS) hat nicht geantwortet.";
+	getApp()->endWaitCursor();
+	if (rc != 0)
+		ice2kui::error(this, MBOX_OK, "Topologie prüfen", "Die Prüfung ist fehlgeschlagen:\n\n%s", condenseError(out).c_str());
+	else
+		ice2kui::information(this, MBOX_OK, "Topologie prüfen",
+			"Die Replikationstopologie wurde auf %s neu berechnet.", server.c_str());
 	reload();
 	return 1;
 }
