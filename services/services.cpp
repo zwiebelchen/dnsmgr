@@ -11,6 +11,7 @@
 #include <FXGIFIcon.h>
 #include "res/foxres.h"
 #include "../common/svc/svcpanel.h"
+#include "../common/ui/msgbox.h"
 
 class Services : public FXMainWindow {
 	FXDECLARE(Services)
@@ -140,7 +141,7 @@ Services::Services(FXApp* a)
 void Services::create() {
 	FXMainWindow::create();
 	if (!svc::systemdAvailable()) {
-		FXMessageBox::warning(this, MBOX_OK, "Dienste",
+		ice2kui::warning(this, MBOX_OK, "Dienste",
 			"Auf diesem System ist kein systemd erreichbar.\n"
 			"Die Liste bleibt deshalb leer.");
 	}
@@ -155,7 +156,7 @@ long Services::onProperties(FXObject*, FXSelector, void*) { panel->propertiesFor
 long Services::onRefresh(FXObject*, FXSelector, void*) { panel->reload(); return 1; }
 
 long Services::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Über Dienste",
+	ice2kui::information(this, MBOX_OK, "Über Dienste",
 		"Dienste für ice2k\n\n"
 		"Verwaltet systemd-Dienste im Stil von services.msc.\n"
 		"Dieselbe Ansicht steckt auch in der Computerverwaltung\n"

@@ -22,6 +22,7 @@
 #include <map>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "../common/ui/msgbox.h"
 
 static FXApp* app = NULL;
 
@@ -604,7 +605,7 @@ long SrvCfgWindow::onLink(FXObject* sender, FXSelector, void*) {
 	std::string missing = it->second.arg.empty() ? launch(it->second.program)
 	                                             : launchWithArg(it->second.program, it->second.arg);
 	if (!missing.empty())
-		FXMessageBox::error(this, MBOX_OK, "Konfiguration des Servers",
+		ice2kui::error(this, MBOX_OK, "Konfiguration des Servers",
 			"Das Programm \"%s\" wurde nicht gefunden.\n\n"
 			"Installieren Sie es (make install im entsprechenden Verzeichnis) oder\n"
 			"starten Sie es aus seinem Bauverzeichnis heraus.", missing.c_str());

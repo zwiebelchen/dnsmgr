@@ -30,6 +30,7 @@
 #include <algorithm>
 #include "../common/svcprobe/svcprobe.h"
 #include "../common/evt/evtpanel.h"
+#include "../common/ui/msgbox.h"
 
 FXApp* app;
 static bool g_haveRoot = false;
@@ -1053,7 +1054,7 @@ bool CompMgmt::checkSamba() {
 	statuslbl->setText(FXString("Der Dateiserverdienst (") + unit + ") läuft nicht -- Sitzungen und geöffnete Dateien fehlen.");
 	if (!sambaErrorShown && shown()) {
 		sambaErrorShown = true;
-		FXMessageBox::error(this, MBOX_OK, "Computerverwaltung", "%s",
+		ice2kui::error(this, MBOX_OK, "Computerverwaltung", "%s",
 			svcprobe::message("Der Dateiserverdienst (Samba)", unit, r.detail).c_str());
 	}
 	return false;
@@ -1168,7 +1169,7 @@ long CompMgmt::onRefresh(FXObject*, FXSelector, void*) {
 }
 
 long CompMgmt::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Über Computerverwaltung",
+	ice2kui::information(this, MBOX_OK, "Über Computerverwaltung",
 		"Computerverwaltung für ice2k\n\n"
 		"Ein Nachbau des Windows 2000 Computerverwaltung-Snapins\n"
 		"(Lokale Benutzer und Gruppen).\n"
@@ -1179,7 +1180,7 @@ long CompMgmt::onAbout(FXObject*, FXSelector, void*) {
 
 long CompMgmt::onNewUser(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Benutzer angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Benutzer angelegt werden.");
 		return 1;
 	}
 	NewUserDialog dlg(this, this);
@@ -1189,7 +1190,7 @@ long CompMgmt::onNewUser(FXObject*, FXSelector, void*) {
 
 long CompMgmt::onNewGroup(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Gruppe angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Gruppe angelegt werden.");
 		return 1;
 	}
 	NewGroupDialog dlg(this, this);
@@ -1206,7 +1207,7 @@ long CompMgmt::onUserProperties(FXObject*, FXSelector, void*) {
 	UserPropertiesDialog dlg(this, u);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
 		return 1;
 	}
 
@@ -1231,7 +1232,7 @@ long CompMgmt::onUserProperties(FXObject*, FXSelector, void*) {
 
 long CompMgmt::onSetPassword(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Kennwort gesetzt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Kennwort gesetzt werden.");
 		return 1;
 	}
 	SetPasswordDialog dlg(this, contextUserName);
@@ -1240,11 +1241,11 @@ long CompMgmt::onSetPassword(FXObject*, FXSelector, void*) {
 	FXString pw = dlg.getPassword();
 	FXString confirm = dlg.getConfirm();
 	if (pw.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Kennwort fehlt", "Bitte ein Kennwort eingeben.");
+		ice2kui::error(this, MBOX_OK, "Kennwort fehlt", "Bitte ein Kennwort eingeben.");
 		return 1;
 	}
 	if (pw != confirm) {
-		FXMessageBox::error(this, MBOX_OK, "Kennwörter stimmen nicht überein", "Die beiden eingegebenen Kennwörter sind unterschiedlich.");
+		ice2kui::error(this, MBOX_OK, "Kennwörter stimmen nicht überein", "Die beiden eingegebenen Kennwörter sind unterschiedlich.");
 		return 1;
 	}
 
@@ -1275,10 +1276,10 @@ long CompMgmt::onSetPassword(FXObject*, FXSelector, void*) {
 
 long CompMgmt::onDeleteUser(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
 	        "Benutzer \"%s\" wirklich löschen? Das Home-Verzeichnis wird mit entfernt.", contextUserName.text())
 	        != MBOX_CLICKED_YES) {
 		return 1;
@@ -1303,7 +1304,7 @@ long CompMgmt::onGroupProperties(FXObject*, FXSelector, void*) {
 	GroupPropertiesDialog dlg(this, g);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
 		return 1;
 	}
 
@@ -1322,10 +1323,10 @@ long CompMgmt::onGroupProperties(FXObject*, FXSelector, void*) {
 
 long CompMgmt::onDeleteGroup(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
 	        "Gruppe \"%s\" wirklich löschen?", contextGroupName.text()) != MBOX_CLICKED_YES) {
 		return 1;
 	}
@@ -1341,7 +1342,7 @@ long CompMgmt::onDeleteGroup(FXObject*, FXSelector, void*) {
 
 long CompMgmt::onNewShare(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Freigabe angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Freigabe angelegt werden.");
 		return 1;
 	}
 	NewShareDialog dlg(this, this);
@@ -1358,7 +1359,7 @@ long CompMgmt::onShareProperties(FXObject*, FXSelector, void*) {
 	SharePropertiesDialog dlg(this, s);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
 		return 1;
 	}
 	FXString errorMsg;
@@ -1366,17 +1367,17 @@ long CompMgmt::onShareProperties(FXObject*, FXSelector, void*) {
 		showListFor(NK_SHARES);
 		statuslbl->setText("Eigenschaften von " + s.name + " aktualisiert.");
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
 
 long CompMgmt::onDeleteShare(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts geändert werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts geändert werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Freigabe aufheben bestätigen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Freigabe aufheben bestätigen",
 	        "Freigabe \"%s\" wirklich aufheben? Der Ordner selbst und seine Dateien bleiben erhalten.", contextShareName.text()) != MBOX_CLICKED_YES) {
 		return 1;
 	}
@@ -1385,7 +1386,7 @@ long CompMgmt::onDeleteShare(FXObject*, FXSelector, void*) {
 		showListFor(NK_SHARES);
 		statuslbl->setText("Freigabe " + contextShareName + " aufgehoben.");
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1441,17 +1442,17 @@ long NewUserDialog::onCreate(FXObject*, FXSelector, void*) {
 	FXString pwConfirm = pwConfirmField->getText();
 
 	if (pw != pwConfirm) {
-		FXMessageBox::error(this, MBOX_OK, "Kennwörter stimmen nicht überein", "Die beiden eingegebenen Kennwörter sind unterschiedlich.");
+		ice2kui::error(this, MBOX_OK, "Kennwörter stimmen nicht überein", "Die beiden eingegebenen Kennwörter sind unterschiedlich.");
 		return 1;
 	}
 
 	FXString errorMsg;
 	if (mgr->createUser(username, fullName, desc, pw, disabledCheck->getCheck(), errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neuer Benutzer",
+		ice2kui::information(this, MBOX_OK, "Neuer Benutzer",
 			"Der Benutzer \"%s\" wurde erfolgreich erstellt.", username.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1460,11 +1461,11 @@ long NewGroupDialog::onCreate(FXObject*, FXSelector, void*) {
 	FXString groupname = nameField->getText().trim();
 	FXString errorMsg;
 	if (mgr->createGroup(groupname, errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neue Gruppe",
+		ice2kui::information(this, MBOX_OK, "Neue Gruppe",
 			"Die Gruppe \"%s\" wurde erfolgreich erstellt.", groupname.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1474,16 +1475,16 @@ long NewShareDialog::onCreate(FXObject*, FXSelector, void*) {
 	FXString name = nameField->getText().trim();
 	FXString comment = commentField->getText().trim();
 	if (path.empty() || name.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl Ordnerpfad als auch Freigabename angeben.");
+		ice2kui::error(this, MBOX_OK, "Fehler", "Bitte sowohl Ordnerpfad als auch Freigabename angeben.");
 		return 1;
 	}
 	FXString errorMsg;
 	if (createShare(name, path, comment, readOnlyCheck->getCheck(), errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neue Freigabe",
+		ice2kui::information(this, MBOX_OK, "Neue Freigabe",
 			"Die Freigabe \"%s\" wurde erfolgreich erstellt.", name.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1508,7 +1509,7 @@ int main(int argc, char* argv[]) {
 	win->show(PLACEMENT_SCREEN);
 
 	if (!g_haveRoot) {
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\n"
 			"Die Computerverwaltung kann bestehende Benutzer/Gruppen weiterhin\n"
 			"anzeigen, aber keine Änderungen vornehmen.");

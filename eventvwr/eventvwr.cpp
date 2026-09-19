@@ -16,6 +16,7 @@
 
 #include <string>
 #include <unistd.h>
+#include "../common/ui/msgbox.h"
 
 static FXApp* app = NULL;
 
@@ -153,7 +154,7 @@ long EventViewer::onClear(FXObject*, FXSelector, void*) {
 }
 
 long EventViewer::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Info",
+	ice2kui::information(this, MBOX_OK, "Info",
 		"Ereignisanzeige (ice2k)\n\n"
 		"Zeigt die Ereignisse dieses Servers aus dem systemd-Journal;\n"
 		"ohne Journal aus den Logdateien unter /var/log.\n\n"

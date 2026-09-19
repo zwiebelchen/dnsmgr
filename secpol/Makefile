@@ -12,7 +12,7 @@ LDFLAGS = `fox-config --libs`
 PREFIX = /usr/local
 
 SOURCES = ../dsadmin/dsadmin.cpp ../dsadmin/admparser.cpp ../dsadmin/regpol.cpp ../dsadmin/aas.cpp \
-          ../common/svc/svccore.cpp ../common/svc/svcpanel.cpp
+          ../common/svc/svccore.cpp ../common/svc/svcpanel.cpp ../common/ui/msgicons.cpp
 OBJECTS = $(notdir $(SOURCES:.cpp=.o))
 DEPS = $(OBJECTS:.o=.d)
 DEPFLAGS = -MMD -MP
@@ -21,7 +21,7 @@ EXECUTABLE = secpol
 CPPFLAGS += `fox-config --cflags`
 CPPFLAGS += $(DEPFLAGS)
 
-vpath %.cpp ../dsadmin ../common/svc
+vpath %.cpp ../dsadmin ../common/svc ../common/ui
 
 all: $(EXECUTABLE)
 

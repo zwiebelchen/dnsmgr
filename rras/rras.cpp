@@ -27,6 +27,7 @@
 #include <sstream>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "../common/ui/msgbox.h"
 
 static FXApp* app = NULL;
 static bool g_haveRoot = false;
@@ -413,7 +414,7 @@ public:
 	}
 	long onOk(FXObject*, FXSelector, void*) {
 		if (choice == C_INTERNET || choice == C_RAS) {
-			FXMessageBox::information(this, MBOX_OK, "Routing und RAS",
+			ice2kui::information(this, MBOX_OK, "Routing und RAS",
 				"Diese Serverrolle ist noch nicht umgesetzt.\n\n"
 				"Umgesetzt sind \"VPN-Server\" (WireGuard, OpenVPN, strongSwan), \"Netzwerkrouter\"\n"
 				"und \"Manuell konfigurierter Server\".");
@@ -635,16 +636,16 @@ public:
 	long onOk(FXObject*, FXSelector, void*) {
 		std::string n = svcprobe::trimmed(nameField->getText().text());
 		if (n.empty() || n.find('/') != std::string::npos || n.find(' ') != std::string::npos) {
-			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "Geben Sie einen gültigen Namen ohne Leer- und Sonderzeichen an.");
+			ice2kui::error(this, MBOX_OK, "VPN-Server", "Geben Sie einen gültigen Namen ohne Leer- und Sonderzeichen an.");
 			return 1;
 		}
 		unsigned a,b,c,d,bits;
 		if (sscanf(svcprobe::trimmed(subnetField->getText().text()).c_str(), "%u.%u.%u.%u/%u", &a,&b,&c,&d,&bits) != 5) {
-			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "Geben Sie das VPN-Netzwerk in der Form 10.8.0.0/24 an.");
+			ice2kui::error(this, MBOX_OK, "VPN-Server", "Geben Sie das VPN-Netzwerk in der Form 10.8.0.0/24 an.");
 			return 1;
 		}
 		if (sscanf(svcprobe::trimmed(serverIpField->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
-			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "Geben Sie eine gültige Adresse für den Server an.");
+			ice2kui::error(this, MBOX_OK, "VPN-Server", "Geben Sie eine gültige Adresse für den Server an.");
 			return 1;
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
@@ -1119,11 +1120,11 @@ public:
 	long onOk(FXObject*, FXSelector, void*) {
 		std::string n = svcprobe::trimmed(nameField->getText().text());
 		if (n.empty() || n.find_first_of(" /\\\"'") != std::string::npos) {
-			FXMessageBox::error(this, MBOX_OK, "Neuer Client", "Geben Sie einen Namen ohne Leer- und Sonderzeichen an.");
+			ice2kui::error(this, MBOX_OK, "Neuer Client", "Geben Sie einen Namen ohne Leer- und Sonderzeichen an.");
 			return 1;
 		}
 		if (passField && svcprobe::trimmed(passField->getText().text()).empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Neuer Client", "Geben Sie ein Kennwort an.");
+			ice2kui::error(this, MBOX_OK, "Neuer Client", "Geben Sie ein Kennwort an.");
 			return 1;
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
@@ -1163,7 +1164,7 @@ public:
 		FXString file = FXFileDialog::getSaveFilename(this, "Speichern unter", suggested.c_str());
 		if (file.empty()) return 1;
 		std::ofstream out(file.text(), std::ios::binary);
-		if (!out) { FXMessageBox::error(this, MBOX_OK, "Speichern", "Die Datei konnte nicht geschrieben werden."); return 1; }
+		if (!out) { ice2kui::error(this, MBOX_OK, "Speichern", "Die Datei konnte nicht geschrieben werden."); return 1; }
 		out << text->getText().text();
 		return 1;
 	}
@@ -1373,10 +1374,10 @@ public:
 	long onOk(FXObject*, FXSelector, void*) {
 		unsigned a,b,c,d;
 		if (srcCheck->getCheck() && sscanf(svcprobe::trimmed(srcAddr->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
-			FXMessageBox::error(this, MBOX_OK, "IP-Filter", "Geben Sie eine IP-Adresse für die Quelle an."); return 1;
+			ice2kui::error(this, MBOX_OK, "IP-Filter", "Geben Sie eine IP-Adresse für die Quelle an."); return 1;
 		}
 		if (dstCheck->getCheck() && sscanf(svcprobe::trimmed(dstAddr->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
-			FXMessageBox::error(this, MBOX_OK, "IP-Filter", "Geben Sie eine IP-Adresse für das Ziel an."); return 1;
+			ice2kui::error(this, MBOX_OK, "IP-Filter", "Geben Sie eine IP-Adresse für das Ziel an."); return 1;
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
@@ -1532,17 +1533,17 @@ public:
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 	}
 	long onOk(FXObject*, FXSelector, void*) {
-		if (ifaces.empty()) { FXMessageBox::error(this, MBOX_OK, "Statische Route", "Es wurde keine Netzwerkschnittstelle gefunden."); return 1; }
+		if (ifaces.empty()) { ice2kui::error(this, MBOX_OK, "Statische Route", "Es wurde keine Netzwerkschnittstelle gefunden."); return 1; }
 		unsigned a,b,c,d;
 		if (sscanf(svcprobe::trimmed(destField->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
-			FXMessageBox::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige IP-Adresse für das Ziel an."); return 1;
+			ice2kui::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige IP-Adresse für das Ziel an."); return 1;
 		}
 		if (maskToPrefix(svcprobe::trimmed(maskField->getText().text())) < 0) {
-			FXMessageBox::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige Netzwerkmaske an (z.B. 255.255.255.0)."); return 1;
+			ice2kui::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige Netzwerkmaske an (z.B. 255.255.255.0)."); return 1;
 		}
 		std::string gw = svcprobe::trimmed(gwField->getText().text());
 		if (!gw.empty() && sscanf(gw.c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
-			FXMessageBox::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige IP-Adresse für das Gateway an."); return 1;
+			ice2kui::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige IP-Adresse für das Gateway an."); return 1;
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
 	}
@@ -1909,7 +1910,7 @@ long RrasWindow::onUpdDeactivate(FXObject* sender, FXSelector, void*) {
 
 long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden.");
+		ice2kui::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden.");
 		return 1;
 	}
 	ConfigureDialog dlg(this);
@@ -1923,7 +1924,7 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 		if (!vdlg.execute(PLACEMENT_OWNER)) return 1;
 		VpnConfig c = vdlg.config();
 		if (!setupVpn(c, vdlg.createPki(), vpnNote, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "VPN-Server", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "VPN-Server", "%s", errorMsg.text());
 			return 1;
 		}
 		// Ohne offene Ports nützt der beste VPN-Dienst nichts -- wie im
@@ -1933,13 +1934,13 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 		if (c.backend == VPN_WIREGUARD) { ports = { "udp " + c.port }; portText = FXString("UDP ") + c.port.c_str(); }
 		else if (c.backend == VPN_OPENVPN) { ports = { "udp " + c.port }; portText = FXString("UDP ") + c.port.c_str(); }
 		else { ports = { "udp 500", "udp 4500", "esp" }; portText = "UDP 500 und UDP 4500 sowie das Protokoll ESP"; }
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Routing und RAS",
+		if (ice2kui::question(this, MBOX_YES_NO, "Routing und RAS",
 		        "Für %s werden %s benötigt.\n\n"
 		        "Sollen diese Ports in der Firewall geöffnet werden?",
 		        vpnLabel(c.backend).text(), portText.text()) == MBOX_CLICKED_YES) {
 			FXString e;
 			if (!openVpnPorts(ports, e))
-				FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Die Ports konnten nicht geöffnet werden:\n\n%s", e.text());
+				ice2kui::error(this, MBOX_OK, "Routing und RAS", "Die Ports konnten nicht geöffnet werden:\n\n%s", e.text());
 			else
 				vpnNote += (vpnNote.empty() ? "" : "\n\n") + std::string("Freigegeben: ") + portText.text() + ".";
 		}
@@ -1950,7 +1951,7 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 		st.vpnServerIp = c.serverIp;
 	}
 	if (!applyForwarding(true, errorMsg) || !writeState(st, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
 		reload();
 		return 1;
 	}
@@ -1983,12 +1984,12 @@ long RrasWindow::onConfigure(FXObject*, FXSelector, void*) {
 	reload();
 	FXString msg = "Routing und RAS wurde aktiviert.\n\nDie IP-Weiterleitung ist eingeschaltet und bleibt es auch nach einem Neustart.";
 	if (!vpnNote.empty()) msg += FXString("\n\n") + vpnNote.c_str();
-	FXMessageBox::information(this, MBOX_OK, "Routing und RAS", "%s", msg.text());
+	ice2kui::information(this, MBOX_OK, "Routing und RAS", "%s", msg.text());
 	return 1;
 }
 
 long RrasWindow::onDeactivate(FXObject*, FXSelector, void*) {
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Routing und RAS",
+	if (ice2kui::question(this, MBOX_YES_NO, "Routing und RAS",
 	        "Möchten Sie Routing und RAS wirklich deaktivieren?\n\n"
 	        "Die IP-Weiterleitung wird abgeschaltet.") != MBOX_CLICKED_YES) return 1;
 	FXString errorMsg;
@@ -1997,7 +1998,7 @@ long RrasWindow::onDeactivate(FXObject*, FXSelector, void*) {
 	std::string note;
 	enableRrasUnit(false, note);
 	if (!applyForwarding(false, errorMsg) || !writeState(st, errorMsg))
-		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -2007,14 +2008,14 @@ long RrasWindow::onProperties(FXObject*, FXSelector, void*) {
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	if (dlg.role() == state.role) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden.");
+		ice2kui::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden.");
 		return 1;
 	}
 	FXString errorMsg;
 	RrasState st = state;
 	st.role = dlg.role();
 	if (!applyForwarding(st.role != ROLE_NONE, errorMsg) || !writeState(st, errorMsg))
-		FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Routing und RAS", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -2074,7 +2075,7 @@ long RrasWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 // Aktivieren wieder gesetzt werden kann -- der Kernel vergisst Routen
 // beim Neustart.
 long RrasWindow::onNewRoute(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
 	StaticRouteDialog dlg(this, listInterfaces());
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	std::string spec = dlg.routeSpec();
@@ -2084,14 +2085,14 @@ long RrasWindow::onNewRoute(FXObject*, FXSelector, void*) {
 	std::string tok;
 	while (iss >> tok) args.push_back(FXString(tok.c_str()));
 	if (runAsRootCaptured(args, out) != 0) {
-		FXMessageBox::error(this, MBOX_OK, "Statische Route", "Die Route konnte nicht gesetzt werden:\n\n%s", svcprobe::trimmed(out).c_str());
+		ice2kui::error(this, MBOX_OK, "Statische Route", "Die Route konnte nicht gesetzt werden:\n\n%s", svcprobe::trimmed(out).c_str());
 		return 1;
 	}
 	std::vector<std::string> lines = storedRouteLines();
 	lines.push_back(spec);
 	FXString errorMsg;
 	if (!storeRouteLines(lines, errorMsg))
-		FXMessageBox::warning(this, MBOX_OK, "Statische Route",
+		ice2kui::warning(this, MBOX_OK, "Statische Route",
 			"Die Route ist gesetzt, konnte aber nicht dauerhaft gespeichert werden:\n\n%s", errorMsg.text());
 	showFor(tree->getCurrentItem());
 	return 1;
@@ -2101,7 +2102,7 @@ long RrasWindow::onDeleteRoute(FXObject*, FXSelector, void*) {
 	int idx = itemList->getCurrentItem();
 	if (idx < 0 || idx >= (int)shownRoutes.size()) return 1;
 	const RouteInfo& r = shownRoutes[idx];
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Statische Route",
+	if (ice2kui::question(this, MBOX_YES_NO, "Statische Route",
 	        "Möchten Sie die Route zu %s wirklich löschen?", r.dest.c_str()) != MBOX_CLICKED_YES) return 1;
 	int bits = maskToPrefix(r.mask);
 	std::string dest = r.dest + "/" + std::to_string(bits < 0 ? 32 : bits);
@@ -2110,7 +2111,7 @@ long RrasWindow::onDeleteRoute(FXObject*, FXSelector, void*) {
 	if (!r.iface.empty()) { args.push_back("dev"); args.push_back(FXString(r.iface.c_str())); }
 	std::string out;
 	if (runAsRootCaptured(args, out) != 0) {
-		FXMessageBox::error(this, MBOX_OK, "Statische Route", "Die Route konnte nicht gelöscht werden:\n\n%s", svcprobe::trimmed(out).c_str());
+		ice2kui::error(this, MBOX_OK, "Statische Route", "Die Route konnte nicht gelöscht werden:\n\n%s", svcprobe::trimmed(out).c_str());
 		return 1;
 	}
 	// Auch aus der gespeicherten Liste nehmen.
@@ -2135,19 +2136,19 @@ long RrasWindow::onFilter(FXObject* , FXSelector sel, void*) {
 	}
 	FilterListDialog dlg(this, iface, input, mine);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
 	std::vector<PacketFilter> result = others;
 	for (auto& f : dlg.result()) result.push_back(f);
 	FXString errorMsg;
 	if (!saveFilters(result, errorMsg))
-		FXMessageBox::error(this, MBOX_OK, input ? "Eingabefilter" : "Ausgabefilter", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, input ? "Eingabefilter" : "Ausgabefilter", "%s", errorMsg.text());
 	return 1;
 }
 
 // Neuer Peer (WireGuard), neues Clientzertifikat (OpenVPN) oder neuer
 // EAP-Benutzer (strongSwan).
 long RrasWindow::onNewClient(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Routing und RAS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
 	bool needPassword = state.vpnBackend == "strongswan";
 	FXString backendLabel = state.vpnBackend == "wireguard" ? "WireGuard" : state.vpnBackend == "openvpn" ? "OpenVPN" : "strongSwan";
 	NewVpnClientDialog dlg(this, backendLabel, needPassword);
@@ -2157,14 +2158,14 @@ long RrasWindow::onNewClient(FXObject*, FXSelector, void*) {
 	getApp()->beginWaitCursor();
 	bool ok = addVpnClient(state, dlg.name(), dlg.password(), config, errorMsg);
 	getApp()->endWaitCursor();
-	if (!ok) { FXMessageBox::error(this, MBOX_OK, "Neuer Client", "%s", errorMsg.text()); return 1; }
+	if (!ok) { ice2kui::error(this, MBOX_OK, "Neuer Client", "%s", errorMsg.text()); return 1; }
 	showFor(tree->getCurrentItem());
 	if (!config.empty()) {
 		std::string file = dlg.name() + (state.vpnBackend == "wireguard" ? ".conf" : ".ovpn");
 		ClientConfigDialog cfg(this, FXString("Clientkonfiguration für ") + dlg.name().c_str(), config, file);
 		cfg.execute(PLACEMENT_OWNER);
 	} else {
-		FXMessageBox::information(this, MBOX_OK, "Neuer Client", "Der Benutzer wurde angelegt.");
+		ice2kui::information(this, MBOX_OK, "Neuer Client", "Der Benutzer wurde angelegt.");
 	}
 	return 1;
 }
@@ -2172,11 +2173,11 @@ long RrasWindow::onNewClient(FXObject*, FXSelector, void*) {
 long RrasWindow::onDeleteClient(FXObject*, FXSelector, void*) {
 	int idx = itemList->getCurrentItem();
 	if (idx < 0 || idx >= (int)shownClients.size()) return 1;
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Client löschen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Client löschen",
 	        "Möchten Sie den Client \"%s\" wirklich löschen?", shownClients[idx].name.c_str()) != MBOX_CLICKED_YES) return 1;
 	FXString errorMsg;
 	if (!removeVpnClient(state, shownClients[idx], errorMsg))
-		FXMessageBox::error(this, MBOX_OK, "Client löschen", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Client löschen", "%s", errorMsg.text());
 	showFor(tree->getCurrentItem());
 	return 1;
 }
@@ -2193,7 +2194,7 @@ long RrasWindow::onExportClient(FXObject*, FXSelector, void*) {
 	if (state.vpnBackend == "openvpn") {
 		std::string config;
 		if (!buildOvpnProfile(state, c.name, config, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
 			return 1;
 		}
 		ClientConfigDialog dlg(this, FXString("Clientkonfiguration für ") + c.name.c_str(), config, c.name + ".ovpn");
@@ -2230,7 +2231,7 @@ long RrasWindow::onExportCa(FXObject*, FXSelector, void*) {
 	FXString target = FXFileDialog::getSaveFilename(this, "CA-Zertifikat exportieren", "ca.crt");
 	if (target.empty()) return 1;
 	FXString errorMsg;
-	if (!exportFileAsRoot(path, target, errorMsg)) FXMessageBox::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
+	if (!exportFileAsRoot(path, target, errorMsg)) ice2kui::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
 	return 1;
 }
 
@@ -2241,7 +2242,7 @@ long RrasWindow::onExportServer(FXObject*, FXSelector, void*) {
 	FXString target = FXFileDialog::getSaveFilename(this, "Serverzertifikat exportieren", "server.crt");
 	if (target.empty()) return 1;
 	FXString errorMsg;
-	if (!exportFileAsRoot(path, target, errorMsg)) FXMessageBox::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
+	if (!exportFileAsRoot(path, target, errorMsg)) ice2kui::error(this, MBOX_OK, "Exportieren", "%s", errorMsg.text());
 	return 1;
 }
 
@@ -2251,7 +2252,7 @@ long RrasWindow::onRefresh(FXObject*, FXSelector, void*) {
 }
 
 long RrasWindow::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Info",
+	ice2kui::information(this, MBOX_OK, "Info",
 		"Routing und RAS (ice2k)\n\n"
 		"Nachbau des Snap-Ins von Windows 2000 Server.\n"
 		"Umgesetzt: Serverstatus sowie Aktivieren/Deaktivieren der IP-Weiterleitung\n"
@@ -2271,7 +2272,7 @@ int main(int argc, char* argv[]) {
 	RrasWindow* win = new RrasWindow(&application);
 	application.create();
 	if (!g_haveRoot)
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\nDer Zustand wird angezeigt, kann aber nicht geändert werden.");
 	return application.run();
 }

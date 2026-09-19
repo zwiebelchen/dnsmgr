@@ -23,6 +23,7 @@
 #include <sys/wait.h>
 #include <ctype.h>
 #include "../common/svcprobe/svcprobe.h"
+#include "../common/ui/msgbox.h"
 
 FXApp* app;
 
@@ -1273,7 +1274,7 @@ long DnsManager::onTreeRightClick(FXObject*, FXSelector, void* ptr) {
 
 long DnsManager::onNewZone(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte",
 			"Ohne Root-Rechte kann keine neue Zone angelegt werden.\n"
 			"Starte den DNS-Manager neu und gib dein Passwort ein.");
 		return 1;
@@ -1289,7 +1290,7 @@ long DnsManager::onNewZone(FXObject*, FXSelector, void*) {
 
 	for (auto& z : zones) {
 		if (z.name == zoneName) {
-			FXMessageBox::error(this, MBOX_OK, "Zone existiert bereits",
+			ice2kui::error(this, MBOX_OK, "Zone existiert bereits",
 				"Die Zone \"%s\" ist schon vorhanden.", zoneName.text());
 			return 1;
 		}
@@ -1339,12 +1340,12 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 	ZoneInfo z = zones[contextZoneIdx];
 
 	if (z.file.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei",
+		ice2kui::error(this, MBOX_OK, "Keine Zonendatei",
 			"Für diese Zone ist keine Zonendatei bekannt (Demo-Modus?).");
 		return 1;
 	}
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte",
 			"Ohne Root-Rechte kann kein Host angelegt werden.");
 		return 1;
 	}
@@ -1360,11 +1361,11 @@ long DnsManager::onNewCname(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
 	if (z.file.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Alias angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Alias angelegt werden.");
 		return 1;
 	}
 	NewAliasDialog dlg(this, this, contextZoneIdx, z.name);
@@ -1376,11 +1377,11 @@ long DnsManager::onNewMx(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
 	if (z.file.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Mailserver angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Mailserver angelegt werden.");
 		return 1;
 	}
 	NewMxDialog dlg(this, this, contextZoneIdx, z.name);
@@ -1392,11 +1393,11 @@ long DnsManager::onNewPtr(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
 	if (z.file.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Zeiger angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Zeiger angelegt werden.");
 		return 1;
 	}
 	// Netzwerk-Praefix aus dem Zonennamen ableiten: "c.b.a.in-addr.arpa" -> "a.b.c"
@@ -1419,11 +1420,11 @@ long DnsManager::onNewOther(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
 	if (z.file.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
+		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Datensatz angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Datensatz angelegt werden.");
 		return 1;
 	}
 
@@ -1440,15 +1441,15 @@ long DnsManager::onNewOther(FXObject*, FXSelector, void*) {
 		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 		FXString name = dlg.getValue(0).trim();
 		FXString target = dlg.getValue(1).trim();
-		if (target.empty()) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte einen Nameserver angeben."); return 1; }
+		if (target.empty()) { ice2kui::error(this, MBOX_OK, "Fehler", "Bitte einen Nameserver angeben."); return 1; }
 		if (target[target.length()-1] != '.') target += ".";
 		FXString rname = name.empty() ? FXString("@") : name;
 		FXString fullLine = rname + "\tIN\tNS\t" + target;
 		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
 			statuslbl->setText("Namenserver " + target + " in Zone " + zoneName + " angelegt.");
-			FXMessageBox::information(this, MBOX_OK, "Neuer Namenserver",
+			ice2kui::information(this, MBOX_OK, "Neuer Namenserver",
 				"Der Namenserverdatensatz für \"%s\" wurde erfolgreich erstellt.", target.text());
-		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+		} else ice2kui::error(this, MBOX_OK, "Fehler", "%s", err.text());
 
 	} else if (sel == 1) { // Text (TXT)
 		GenericPropsDialog dlg(this, "Neuer Textdatensatz", "Neuer Textdatensatz in Zone: " + zoneName,
@@ -1461,9 +1462,9 @@ long DnsManager::onNewOther(FXObject*, FXSelector, void*) {
 		FXString fullLine = rname + "\tIN\tTXT\t\"" + text + "\"";
 		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
 			statuslbl->setText("Textdatensatz in Zone " + zoneName + " angelegt.");
-			FXMessageBox::information(this, MBOX_OK, "Neuer Textdatensatz",
+			ice2kui::information(this, MBOX_OK, "Neuer Textdatensatz",
 				"Der Textdatensatz für \"%s\" wurde erfolgreich erstellt.", rname.text());
-		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+		} else ice2kui::error(this, MBOX_OK, "Fehler", "%s", err.text());
 
 	} else if (sel == 2) { // Dienst (SRV)
 		GenericPropsDialog dlg(this, "Neuer Dienstdatensatz", "Neuer Dienstdatensatz in Zone: " + zoneName,
@@ -1476,16 +1477,16 @@ long DnsManager::onNewOther(FXObject*, FXSelector, void*) {
 		FXString port = dlg.getValue(3).trim();
 		FXString target = dlg.getValue(4).trim();
 		if (svc.empty() || target.empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte Dienst und Zielhost angeben.");
+			ice2kui::error(this, MBOX_OK, "Fehler", "Bitte Dienst und Zielhost angeben.");
 			return 1;
 		}
 		if (target[target.length()-1] != '.') target += ".";
 		FXString fullLine = svc + "\tIN\tSRV\t" + prio + "\t" + weight + "\t" + port + "\t" + target;
 		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
 			statuslbl->setText("Dienstdatensatz " + svc + " in Zone " + zoneName + " angelegt.");
-			FXMessageBox::information(this, MBOX_OK, "Neuer Dienstdatensatz",
+			ice2kui::information(this, MBOX_OK, "Neuer Dienstdatensatz",
 				"Der Dienstdatensatz für \"%s\" wurde erfolgreich erstellt.", svc.text());
-		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+		} else ice2kui::error(this, MBOX_OK, "Fehler", "%s", err.text());
 
 	} else if (sel == 3) { // IPv6-Host (AAAA)
 		GenericPropsDialog dlg(this, "Neuer IPv6-Host", "Neuer IPv6-Host in Zone: " + zoneName,
@@ -1494,14 +1495,14 @@ long DnsManager::onNewOther(FXObject*, FXSelector, void*) {
 		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 		FXString name = dlg.getValue(0).trim();
 		FXString ip6 = dlg.getValue(1).trim();
-		if (ip6.empty()) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte eine IPv6-Adresse angeben."); return 1; }
+		if (ip6.empty()) { ice2kui::error(this, MBOX_OK, "Fehler", "Bitte eine IPv6-Adresse angeben."); return 1; }
 		FXString rname = name.empty() ? FXString("@") : name;
 		FXString fullLine = rname + "\tIN\tAAAA\t" + ip6;
 		if (appendZoneRecord(contextZoneIdx, fullLine, err)) {
 			statuslbl->setText("IPv6-Host " + rname + " (" + ip6 + ") in Zone " + zoneName + " angelegt.");
-			FXMessageBox::information(this, MBOX_OK, "Neuer IPv6-Host",
+			ice2kui::information(this, MBOX_OK, "Neuer IPv6-Host",
 				"Der IPv6-Hostdatensatz für \"%s\" wurde erfolgreich erstellt.", rname.text());
-		} else FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.text());
+		} else ice2kui::error(this, MBOX_OK, "Fehler", "%s", err.text());
 	}
 	return 1;
 }
@@ -1678,16 +1679,16 @@ long NewHostDialog::onAddHost(FXObject*, FXSelector, void*) {
 	FXString host = hostField->getText().trim();
 	FXString ip = ip1->getText() + "." + ip2->getText() + "." + ip3->getText() + "." + ip4->getText();
 	if (host.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Name fehlt", "Bitte einen Hostnamen eingeben.");
+		ice2kui::error(this, MBOX_OK, "Name fehlt", "Bitte einen Hostnamen eingeben.");
 		return 1;
 	}
 	FXString errorMsg;
 	if (mgr->createHostRecord(zoneIdx, host, ip, ptrCheck->getCheck(), errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neuer Host",
+		ice2kui::information(this, MBOX_OK, "Neuer Host",
 			"Der Hostdatensatz für \"%s\" wurde erfolgreich erstellt.", host.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1696,16 +1697,16 @@ long NewAliasDialog::onAddAlias(FXObject*, FXSelector, void*) {
 	FXString alias = aliasField->getText().trim();
 	FXString target = targetField->getText().trim();
 	if (target.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Zielhost fehlt", "Bitte einen Zielhost (FQDN) eingeben.");
+		ice2kui::error(this, MBOX_OK, "Zielhost fehlt", "Bitte einen Zielhost (FQDN) eingeben.");
 		return 1;
 	}
 	FXString errorMsg;
 	if (mgr->createCnameRecord(zoneIdx, alias, target, errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neuer Alias",
+		ice2kui::information(this, MBOX_OK, "Neuer Alias",
 			"Der Aliasdatensatz für \"%s\" wurde erfolgreich erstellt.", alias.empty() ? "@" : alias.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1715,16 +1716,16 @@ long NewMxDialog::onAddMx(FXObject*, FXSelector, void*) {
 	FXString target = targetField->getText().trim();
 	int prio = atoi(prioField->getText().text());
 	if (target.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Mailserver fehlt", "Bitte einen Mailserver (FQDN) eingeben.");
+		ice2kui::error(this, MBOX_OK, "Mailserver fehlt", "Bitte einen Mailserver (FQDN) eingeben.");
 		return 1;
 	}
 	FXString errorMsg;
 	if (mgr->createMxRecord(zoneIdx, name, target, prio, errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neuer Mailserver",
+		ice2kui::information(this, MBOX_OK, "Neuer Mailserver",
 			"Der Mailserverdatensatz für \"%s\" wurde erfolgreich erstellt.", target.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1733,20 +1734,20 @@ long NewPtrDialog::onAddPtr(FXObject*, FXSelector, void*) {
 	FXString lastOctet = lastOctetField->getText().trim();
 	FXString host = hostField->getText().trim();
 	if (lastOctet.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "IP-Nummer fehlt", "Bitte die Host-IP-Nummer eingeben.");
+		ice2kui::error(this, MBOX_OK, "IP-Nummer fehlt", "Bitte die Host-IP-Nummer eingeben.");
 		return 1;
 	}
 	if (host.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "Hostname fehlt", "Bitte einen Hostnamen (FQDN) eingeben.");
+		ice2kui::error(this, MBOX_OK, "Hostname fehlt", "Bitte einen Hostnamen (FQDN) eingeben.");
 		return 1;
 	}
 	FXString errorMsg;
 	if (mgr->createPtrRecord(zoneIdx, lastOctet, host, errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neuer Zeiger",
+		ice2kui::information(this, MBOX_OK, "Neuer Zeiger",
 			"Der Zeigerdatensatz für \"%s\" wurde erfolgreich erstellt.", lastOctet.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1999,12 +2000,12 @@ long DnsManager::onDeleteRecord(FXObject*, FXSelector, void*) {
 	ZoneInfo z = zones[zoneIdx];
 	if (z.file.empty()) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
 		return 1;
 	}
 
 	FXString hostDisplay = rr.rawName;
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
 	        "%s-Eintrag \"%s\" wirklich löschen?", rr.type.text(), hostDisplay.text()) != MBOX_CLICKED_YES) {
 		return 1;
 	}
@@ -2100,10 +2101,10 @@ long DnsManager::onDeleteZone(FXObject*, FXSelector, void*) {
 	ZoneInfo z = zones[contextZoneIdx];
 
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Zone gelöscht werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Zone gelöscht werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Zone löschen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Zone löschen",
 	        "Zone \"%s\" wirklich löschen? Die Zonendatei wird ebenfalls entfernt.", z.name.text())
 	        != MBOX_CLICKED_YES) {
 		return 1;
@@ -2146,7 +2147,7 @@ long DnsManager::onRefresh(FXObject*, FXSelector, void*) {
 }
 
 long DnsManager::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Über DNS",
+	ice2kui::information(this, MBOX_OK, "Über DNS",
 		"DNS-Manager für ice2k\n\n"
 		"Ein Nachbau des Windows 2000 DNS-Manager-Snapins.\n"
 		"Liest/schreibt BIND9-Zonen aus /etc/bind/.");
@@ -2162,7 +2163,7 @@ bool DnsManager::checkService() {
 	statuslbl->setText("Der DNS-Dienst ist nicht erreichbar -- Änderungen werden nicht wirksam.");
 	if (!serviceErrorShown && shown()) {
 		serviceErrorShown = true;
-		FXMessageBox::error(this, MBOX_OK, "DNS-Manager", "%s", svcprobe::message("Der DNS-Dienst (BIND)", "named", r.detail).c_str());
+		ice2kui::error(this, MBOX_OK, "DNS-Manager", "%s", svcprobe::message("Der DNS-Dienst (BIND)", "named", r.detail).c_str());
 	}
 	return false;
 }
@@ -2195,7 +2196,7 @@ int main(int argc, char* argv[]) {
 	win->show(PLACEMENT_SCREEN);
 
 	if (!g_haveRoot) {
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\n"
 			"Der DNS-Manager kann bestehende Zonen weiterhin anzeigen, aber keine\n"
 			"neuen Zonen/Hosts anlegen, keine Einträge ändern und keine Demo-Zone\n"

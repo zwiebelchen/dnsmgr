@@ -34,6 +34,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include "../common/ui/msgbox.h"
 
 FXApp* app;
 static bool g_haveRoot = false;
@@ -1198,15 +1199,15 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 
 	} else if (cur == PAGE_DOMAINDATA) {
 		if (dnsNameField->getText().trim().empty() || netbiosField->getText().trim().empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Angaben fehlen", "Bitte DNS-Namen und NetBIOS-Namen der Domäne angeben.");
+			ice2kui::error(this, MBOX_OK, "Angaben fehlen", "Bitte DNS-Namen und NetBIOS-Namen der Domäne angeben.");
 			return 1;
 		}
 		if (adminPwField->getText().empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Kennwort fehlt", "Bitte ein Administrator-Kennwort angeben.");
+			ice2kui::error(this, MBOX_OK, "Kennwort fehlt", "Bitte ein Administrator-Kennwort angeben.");
 			return 1;
 		}
 		if (adminPwField->getText() != adminPwConfirmField->getText()) {
-			FXMessageBox::error(this, MBOX_OK, "Kennwörter stimmen nicht überein", "Die beiden eingegebenen Kennwörter sind unterschiedlich.");
+			ice2kui::error(this, MBOX_OK, "Kennwörter stimmen nicht überein", "Die beiden eingegebenen Kennwörter sind unterschiedlich.");
 			return 1;
 		}
 		{
@@ -1225,7 +1226,7 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 			}
 			int classes = (hasLower ? 1 : 0) + (hasUpper ? 1 : 0) + (hasDigit ? 1 : 0) + (hasSpecial ? 1 : 0);
 			if (pw.length() < 7 || classes < 3) {
-				FXMessageBox::error(this, MBOX_OK, "Kennwort zu einfach",
+				ice2kui::error(this, MBOX_OK, "Kennwort zu einfach",
 					"Das Administrator-Kennwort muss mindestens 7 Zeichen lang sein und\n"
 					"mindestens 3 der 4 folgenden Kategorien enthalten: Kleinbuchstaben,\n"
 					"Großbuchstaben, Ziffern, Sonderzeichen.\n\n"
@@ -1254,14 +1255,14 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 
 	} else if (cur == PAGE_SUMMARY) {
 		if (!g_haveRoot) {
-			FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann Active Directory nicht installiert werden.");
+			ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann Active Directory nicht installiert werden.");
 			return 1;
 		}
 		std::vector<FXString> missing = findMissingPackages();
 		if (!missing.empty()) {
 			FXString list;
 			for (auto& p : missing) list += p + "\n";
-			if (FXMessageBox::question(this, MBOX_YES_NO, "Fehlende Pakete",
+			if (ice2kui::question(this, MBOX_YES_NO, "Fehlende Pakete",
 			        "Für Active Directory werden folgende Pakete benötigt, sind aber\n"
 			        "nicht installiert:\n\n%s\n"
 			        "Jetzt per apt installieren?", list.text()) != MBOX_CLICKED_YES) {
@@ -1293,7 +1294,7 @@ long DcPromoWizard::onNext(FXObject*, FXSelector, void*) {
 }
 
 long DcPromoWizard::onCancelBtn(FXObject*, FXSelector, void*) {
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Abbrechen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Abbrechen",
 	        "Assistent wirklich abbrechen? Bisher wurde noch nichts verändert.") == MBOX_CLICKED_YES) {
 		getApp()->exit(0);
 	}
@@ -1307,10 +1308,10 @@ long DcPromoWizard::onFinish(FXObject*, FXSelector, void*) {
 
 long DcPromoWizard::onMigrate(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann die Migration nicht durchgeführt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann die Migration nicht durchgeführt werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Windows-2000-Kompatibilität aufheben",
+	if (ice2kui::question(this, MBOX_YES_NO, "Windows-2000-Kompatibilität aufheben",
 	        "Die Domäne \"%s\" wird dauerhaft auf die moderne AD-Integration (BIND9-DLZ,\n"
 	        "Funktionsebene 2003) umgestellt. Dieser Schritt lässt sich nicht rückgängig\n"
 	        "machen. Fortfahren?", domainState.realm.text()) != MBOX_CLICKED_YES) {
@@ -1320,7 +1321,7 @@ long DcPromoWizard::onMigrate(FXObject*, FXSelector, void*) {
 	if (!missing.empty()) {
 		FXString list;
 		for (auto& p : missing) list += p + "\n";
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Fehlende Pakete",
+		if (ice2kui::question(this, MBOX_YES_NO, "Fehlende Pakete",
 		        "Für die Migration werden folgende Pakete benötigt, sind aber\n"
 		        "nicht installiert:\n\n%s\n"
 		        "Jetzt per apt installieren?", list.text()) != MBOX_CLICKED_YES) {
@@ -1346,10 +1347,10 @@ long DcPromoWizard::onMigrate(FXObject*, FXSelector, void*) {
 
 long DcPromoWizard::onRemoveAD(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann Active Directory nicht entfernt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann Active Directory nicht entfernt werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Active Directory entfernen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Active Directory entfernen",
 	        "Die Domäne \"%s\" wird komplett entfernt. Da nur der Fall \"einziger\n"
 	        "Domänencontroller einer eigenen Domäne\" unterstützt wird, bedeutet das:\n"
 	        "ALLE Domänenkonten, -gruppen und -einstellungen gehen dabei verloren.\n\n"
@@ -1405,7 +1406,7 @@ long DcPromoWizard::onPollTimer(FXObject*, FXSelector, void*) {
 	logSet(g_workerLog.c_str());
 	if (!g_workerResult) {
 		logAppend(("\nFEHLER: " + std::string(g_workerErrorMsg.text()) + "\n").c_str());
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", g_workerErrorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", g_workerErrorMsg.text());
 	} else {
 		logAppend("\nErfolgreich abgeschlossen.\n");
 		domainState = detectDomainState(); // aktualisiert sich nach Migration UND nach Entfernen
@@ -1432,7 +1433,7 @@ int main(int argc, char* argv[]) {
 	win->show(PLACEMENT_SCREEN);
 
 	if (!g_haveRoot) {
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\n"
 			"Der Assistent kann den aktuellen Status anzeigen, aber keine\n"
 			"Änderungen vornehmen.");

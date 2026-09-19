@@ -9,7 +9,7 @@ LDFLAGS = `fox-config --libs`
 PREFIX = /usr/local
 
 ICONS = res/*/*.gif res/*/*.png res/*.gif
-SOURCES = dfs.cpp
+SOURCES = dfs.cpp ../common/ui/msgicons.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 DEPS = $(OBJECTS:.o=.d)
 

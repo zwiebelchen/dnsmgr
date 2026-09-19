@@ -130,6 +130,7 @@ static PolicyState determinePolicyState(const AdmPolicy& pol, const std::string&
 #include <ctime>
 #include <sstream>
 #include <algorithm>
+#include "../common/ui/msgbox.h"
 
 FXApp* app;
 static bool g_haveRoot = false;
@@ -777,7 +778,7 @@ static bool downloadAndExtractAdmFiles(FXWindow* owner, std::string& log, FXStri
 
 	if (!tryAutoDownloadMsi(msiPath, log)) {
 		log += "Automatischer Download nicht erfolgreich.\n";
-		FXMessageBox::information(owner, MBOX_OK, "Manueller Download nötig",
+		ice2kui::information(owner, MBOX_OK, "Manueller Download nötig",
 			"Der automatische Download hat nicht funktioniert.\n\n"
 			"Bitte lade das Paket \"2000admsetup.msi\" manuell von\n"
 			"https://www.microsoft.com/en-us/download/details.aspx?id=18664\n"
@@ -831,7 +832,7 @@ static bool ensureLdapTools(FXWindow* owner) {
 	for (auto* t : tools) if (access(t, X_OK) != 0) complete = false;
 	if (complete) { g_ldapToolsOk = true; return true; }
 
-	if (FXMessageBox::question(owner, MBOX_YES_NO, "Fehlendes Paket",
+	if (ice2kui::question(owner, MBOX_YES_NO, "Fehlendes Paket",
 		"Für diese Änderung werden die LDAP-Werkzeuge (ldapadd, ldapmodify,\n"
 		"ldapsearch) benötigt. Sie stecken im Paket \"ldap-utils\", das auf\n"
 		"diesem System noch nicht installiert ist.\n\n"
@@ -850,7 +851,7 @@ static bool ensureLdapTools(FXWindow* owner) {
 	complete = true;
 	for (auto* t : tools) if (access(t, X_OK) != 0) complete = false;
 	if (rc != 0 || !complete) {
-		FXMessageBox::error(owner, MBOX_OK, "Installation fehlgeschlagen",
+		ice2kui::error(owner, MBOX_OK, "Installation fehlgeschlagen",
 			"Das Paket \"ldap-utils\" konnte nicht installiert werden.\n\n%s",
 			out.empty() ? "apt-get meldete einen Fehler." : out.c_str());
 		return false;
@@ -2559,13 +2560,13 @@ public:
 			int idx = resolveName(n);
 			if (idx < 0 && quiet) return false;
 			if (idx == -1) {
-				FXMessageBox::error(this, MBOX_OK, "Name nicht gefunden",
+				ice2kui::error(this, MBOX_OK, "Name nicht gefunden",
 					"Der Name \"%s\" wurde nicht gefunden.\n\n"
 					"Überprüfen Sie die Schreibweise, oder wählen Sie das Objekt in der Liste aus.", n.text());
 				return false;
 			}
 			if (idx == -2) {
-				FXMessageBox::error(this, MBOX_OK, "Mehrere Namen gefunden",
+				ice2kui::error(this, MBOX_OK, "Mehrere Namen gefunden",
 					"Der Name \"%s\" passt auf mehrere Objekte.\n\n"
 					"Geben Sie den Namen genauer ein, oder wählen Sie das Objekt in der Liste aus.", n.text());
 				return false;
@@ -3077,7 +3078,7 @@ public:
 		FXString errorMsg;
 		allGroups = listAllGroupsDetailed();
 		if (!getUserGroupDns(accountName, origMemberDns, origPrimaryDn, errorMsg)) {
-			FXMessageBox::error(owner, MBOX_OK, "Fehler", "Die Gruppenmitgliedschaften konnten nicht gelesen werden.\n\n%s", errorMsg.text());
+			ice2kui::error(owner, MBOX_OK, "Fehler", "Die Gruppenmitgliedschaften konnten nicht gelesen werden.\n\n%s", errorMsg.text());
 		}
 		memberDns = origMemberDns;
 		primaryDn = origPrimaryDn;
@@ -3476,7 +3477,7 @@ public:
 		getApp()->endWaitCursor();
 		GroupPickerDialog dlg(this, domain.realm, users, "Benutzer auswählen", resico_user);
 		if (!dlg.execute(PLACEMENT_OWNER) || dlg.getResult().empty()) return 1;
-		if (dlg.getResult().size() > 1) { FXMessageBox::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden."); return 1; }
+		if (dlg.getResult().size() > 1) { ice2kui::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden."); return 1; }
 		managerDn = users[dlg.getResult()[0]].dn;
 		managerName->setText(dnLeafName(managerDn));
 		return 1;
@@ -3611,13 +3612,13 @@ public:
 		if (sel.empty()) return 1;
 		for (int i : sel) {
 			if (sameDn(memberDns[i], primaryDn)) {
-				FXMessageBox::error(this, MBOX_OK, "Active Directory",
+				ice2kui::error(this, MBOX_OK, "Active Directory",
 					"Die primäre Gruppe kann nicht entfernt werden.\n\n"
 					"Legen Sie zuerst eine andere Gruppe als primäre Gruppe fest.");
 				return 1;
 			}
 		}
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Active Directory",
+		if (ice2kui::question(this, MBOX_YES_NO, "Active Directory",
 		        "Möchten Sie den Benutzer wirklich aus den ausgewählten Gruppen entfernen?") != MBOX_CLICKED_YES) return 1;
 		for (auto it = sel.rbegin(); it != sel.rend(); ++it) memberDns.erase(memberDns.begin() + *it);
 		reloadMemberList();
@@ -3697,7 +3698,7 @@ public:
 			ldif = "dn: " + std::string(userFullDN.text()) + "\nchangetype: modify\n" + ldif;
 			std::string log;
 			if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+				ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 				return false;
 			}
 			for (auto& f : attrFields) { FXString v = fieldValue(f); v.trim(); if (f.field) f.field->setText(v); f.orig = v; }
@@ -3713,7 +3714,7 @@ public:
 
 		// Konto -- Rueckfragen wie dsprop.dll (Texte 1035, 1031)
 		if (mustChangeCheck->getCheck() && cannotChangeCheck->getCheck()) {
-			FXMessageBox::error(this, MBOX_OK, "Active Directory",
+			ice2kui::error(this, MBOX_OK, "Active Directory",
 				"Die zwei Optionen 'Benutzer muss Kennwort bei der nächsten Anmeldung ändern' und\n"
 				"'Benutzer kann Kennwort nicht ändern' dürfen nicht zusammen für denselben Benutzer\n"
 				"ausgewählt werden.");
@@ -3725,13 +3726,13 @@ public:
 			int rc = runAsRootCaptured({ FXString("samba-tool"), FXString("dsacl"), FXString(cannotChangeCheck->getCheck() ? "set" : "delete"),
 			                             FXString(("--objectdn=" + std::string(userFullDN.text())).c_str()), FXString(("--sddl=" + sddl).c_str()) }, out);
 			if (rc != 0) {
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", condenseSambaToolError(out).c_str());
+				ice2kui::error(this, MBOX_OK, "Fehler", "%s", condenseSambaToolError(out).c_str());
 				return false;
 			}
 			origCannotChange = cannotChangeCheck->getCheck();
 		}
 		if (mustChangeCheck->getCheck() && (wantedUac() & 0x10000)) {
-			FXMessageBox::information(this, MBOX_OK, "Active Directory",
+			ice2kui::information(this, MBOX_OK, "Active Directory",
 				"Sie haben die Option \"Kennwort läuft nie ab\" ausgewählt. Der Benutzer muss daher sein\n"
 				"Kennwort bei der nächsten Anmeldung nicht ändern.");
 			mustChangeCheck->setCheck(FALSE);
@@ -3749,7 +3750,7 @@ public:
 		if (wantedExpiresText() != origExpiresText) {
 			std::string ft = "0";
 			if (!wantedExpiresText().empty() && !dateToFiletime(wantedExpiresText(), ft)) {
-				FXMessageBox::error(this, MBOX_OK, "Active Directory", "Bitte ein gültiges Ablaufdatum im Format TT.MM.JJJJ angeben.");
+				ice2kui::error(this, MBOX_OK, "Active Directory", "Bitte ein gültiges Ablaufdatum im Format TT.MM.JJJJ angeben.");
 				return false;
 			}
 			acct += "replace: accountExpires\naccountExpires: " + ft + "\n-\n";
@@ -3757,7 +3758,7 @@ public:
 		if (!acct.empty()) {
 			std::string log;
 			if (!runLdapChange(this, domain.realm, "dn: " + std::string(userFullDN.text()) + "\nchangetype: modify\n" + acct, false, log, errorMsg)) {
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+				ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 				return false;
 			}
 			origUac = wantedUac();
@@ -3776,7 +3777,7 @@ public:
 			if (containsDn(origMemberDns, dn)) continue;
 			GroupEntry g = groupForDn(dn);
 			if (!addGroupMember(this, g.sam, accountName, errorMsg)) {
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "\"%s\" konnte nicht zur Gruppe \"%s\" hinzugefügt werden.\n\n%s",
+				ice2kui::error(this, MBOX_OK, "Fehler", "\"%s\" konnte nicht zur Gruppe \"%s\" hinzugefügt werden.\n\n%s",
 				                    accountName.text(), g.cn.text(), errorMsg.text());
 				resyncMembership();
 				return false;
@@ -3786,7 +3787,7 @@ public:
 		if (!sameDn(primaryDn, origPrimaryDn)) {
 			GroupEntry g = groupForDn(primaryDn);
 			if (!setUserPrimaryGroup(this, accountName, g.sam, errorMsg)) {
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "Die primäre Gruppe konnte nicht auf \"%s\" gesetzt werden.\n\n%s",
+				ice2kui::error(this, MBOX_OK, "Fehler", "Die primäre Gruppe konnte nicht auf \"%s\" gesetzt werden.\n\n%s",
 				                    g.cn.text(), errorMsg.text());
 				resyncMembership();
 				return false;
@@ -3800,7 +3801,7 @@ public:
 			// entfernt, jetzt ebenfalls entfernen.
 			GroupEntry g = groupForDn(dn);
 			if (!removeGroupMember(this, g.sam, accountName, errorMsg)) {
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "\"%s\" konnte nicht aus der Gruppe \"%s\" entfernt werden.\n\n%s",
+				ice2kui::error(this, MBOX_OK, "Fehler", "\"%s\" konnte nicht aus der Gruppe \"%s\" entfernt werden.\n\n%s",
 				                    accountName.text(), g.cn.text(), errorMsg.text());
 				resyncMembership();
 				return false;
@@ -4429,13 +4430,13 @@ public:
 		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 		SoftwarePackageParams params = dlg.getParams();
 		if (params.localMsiPath.empty() || params.msiUncPath.empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
+			ice2kui::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
 			return 1;
 		}
 		std::string log;
 		FXString errorMsg;
 		if (!addSoftwarePackage(credOwner, domain, gpoGuid, params, log, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
+			ice2kui::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
 			return 1;
 		}
 		reload();
@@ -4453,14 +4454,14 @@ public:
 		// nach der Software auf den Clients hinfaellig -- dann geht es
 		// nur noch darum, den Auftrag selbst loszuwerden.
 		if (pkgs[idx].pendingRemoval) {
-			if (FXMessageBox::question(this, MBOX_YES_NO, "Eintrag löschen",
+			if (ice2kui::question(this, MBOX_YES_NO, "Eintrag löschen",
 				"\"%s\" ist bereits zur Deinstallation vorgemerkt.\n\n"
 				"Den Auftrag jetzt endgültig aus der Gruppenrichtlinie löschen?\n"
 				"Clients, die ihn noch nicht ausgeführt haben, behalten die\n"
 				"Anwendung dann.", pkgs[idx].displayName.c_str()) != MBOX_CLICKED_YES) return 1;
 			FXString errorMsg;
 			if (!deleteSoftwarePackage(credOwner, domain, gpoGuid, isMachine, pkgs[idx], errorMsg))
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+				ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 			reload();
 			return 1;
 		}
@@ -4476,7 +4477,7 @@ public:
 		else
 			ok = deleteSoftwarePackage(credOwner, domain, gpoGuid, isMachine, pkgs[idx], errorMsg);
 
-		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		if (!ok) ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 		reload();
 		return 1;
 	}
@@ -5704,7 +5705,7 @@ static bool saveGptTmpl(FXWindow* owner, const DomainInfo& domain, const std::st
 
 	if (accountPolicyTouched && gpoLinkedToDomainRoot(domain, guid)) {
 		FXString note;
-		if (!recomputeDomainAccountPolicy(domain, note)) FXMessageBox::warning(owner, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
+		if (!recomputeDomainAccountPolicy(domain, note)) ice2kui::warning(owner, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
 	}
 	return true;
 }
@@ -6194,7 +6195,7 @@ public:
 		if (e.inheritedAllow || e.inheritedDeny) {
 			// Wortlaut aclui.dll, Text 20.
 			FXString n = displayName(e.sid);
-			FXMessageBox::error(this, MBOX_OK, "Sicherheitseinstellungen",
+			ice2kui::error(this, MBOX_OK, "Sicherheitseinstellungen",
 				"\"%s\" kann nicht entfernt werden, da dieses Objekt übergeordnete Berechtigungen\n"
 				"übernimmt. Wenn Sie \"%s\" entfernen möchten, müssen Sie verhindern, dass diesem\n"
 				"Objekt Berechtigungen vererbt werden. Deaktivieren Sie die Option zur Übernahme\n"
@@ -6214,7 +6215,7 @@ public:
 	long onOk(FXObject*, FXSelector, void*) {
 		bool newDeny = false;
 		for (auto& e : entries) if (e.dirty && e.deny) newDeny = true;
-		if (newDeny && FXMessageBox::warning(this, MBOX_YES_NO, "Sicherheitseinstellungen",
+		if (newDeny && ice2kui::warning(this, MBOX_YES_NO, "Sicherheitseinstellungen",
 		        "Vorsicht! Zugriffsverweigerungen haben Vorrang vor Zugriffsgenehmigungen. Dies kann\n"
 		        "unbeabsichtigte Auswirkungen für die Gruppenmitgliedschaften haben.\n\n"
 		        "Möchten Sie den Vorgang fortsetzen?") != MBOX_CLICKED_YES) return 1;
@@ -6737,7 +6738,7 @@ public:
 	}
 	long onOk(FXObject*, FXSelector, void*) {
 		if (sid.empty() || trimStr(pathField->getText().text()).empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "Die angegebenen Gruppen- und/oder Pfadinformationen sind ungültig.\n"
+			ice2kui::error(this, MBOX_OK, "Fehler", "Die angegebenen Gruppen- und/oder Pfadinformationen sind ungültig.\n"
 			                                             "Sie müssen einen Wert für die Gruppe und den Pfad angegeben.");
 			return 1;
 		}
@@ -6897,7 +6898,7 @@ public:
 		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 		for (auto& t : policy.targets) {
 			if (lowerCopy(t.first) == lowerCopy(dlg.getSid())) {
-				FXMessageBox::error(this, MBOX_OK, "Fehler", "Es existiert bereits ein anderer Eintrag, der den Pfad der Gruppe %s angibt.",
+				ice2kui::error(this, MBOX_OK, "Fehler", "Es existiert bereits ein anderer Eintrag, der den Pfad der Gruppe %s angibt.",
 				                    accountTokenDisplay("*" + dlg.getSid(), *groups).text());
 				return 1;
 			}
@@ -6937,18 +6938,18 @@ public:
 			if (mode == MODE_BASIC) {
 				std::string path = trimStr(basicPath->getText().text());
 				if (path.empty()) {
-					FXMessageBox::error(this, MBOX_OK, "Fehler", "Sie müssen einen gültigen Pfad für den Zielort angeben.");
+					ice2kui::error(this, MBOX_OK, "Fehler", "Sie müssen einen gültigen Pfad für den Zielort angeben.");
 					return 1;
 				}
 				if (path.compare(0, 2, "\\\\") != 0 &&
-				    FXMessageBox::question(this, MBOX_YES_NO, "Warnung",
+				    ice2kui::question(this, MBOX_YES_NO, "Warnung",
 				        "Der Zielpfad ist kein UNC-Pfad.\n\nDie Ordnerumleitung wird fehlschlagen, falls dies kein\n"
 				        "gültiger, lokaler Pfad auf dem Client ist.\n\nSind Sie sicher, dass dieser Pfad verwendet werden soll?") != MBOX_CLICKED_YES)
 					return 1;
 				p.targets = { { "S-1-1-0", path } };
 			} else {
 				if (policy.targets.empty()) {
-					FXMessageBox::error(this, MBOX_OK, "Fehler", "Sie müssen einen gültigen Pfad für den Zielort angeben.");
+					ice2kui::error(this, MBOX_OK, "Fehler", "Sie müssen einen gültigen Pfad für den Zielort angeben.");
 					return 1;
 				}
 				p.flags |= FR_ADVANCED;
@@ -7051,7 +7052,7 @@ public:
 		std::string file = dlg.getFilename().text();
 		std::string base = file.substr(file.find_last_of('/') + 1);
 		if (file.compare(0, eventDir.size() + 1, eventDir + "/") != 0) {
-			if (FXMessageBox::question(this, MBOX_YES_NO, "Skripts",
+			if (ice2kui::question(this, MBOX_YES_NO, "Skripts",
 			        "Die Datei liegt nicht im Skriptordner dieses Gruppenrichtlinienobjekts.\n"
 			        "Soll sie dorthin kopiert werden?") != MBOX_CLICKED_YES) {
 				nameField->setText(file.c_str());
@@ -7059,7 +7060,7 @@ public:
 			}
 			std::string dest = eventDir + "/" + base;
 			if (runAsRoot({ FXString("cp"), FXString(file.c_str()), FXString(dest.c_str()) }) != 0) {
-				FXMessageBox::error(this, MBOX_OK, "Skripts", "Die Datei konnte nicht kopiert werden.");
+				ice2kui::error(this, MBOX_OK, "Skripts", "Die Datei konnte nicht kopiert werden.");
 				return 1;
 			}
 			inheritSysvolPermissions(eventDir, dest, false);
@@ -7205,13 +7206,13 @@ public:
 		sections[ev->section] = entries;
 		bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(path.c_str()) }) == 0;
 		FXString errorMsg;
-		if (!writeScriptsIni(path, sections, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return false; }
+		if (!writeScriptsIni(path, sections, errorMsg)) { ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return false; }
 		if (!existed) inheritSysvolPermissions(scriptsDir(domain, guid, ev->machine), path, false);
 		std::string gpoDn = "CN=" + guid + ",CN=Policies,CN=System," + std::string(domain.baseDN.text());
 		std::string log;
 		if (!ensureExtensionRegistered(this, domain.realm, gpoDn, ev->machine, GPSCR_CSE_GUID,
 		                               ev->machine ? GPSCR_TOOL_GUID_MACHINE : GPSCR_TOOL_GUID_USER, log, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 			return false;
 		}
 		origEntries = entries;
@@ -7851,12 +7852,12 @@ public:
 
 		std::string err;
 		FXString tmpPath = "/tmp/ice2k-regpol-tmp";
-		if (!writeRegPolFile(tmpPath.text(), entries, err)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", err.c_str()); return -1; }
+		if (!writeRegPolFile(tmpPath.text(), entries, err)) { ice2kui::error(this, MBOX_OK, "Fehler", "%s", err.c_str()); return -1; }
 		std::string branch = gpoBranchDir(domain, guid, hive == 0);
 		bool existed = runAsRoot({ FXString("test"), FXString("-f"), FXString(h.polPath.c_str()) }) == 0;
 		int rc = runAsRoot({ FXString("cp"), tmpPath, FXString(h.polPath.c_str()) });
 		runAsRoot({ FXString("rm"), FXString("-f"), tmpPath });
-		if (rc != 0) { FXMessageBox::error(this, MBOX_OK, "Fehler", "Konnte %s nicht schreiben.", h.polPath.c_str()); return -1; }
+		if (rc != 0) { ice2kui::error(this, MBOX_OK, "Fehler", "Konnte %s nicht schreiben.", h.polPath.c_str()); return -1; }
 		if (!existed) inheritSysvolPermissions(branch, h.polPath, false);
 
 		// Registry-Erweiterung eintragen und Version des Zweigs erhoehen.
@@ -7865,7 +7866,7 @@ public:
 		FXString errorMsg;
 		if (!ensureExtensionRegistered(this, domain.realm, gpoDn, hive == 0, REGISTRY_CSE_GUID,
 		                               hive == 0 ? REGISTRY_TOOL_GUID_MACHINE : REGISTRY_TOOL_GUID_USER, log, errorMsg))
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 
 		h.file = readRegPolAsRoot(h.polPath);
 		h.lookup = buildRegLookup(h.file);
@@ -7994,7 +7995,7 @@ public:
 		if (reg) {
 			p = normalizeRegistryPath(p);
 			if (p.empty()) {
-				FXMessageBox::error(this, MBOX_OK, "Schlüssel hinzufügen",
+				ice2kui::error(this, MBOX_OK, "Schlüssel hinzufügen",
 					"Der Pfad muss mit MACHINE, USERS oder CLASSES_ROOT beginnen\n(HKLM, HKU und HKCR werden umgesetzt).");
 				return 1;
 			}
@@ -8002,7 +8003,7 @@ public:
 			std::replace(p.begin(), p.end(), '/', '\\');
 			while (p.size() > 3 && p.back() == '\\') p.pop_back();
 			if (p.empty() || p.find('"') != std::string::npos) {
-				FXMessageBox::error(this, MBOX_OK, "Datei hinzufügen", "Bitte einen gültigen Pfad ohne Anführungszeichen angeben.");
+				ice2kui::error(this, MBOX_OK, "Datei hinzufügen", "Bitte einen gültigen Pfad ohne Anführungszeichen angeben.");
 				return 1;
 			}
 		}
@@ -8037,7 +8038,7 @@ public:
 	long onDeleteObject(FXObject*, FXSelector, void*) {
 		int row = list->getCurrentItem();
 		if (row < 0 || row >= (int)rowObjects.size() || !requireRoot()) return 1;
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
+		if (ice2kui::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
 		        "Möchten Sie \"%s\" wirklich aus der Richtlinie löschen?", rowObjects[row].path.c_str()) != MBOX_CLICKED_YES) return 1;
 		inf = loadTemplate();
 		storeObjectPolicy(inf, shownObjectKind(), rowObjects[row], true);
@@ -8060,7 +8061,7 @@ public:
 		getApp()->beginWaitCursor();
 		bool ok = setPackageDeployment(this, domain, guid.c_str(), machine, rowPackages[row], dlg.publishedWanted(), log, errorMsg);
 		getApp()->endWaitCursor();
-		if (!ok) FXMessageBox::error(this, MBOX_OK, "Softwareinstallation", "%s", errorMsg.text());
+		if (!ok) ice2kui::error(this, MBOX_OK, "Softwareinstallation", "%s", errorMsg.text());
 		reselect(row);
 	}
 
@@ -8111,7 +8112,7 @@ public:
 		bool ok = opts.localMode ? saveLocalSecurityTemplate(inf, errorMsg)
 		                         : saveGptTmpl(this, domain, guid, inf, accountPolicy, errorMsg);
 		getApp()->endWaitCursor();
-		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		if (!ok) ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 		return ok;
 	}
 
@@ -8122,14 +8123,14 @@ public:
 
 	bool requireRoot() {
 		if (opts.readOnly) {
-			FXMessageBox::information(this, MBOX_OK, opts.windowTitle.text(), "%s",
+			ice2kui::information(this, MBOX_OK, opts.windowTitle.text(), "%s",
 				opts.readOnlyNote.empty()
 					? "Diese Einstellungen können hier nicht geändert werden."
 					: opts.readOnlyNote.text());
 			return false;
 		}
 		if (g_haveRoot) return true;
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Richtlinien geändert werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Richtlinien geändert werden.");
 		return false;
 	}
 
@@ -8225,7 +8226,7 @@ public:
 		int row = list->getCurrentItem();
 		if (row < 0 || row >= (int)rowGroups.size() || !requireRoot()) return 1;
 		std::string g = rowGroups[row];
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
+		if (ice2kui::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
 		        "Möchten Sie die Gruppe \"%s\" wirklich aus den eingeschränkten Gruppen löschen?",
 		        accountTokenDisplay(g, principals).text()) != MBOX_CLICKED_YES) return 1;
 		inf = loadTemplate();
@@ -8271,7 +8272,7 @@ public:
 		getApp()->beginWaitCursor();
 		bool ok = saveRedirPolicies(this, domain, guid, policies, errorMsg);
 		getApp()->endWaitCursor();
-		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "Die Umleitungsinformationen konnten nicht in der Konfigurationsdatei gespeichert werden.\n\n%s", errorMsg.text());
+		if (!ok) ice2kui::error(this, MBOX_OK, "Fehler", "Die Umleitungsinformationen konnten nicht in der Konfigurationsdatei gespeichert werden.\n\n%s", errorMsg.text());
 		showNode(shownItem);
 	}
 
@@ -8342,7 +8343,7 @@ public:
 		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 		SoftwarePackageParams params = dlg.getParams();
 		if (params.localMsiPath.empty() || params.msiUncPath.empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
+			ice2kui::error(this, MBOX_OK, "Fehler", "Bitte sowohl den lokalen Pfad als auch den UNC-Pfad angeben.");
 			return 1;
 		}
 		// Der Knoten bestimmt den Zweig; die Bereitstellungsmethode wird wie
@@ -8357,7 +8358,7 @@ public:
 		getApp()->beginWaitCursor();
 		bool ok = addSoftwarePackage(this, domain, guid.c_str(), params, log, errorMsg);
 		getApp()->endWaitCursor();
-		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
+		if (!ok) ice2kui::error(this, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
 		showNode(shownItem);
 		// "Erweitert": das frisch angelegte Paket gleich in den Eigenschaften
 		// oeffnen, wie im Original.
@@ -8384,7 +8385,7 @@ public:
 		std::string log;
 		bool ok;
 		if (pkg.pendingRemoval) {
-			if (FXMessageBox::question(this, MBOX_YES_NO, "Eintrag löschen",
+			if (ice2kui::question(this, MBOX_YES_NO, "Eintrag löschen",
 				"\"%s\" ist bereits zur Deinstallation vorgemerkt.\n\n"
 				"Den Auftrag jetzt endgültig aus der Gruppenrichtlinie löschen?\n"
 				"Clients, die ihn noch nicht ausgeführt haben, behalten die\n"
@@ -8397,7 +8398,7 @@ public:
 			     ? markSoftwarePackageForRemoval(this, domain, guid.c_str(), machine, pkg, log, errorMsg)
 			     : deleteSoftwarePackage(this, domain, guid.c_str(), machine, pkg, errorMsg);
 		}
-		if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		if (!ok) ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 		showNode(shownItem);
 		return 1;
 	}
@@ -8535,7 +8536,7 @@ public:
 	long onDisablePart(FXObject* sender, FXSelector, void*) {
 		FXCheckButton* cb = (FXCheckButton*)sender;
 		if (!cb->getCheck()) return 1;
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Deaktivieren bestätigen",
+		if (ice2kui::question(this, MBOX_YES_NO, "Deaktivieren bestätigen",
 		        "Beim teilweisen oder vollständigen Deaktivieren des Gruppenrichtlinienobjekts werden die darin\n"
 		        "enthaltenen Richtlinien auf dem Client zurückgesetzt.\n\n"
 		        "Möchten Sie den Vorgang fortsetzen?") != MBOX_CLICKED_YES)
@@ -8578,7 +8579,7 @@ public:
 		std::string log;
 		FXString errorMsg;
 		if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Gruppenrichtlinie", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Gruppenrichtlinie", "%s", errorMsg.text());
 			return false;
 		}
 		gpo.flags = wantedFlags();
@@ -8586,7 +8587,7 @@ public:
 		// Kontorichtlinie der Domaene heraus (bzw. wieder hinein).
 		if (gpoLinkedToDomainRoot(domain, gpo.guid)) {
 			FXString note;
-			if (!recomputeDomainAccountPolicy(domain, note)) FXMessageBox::warning(this, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
+			if (!recomputeDomainAccountPolicy(domain, note)) ice2kui::warning(this, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
 		}
 		return true;
 	}
@@ -8819,7 +8820,7 @@ public:
 		bool ok = createGpo(this, name, errorMsg);
 		getApp()->endWaitCursor();
 		if (!ok) {
-			FXMessageBox::error(this, MBOX_OK, "Gruppenrichtlinie",
+			ice2kui::error(this, MBOX_OK, "Gruppenrichtlinie",
 				"Das Gruppenrichtlinienobjekt konnte nicht erstellt werden. Möglicherweise verfügen Sie nicht über die erforderlichen Rechte.\n\n%s", errorMsg.text());
 			return 1;
 		}
@@ -8970,7 +8971,7 @@ public:
 		if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 		if (dlg.getResult().empty()) return 1;
 		if (dlg.getResult().size() > 1) {
-			FXMessageBox::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden.");
+			ice2kui::error(this, MBOX_OK, "Active Directory", "Es kann nur ein Objekt ausgewählt werden.");
 			return 1;
 		}
 		managerDn = users[dlg.getResult()[0]].dn;
@@ -9111,7 +9112,7 @@ public:
 		std::vector<std::string> keep;
 		for (FXint i = 0; i < list->getNumItems(); i++) if (!list->isItemSelected(i)) keep.push_back(dns[i]);
 		if (keep.size() == dns.size()) return 1;
-		if (FXMessageBox::question(this, MBOX_YES_NO, "Active Directory",
+		if (ice2kui::question(this, MBOX_YES_NO, "Active Directory",
 		        "Möchten Sie die ausgewählten Objekte wirklich entfernen?") != MBOX_CLICKED_YES) return 1;
 		dns = keep;
 		reload();
@@ -9296,7 +9297,7 @@ public:
 		std::string log;
 		FXString errorMsg;
 		if (runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) return true;
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 		return false;
 	}
 
@@ -9594,7 +9595,7 @@ public:
 		// Alle Aufrufer haben gerade Verknuepfungen geaendert.
 		if (isDomainRoot) {
 			FXString note;
-			if (!recomputeDomainAccountPolicy(domain, note)) FXMessageBox::warning(this, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
+			if (!recomputeDomainAccountPolicy(domain, note)) ice2kui::warning(this, MBOX_OK, "Gruppenrichtlinie", "%s", note.text());
 		}
 		allGpos = listGposLdapi(domain.baseDN);
 		reloadLinks(selectRow);
@@ -9626,12 +9627,12 @@ public:
 		if (name.empty()) return 1;
 		for (auto& g : allGpos) {
 			if (strcasecmp(g.displayName.c_str(), name.text()) == 0) {
-				if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
+				if (ice2kui::question(this, MBOX_YES_NO, "Gruppenrichtlinie",
 				        "Es gibt bereits ein Gruppenrichtlinienobjekt mit dem Namen \"%s\".\n\n"
 				        "Soll das vorhandene Objekt mit diesem Container verknüpft werden?", name.text()) != MBOX_CLICKED_YES) return 1;
 				FXString errorMsg;
 				if (!linkGpo(this, g.guid.c_str(), fullDN.c_str(), errorMsg))
-					FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
+					ice2kui::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
 				refreshLinksFromDirectory((int)links.size());
 				return 1;
 			}
@@ -9640,12 +9641,12 @@ public:
 		getApp()->beginWaitCursor();
 		bool ok = createGpo(this, name, errorMsg);
 		getApp()->endWaitCursor();
-		if (!ok) { FXMessageBox::error(this, MBOX_OK, "Anlegen fehlgeschlagen", "%s", errorMsg.text()); return 1; }
+		if (!ok) { ice2kui::error(this, MBOX_OK, "Anlegen fehlgeschlagen", "%s", errorMsg.text()); return 1; }
 		allGpos = listGposLdapi(domain.baseDN);
 		for (auto& g : allGpos) {
 			if (g.displayName != name.text()) continue;
 			if (!linkGpo(this, g.guid.c_str(), fullDN.c_str(), errorMsg))
-				FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
+				ice2kui::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
 			break;
 		}
 		// Neue Verknuepfung hat die niedrigste Prioritaet -- letzte Zeile.
@@ -9659,7 +9660,7 @@ public:
 		if (!dlg.execute(PLACEMENT_OWNER) || !dlg.selected()) return 1;
 		FXString errorMsg;
 		if (!linkGpo(this, dlg.selected()->guid.c_str(), fullDN.c_str(), errorMsg))
-			FXMessageBox::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Verknüpfen fehlgeschlagen", "%s", errorMsg.text());
 		refreshLinksFromDirectory((int)links.size());
 		return 1;
 	}
@@ -9686,7 +9687,7 @@ public:
 		std::swap(changed[linkIndexForRow(r)], changed[linkIndexForRow(target)]);
 		FXString errorMsg;
 		if (!writeGpLink(this, domain.realm, fullDN, changed, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Reihenfolge ändern fehlgeschlagen", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Reihenfolge ändern fehlgeschlagen", "%s", errorMsg.text());
 			return 1;
 		}
 		refreshLinksFromDirectory(target);
@@ -9723,7 +9724,7 @@ public:
 		if (changed[li].options == links[li].options) return 1;
 		FXString errorMsg;
 		if (!writeGpLink(this, domain.realm, fullDN, changed, errorMsg))
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 		refreshLinksFromDirectory(r);
 		return 1;
 	}
@@ -9753,13 +9754,13 @@ public:
 
 		FXString errorMsg;
 		if (choice == 1) {
-			if (FXMessageBox::question(this, MBOX_YES_NO, "Gruppenrichtlinienobjekt löschen",
+			if (ice2kui::question(this, MBOX_YES_NO, "Gruppenrichtlinienobjekt löschen",
 			        "Soll %s unwiderruflich gelöscht werden?", name.text()) != MBOX_CLICKED_YES) return 1;
 			unlinkGpo(this, guid.c_str(), fullDN.c_str(), errorMsg);
 			if (!deleteGpoCompletely(this, guid.c_str(), errorMsg))
-				FXMessageBox::error(this, MBOX_OK, "Löschen fehlgeschlagen", "%s", errorMsg.text());
+				ice2kui::error(this, MBOX_OK, "Löschen fehlgeschlagen", "%s", errorMsg.text());
 		} else if (!unlinkGpo(this, guid.c_str(), fullDN.c_str(), errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Entfernen fehlgeschlagen", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Entfernen fehlgeschlagen", "%s", errorMsg.text());
 		}
 		refreshLinksFromDirectory(r);
 		return 1;
@@ -9827,7 +9828,7 @@ public:
 		std::string log;
 		FXString errorMsg;
 		if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
-			FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+			ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 			return false;
 		}
 		origDesc = trimStr(descField->getText().text());
@@ -10374,7 +10375,7 @@ bool DsAdminWindow::checkDirectory() {
 	// die holt create() nach.
 	if (!directoryErrorShown && shown()) {
 		directoryErrorShown = true;
-		FXMessageBox::error(this, MBOX_OK, "Active Directory-Benutzer und -Computer",
+		ice2kui::error(this, MBOX_OK, "Active Directory-Benutzer und -Computer",
 			"Der Verzeichnisdienst ist nicht erreichbar. Die angezeigten Daten sind unvollständig\n"
 			"oder fehlen ganz.\n\n"
 			"Prüfen Sie, ob der Domänencontroller läuft:\n"
@@ -10526,7 +10527,7 @@ long DsAdminWindow::onRefresh(FXObject*, FXSelector, void*) {
 }
 
 long DsAdminWindow::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Über Active Directory-Benutzer und -Computer",
+	ice2kui::information(this, MBOX_OK, "Über Active Directory-Benutzer und -Computer",
 		"Active Directory-Benutzer und -Computer für ice2k\n\n"
 		"Verwaltet Domänenkonten (Benutzer/Gruppen/Organisationseinheiten)\n"
 		"und Gruppenrichtlinien-Verknüpfungen einer Samba-AD-Domäne.");
@@ -10616,37 +10617,37 @@ long DsAdminWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 }
 
 long DsAdminWindow::onNewUser(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Benutzer angelegt werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Benutzer angelegt werden."); return 1; }
 	NewUserDialog dlg(this);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	if (dlg.getUsername().trim().empty()) return 1;
 	if (dlg.getPassword() != dlg.getConfirm()) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "Die Kennwörter stimmen nicht überein.");
+		ice2kui::error(this, MBOX_OK, "Fehler", "Die Kennwörter stimmen nicht überein.");
 		return 1;
 	}
 	FXString errorMsg;
 	if (!createUser(dlg.getUsername().trim(), dlg.getPassword(), dlg.getFullName(), currentContainerRelDN, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	onRefresh(NULL, 0, NULL);
 	return 1;
 }
 
 long DsAdminWindow::onNewGroup(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Gruppe angelegt werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Gruppe angelegt werden."); return 1; }
 	NewGroupDialog dlg(this);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	if (dlg.getName().trim().empty()) return 1;
 	FXString errorMsg;
 	if (!createGroup(dlg.getName().trim(), currentContainerRelDN, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	onRefresh(NULL, 0, NULL);
 	return 1;
 }
 
 long DsAdminWindow::onNewOU(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Organisationseinheit angelegt werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Organisationseinheit angelegt werden."); return 1; }
 	NewOUDialog dlg(this);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	FXString name = dlg.getName().trim();
@@ -10655,7 +10656,7 @@ long DsAdminWindow::onNewOU(FXObject*, FXSelector, void*) {
 	if (!currentContainerRelDN.empty()) ouDN += "," + currentContainerRelDN;
 	FXString errorMsg;
 	if (!createOU(ouDN, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	onRefresh(NULL, 0, NULL);
 	return 1;
@@ -10665,8 +10666,8 @@ long DsAdminWindow::onDeleteObject(FXObject*, FXSelector, void*) {
 	int idx = list->getCurrentItem();
 	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
 	DirObject obj = currentObjects[idx];
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden."); return 1; }
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden."); return 1; }
+	if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
 	        "\"%s\" wirklich löschen?", obj.name.text()) != MBOX_CLICKED_YES) return 1;
 
 	FXString errorMsg;
@@ -10678,20 +10679,20 @@ long DsAdminWindow::onDeleteObject(FXObject*, FXSelector, void*) {
 		case OBJ_COMPUTER: ok = deleteComputer(obj.accountName, errorMsg); break;
 		default: errorMsg = "Dieser Objekttyp kann hier noch nicht gelöscht werden."; break;
 	}
-	if (!ok) FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+	if (!ok) ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	onRefresh(NULL, 0, NULL);
 	return 1;
 }
 
 long DsAdminWindow::onNewComputer(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Computer angelegt werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Computer angelegt werden."); return 1; }
 	NewComputerDialog dlg(this);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	FXString name = dlg.getName().trim();
 	if (name.empty()) return 1;
 	FXString errorMsg;
 	if (!createComputer(name, currentContainerRelDN, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	onRefresh(NULL, 0, NULL);
 	return 1;
@@ -10720,17 +10721,17 @@ long DsAdminWindow::onResetPassword(FXObject*, FXSelector, void*) {
 	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
 	DirObject obj = currentObjects[idx];
 	if (obj.type != OBJ_USER) return 1;
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Kennwort gesetzt werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Kennwort gesetzt werden."); return 1; }
 
 	SetPasswordDialog dlg(this, obj.name);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	FXString pw = dlg.getPassword(), confirm = dlg.getConfirm();
-	if (pw != confirm) { FXMessageBox::error(this, MBOX_OK, "Active Directory", "Die Kennwörter stimmen nicht überein."); return 1; }
+	if (pw != confirm) { ice2kui::error(this, MBOX_OK, "Active Directory", "Die Kennwörter stimmen nicht überein."); return 1; }
 	FXString errorMsg;
 	if (setUserPassword(obj.accountName, pw, errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Active Directory", "Das Kennwort für %s wurde geändert.", obj.name.text());
+		ice2kui::information(this, MBOX_OK, "Active Directory", "Das Kennwort für %s wurde geändert.", obj.name.text());
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -10770,7 +10771,7 @@ long DsAdminWindow::onMoveObject(FXObject*, FXSelector, void*) {
 	int idx = list->getCurrentItem();
 	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
 	DirObject obj = currentObjects[idx];
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts verschoben werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts verschoben werden."); return 1; }
 
 	MoveObjectDialog dlg(this, obj.name, domain.realm);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
@@ -10780,7 +10781,7 @@ long DsAdminWindow::onMoveObject(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	FXString identifier = (obj.type == OBJ_OU) ? relDNToFullDN(obj.dn, domain) : obj.accountName;
 	if (!moveObject(obj.type, identifier, targetDN, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	onRefresh(NULL, 0, NULL);
 	return 1;
@@ -10790,7 +10791,7 @@ long DsAdminWindow::onRenameObject(FXObject*, FXSelector, void*) {
 	int idx = list->getCurrentItem();
 	if (idx < 0 || idx >= (int)currentObjects.size()) return 1;
 	DirObject obj = currentObjects[idx];
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts umbenannt werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts umbenannt werden."); return 1; }
 
 	FXString newName = obj.name;
 	if (!FXInputDialog::getString(newName, this, "Umbenennen", "Neuer Name für \"" + obj.name + "\":")) return 1;
@@ -10800,7 +10801,7 @@ long DsAdminWindow::onRenameObject(FXObject*, FXSelector, void*) {
 	FXString errorMsg;
 	FXString currentFullDN = relDNToFullDN(obj.dn, domain);
 	if (!renameObject(this, domain, obj.type, obj.accountName, currentFullDN, newName, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	onRefresh(NULL, 0, NULL);
 	return 1;
@@ -10984,7 +10985,7 @@ long DsAdminWindow::onExportList(FXObject*, FXSelector, void*) {
 		out += field(t.section('\t', 0)) + sep + field(t.section('\t', 1)) + sep + field(t.section('\t', 2)) + "\r\n";
 	}
 	FILE* f = fopen(file.text(), "wb");
-	if (!f) { FXMessageBox::error(this, MBOX_OK, "Liste exportieren", "Die Datei %s konnte nicht geschrieben werden.", file.text()); return 1; }
+	if (!f) { ice2kui::error(this, MBOX_OK, "Liste exportieren", "Die Datei %s konnte nicht geschrieben werden.", file.text()); return 1; }
 	fwrite(out.data(), 1, out.size(), f);
 	fclose(f);
 	return 1;
@@ -11016,10 +11017,10 @@ long DsAdminWindow::onAddToGroup(FXObject*, FXSelector, void*) {
 	std::string log;
 	FXString errorMsg;
 	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Active Directory", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Active Directory", "%s", errorMsg.text());
 		return 1;
 	}
-	FXMessageBox::information(this, MBOX_OK, "Active Directory", "Der Vorgang \"Zu Gruppe hinzufügen\" wurde erfolgreich abgeschlossen.");
+	ice2kui::information(this, MBOX_OK, "Active Directory", "Der Vorgang \"Zu Gruppe hinzufügen\" wurde erfolgreich abgeschlossen.");
 	return 1;
 }
 
@@ -11042,7 +11043,7 @@ long DsAdminWindow::onNewContact(FXObject*, FXSelector, void*) {
 	NewContactDialog dlg(this, dnToFolder(("CN=x," + container).text()));
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	std::string cn = dlg.getFullName();
-	if (cn.empty()) { FXMessageBox::error(this, MBOX_OK, "Neues Objekt - Kontakt", "Bitte einen vollständigen Namen angeben."); return 1; }
+	if (cn.empty()) { ice2kui::error(this, MBOX_OK, "Neues Objekt - Kontakt", "Bitte einen vollständigen Namen angeben."); return 1; }
 	std::string ldif = "dn: CN=" + rdnEscape(cn) + "," + std::string(container.text()) + "\nchangetype: add\nobjectClass: contact\n";
 	if (!dlg.getGiven().empty()) ldif += ldifAttrLine("givenName", dlg.getGiven());
 	if (!dlg.getInitials().empty()) ldif += ldifAttrLine("initials", dlg.getInitials());
@@ -11050,7 +11051,7 @@ long DsAdminWindow::onNewContact(FXObject*, FXSelector, void*) {
 	if (!dlg.getDisplay().empty()) ldif += ldifAttrLine("displayName", dlg.getDisplay());
 	std::string log;
 	FXString errorMsg;
-	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return 1; }
+	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) { ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return 1; }
 	showContainer(currentContainerRelDN);
 	return 1;
 }
@@ -11062,7 +11063,7 @@ long DsAdminWindow::onNewSharedFolder(FXObject*, FXSelector, void*) {
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	std::string name = dlg.getName(), unc = dlg.getUnc();
 	if (name.empty() || unc.size() < 5 || unc.compare(0, 2, "\\\\") != 0) {
-		FXMessageBox::error(this, MBOX_OK, "Neues Objekt - Freigegebener Ordner",
+		ice2kui::error(this, MBOX_OK, "Neues Objekt - Freigegebener Ordner",
 			"Bitte einen Namen und einen Netzwerkpfad der Form \\\\Server\\Freigabe angeben.");
 		return 1;
 	}
@@ -11070,7 +11071,7 @@ long DsAdminWindow::onNewSharedFolder(FXObject*, FXSelector, void*) {
 	                   "\nchangetype: add\nobjectClass: volume\n" + ldifAttrLine("uNCName", unc);
 	std::string log;
 	FXString errorMsg;
-	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) { FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return 1; }
+	if (!runLdapChange(this, domain.realm, ldif, false, log, errorMsg)) { ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text()); return 1; }
 	showContainer(currentContainerRelDN);
 	return 1;
 }
@@ -11144,7 +11145,7 @@ int main(int argc, char* argv[]) {
 
 	DomainInfo domain = detectDomain();
 	if (!domain.isDC) {
-		FXMessageBox::error(shell, MBOX_OK, "Sicherheitsrichtlinie",
+		ice2kui::error(shell, MBOX_OK, "Sicherheitsrichtlinie",
 			"Dieser Server ist kein Domänencontroller.\n\n"
 			"Die Sicherheitsrichtlinien der Domäne stehen nur auf einem Domänencontroller zur Verfügung.");
 		return 1;
@@ -11173,7 +11174,7 @@ int main(int argc, char* argv[]) {
 	}
 
 	if (!g_haveRoot)
-		FXMessageBox::warning(shell, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(shell, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\n"
 			"Die Einstellungen können angezeigt, aber nicht geändert werden.");
 
@@ -11196,11 +11197,11 @@ int main(int argc, char* argv[]) {
 	win->show(PLACEMENT_SCREEN);
 
 	if (!g_haveRoot) {
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\n"
 			"Domänenobjekte können weiterhin angezeigt, aber nicht verändert werden.");
 	} else if (!haveAdmFiles()) {
-		if (FXMessageBox::question(win, MBOX_YES_NO, "ADM-Vorlagen nicht gefunden",
+		if (ice2kui::question(win, MBOX_YES_NO, "ADM-Vorlagen nicht gefunden",
 		        "Für den Gruppenrichtlinien-Editor werden die administrativen\n"
 		        "Vorlagen (.adm-Dateien) von Windows 2000 benötigt.\n\n"
 		        "Microsoft bietet diese kostenlos zum Download an. Jetzt\n"
@@ -11208,9 +11209,9 @@ int main(int argc, char* argv[]) {
 			std::string log;
 			FXString errorMsg;
 			if (!downloadAndExtractAdmFiles(win, log, errorMsg)) {
-				FXMessageBox::error(win, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
+				ice2kui::error(win, MBOX_OK, "Fehler", "%s\n\nProtokoll:\n%s", errorMsg.text(), log.c_str());
 			} else {
-				FXMessageBox::information(win, MBOX_OK, "Fertig", "ADM-Vorlagen wurden erfolgreich eingerichtet.");
+				ice2kui::information(win, MBOX_OK, "Fertig", "ADM-Vorlagen wurden erfolgreich eingerichtet.");
 			}
 		}
 	}

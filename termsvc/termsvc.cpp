@@ -23,6 +23,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include "../common/ui/msgbox.h"
 
 FXApp* app;
 static bool g_haveRoot = false;
@@ -353,7 +354,7 @@ long TermSvcWindow::onRefresh(FXObject*, FXSelector, void*) {
 
 long TermSvcWindow::onActivate(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können die Terminaldienste nicht eingerichtet werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können die Terminaldienste nicht eingerichtet werden.");
 		return 1;
 	}
 	activateBtn->disable();
@@ -372,9 +373,9 @@ long TermSvcWindow::onPoll(FXObject*, FXSelector, void*) {
 	}
 	logText->setText(worker->log.c_str());
 	if (worker->success) {
-		FXMessageBox::information(this, MBOX_OK, "Fertig", "Die Terminaldienste wurden erfolgreich eingerichtet.");
+		ice2kui::information(this, MBOX_OK, "Fertig", "Die Terminaldienste wurden erfolgreich eingerichtet.");
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", worker->errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", worker->errorMsg.text());
 	}
 	worker->join();
 	delete worker;
@@ -395,7 +396,7 @@ int main(int argc, char* argv[]) {
 	application.create();
 
 	if (!g_haveRoot) {
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\nDie Terminaldienste können nicht eingerichtet werden.");
 	}
 

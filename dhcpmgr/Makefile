@@ -9,7 +9,7 @@ LDFLAGS = `fox-config --libs` -lboost_json
 PREFIX = /usr/local
 
 ICONS = res/*/*.gif res/*/*.png res/*.gif
-SOURCES = dhcpmgr.cpp
+SOURCES = dhcpmgr.cpp ../common/ui/msgicons.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 DEPS = $(OBJECTS:.o=.d)
 

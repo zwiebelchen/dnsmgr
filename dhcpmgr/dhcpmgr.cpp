@@ -26,6 +26,7 @@
 #include <sstream>
 #include <algorithm>
 #include "../common/svcprobe/svcprobe.h"
+#include "../common/ui/msgbox.h"
 
 namespace json = boost::json;
 
@@ -1324,7 +1325,7 @@ long DhcpManager::onRefresh(FXObject*, FXSelector, void*) {
 }
 
 long DhcpManager::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Über DHCP",
+	ice2kui::information(this, MBOX_OK, "Über DHCP",
 		"DHCP-Manager für ice2k\n\n"
 		"Ein Nachbau des Windows 2000 DHCP-Manager-Snapins.\n"
 		"Liest/schreibt die Kea-DHCPv4-Konfiguration unter /etc/kea/.");
@@ -1333,7 +1334,7 @@ long DhcpManager::onAbout(FXObject*, FXSelector, void*) {
 
 long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte",
 			"Ohne Root-Rechte kann kein neuer Bereich angelegt werden.\n"
 			"Starte den DHCP-Manager neu und gib dein Passwort ein.");
 		return 1;
@@ -1353,19 +1354,19 @@ long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 	// stehen standardmaessig auf 0): ohne diese Pruefung entsteht sonst
 	// unbemerkt ein sinnloser Bereich "0.0.0.0/24".
 	if (ipToUint(startIp) == 0 || ipToUint(endIp) == 0) {
-		FXMessageBox::error(this, MBOX_OK, "Ungültige Adressen",
+		ice2kui::error(this, MBOX_OK, "Ungültige Adressen",
 			"Bitte eine echte Start- und End-IP-Adresse angeben (nicht 0.0.0.0).");
 		return 1;
 	}
 	if (ipToUint(startIp) > ipToUint(endIp)) {
-		FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+		ice2kui::error(this, MBOX_OK, "Ungültiger Bereich",
 			"Die Start-IP-Adresse muss vor (oder gleich) der End-IP-Adresse liegen.");
 		return 1;
 	}
 	{
 		uint32_t maskBits = (maskToPrefixLen(mask) == 0) ? 0 : (0xFFFFFFFFu << (32 - maskToPrefixLen(mask)));
 		if ((ipToUint(startIp) & maskBits) != (ipToUint(endIp) & maskBits)) {
-			FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+			ice2kui::error(this, MBOX_OK, "Ungültiger Bereich",
 				"Start- und End-IP-Adresse müssen im selben Subnetz liegen (passend zur Subnetzmaske).");
 			return 1;
 		}
@@ -1378,7 +1379,7 @@ long DhcpManager::onNewScope(FXObject*, FXSelector, void*) {
 
 	for (auto& sv : conf.as_object().at("Dhcp4").as_object().at("subnet4").as_array()) {
 		if (sv.is_object() && jsonStr(sv.as_object(), "subnet") == cidr) {
-			FXMessageBox::error(this, MBOX_OK, "Bereich existiert bereits",
+			ice2kui::error(this, MBOX_OK, "Bereich existiert bereits",
 				"Ein Bereich für das Netz \"%s\" ist schon vorhanden.", cidr.text());
 			return 1;
 		}
@@ -1415,7 +1416,7 @@ long DhcpManager::onScopeProperties(FXObject*, FXSelector, void*) {
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Änderungen gespeichert werden.");
 		return 1;
 	}
 
@@ -1435,12 +1436,12 @@ long DhcpManager::onScopeProperties(FXObject*, FXSelector, void*) {
 	uint32_t network = (slash >= 0) ? ipToUint(scopeCidr.left(slash)) : 0;
 
 	if (ipToUint(newStart) > ipToUint(newEnd)) {
-		FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+		ice2kui::error(this, MBOX_OK, "Ungültiger Bereich",
 			"Die erste IP-Adresse muss vor (oder gleich) der letzten IP-Adresse liegen.");
 		return 1;
 	}
 	if ((ipToUint(newStart) & maskBits) != network || (ipToUint(newEnd) & maskBits) != network) {
-		FXMessageBox::error(this, MBOX_OK, "Ungültiger Bereich",
+		ice2kui::error(this, MBOX_OK, "Ungültiger Bereich",
 			"Erste und letzte IP-Adresse müssen im Netz %s liegen.\n"
 			"Um das Netz selbst zu ändern, muss ein neuer Bereich angelegt werden.", scopeCidr.text());
 		return 1;
@@ -1480,10 +1481,10 @@ long DhcpManager::onDeleteScope(FXObject*, FXSelector, void*) {
 	ScopeInfo sc = scopes[contextScopeIdx];
 
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Bereich gelöscht werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Bereich gelöscht werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Bereich löschen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Bereich löschen",
 	        "Bereich \"%s\" (%s) wirklich löschen?", sc.name.text(), sc.subnetCidr.text())
 	        != MBOX_CLICKED_YES) {
 		return 1;
@@ -1513,7 +1514,7 @@ long DhcpManager::onDeleteScope(FXObject*, FXSelector, void*) {
 long DhcpManager::onNewReservation(FXObject*, FXSelector, void*) {
 	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Reservierung angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Reservierung angelegt werden.");
 		return 1;
 	}
 	NewReservationDialog dlg(this, this, contextScopeIdx, scopes[contextScopeIdx].name);
@@ -1533,13 +1534,13 @@ long DhcpManager::onReservationProperties(FXObject*, FXSelector, void*) {
 	ReservationPropertiesDialog dlg(this, scopeName, *found);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts geändert werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts geändert werden.");
 		return 1;
 	}
 
 	FXString errorMsg;
 	if (!updateReservation(contextScopeIdx, contextResIp, contextResMac, dlg.getIp(), dlg.getMac(), dlg.getName(), errorMsg)) {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1547,10 +1548,10 @@ long DhcpManager::onReservationProperties(FXObject*, FXSelector, void*) {
 long DhcpManager::onDeleteReservation(FXObject*, FXSelector, void*) {
 	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
 	        "Reservierung \"%s\" wirklich löschen?", contextResIp.text()) != MBOX_CLICKED_YES) {
 		return 1;
 	}
@@ -1564,7 +1565,7 @@ long DhcpManager::onDeleteReservation(FXObject*, FXSelector, void*) {
 long DhcpManager::onNewExclusion(FXObject*, FXSelector, void*) {
 	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Ausschlussbereich angelegt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann kein Ausschlussbereich angelegt werden.");
 		return 1;
 	}
 	NewExclusionDialog dlg(this, this, contextScopeIdx, scopes[contextScopeIdx].name);
@@ -1575,10 +1576,10 @@ long DhcpManager::onNewExclusion(FXObject*, FXSelector, void*) {
 long DhcpManager::onDeleteExclusion(FXObject*, FXSelector, void*) {
 	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "Löschen bestätigen",
+	if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
 	        "Ausschlussbereich \"%s - %s\" wirklich löschen?", contextExclStart.text(), contextExclEnd.text())
 	        != MBOX_CLICKED_YES) {
 		return 1;
@@ -1594,7 +1595,7 @@ long DhcpManager::onConfigureOptions(FXObject*, FXSelector, void*) {
 	if (contextScopeIdx < 0 || contextScopeIdx >= (int)scopes.size()) return 1;
 	ScopeInfo& sc = scopes[contextScopeIdx];
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Optionen gesetzt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Optionen gesetzt werden.");
 		return 1;
 	}
 
@@ -1642,7 +1643,7 @@ long DhcpManager::onConfigureOptions(FXObject*, FXSelector, void*) {
 
 long DhcpManager::onServerOptions(FXObject*, FXSelector, void*) {
 	if (!g_haveRoot) {
-		FXMessageBox::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Optionen gesetzt werden.");
+		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte können keine Optionen gesetzt werden.");
 		return 1;
 	}
 
@@ -1903,16 +1904,16 @@ long NewReservationDialog::onAddReservation(FXObject*, FXSelector, void*) {
 	FXString macVal = macField->getText().trim();
 	FXString nameVal = nameField->getText().trim();
 	if (macVal.empty()) {
-		FXMessageBox::error(this, MBOX_OK, "MAC-Adresse fehlt", "Bitte eine MAC-Adresse eingeben.");
+		ice2kui::error(this, MBOX_OK, "MAC-Adresse fehlt", "Bitte eine MAC-Adresse eingeben.");
 		return 1;
 	}
 	FXString errorMsg;
 	if (mgr->createReservation(scopeIdx, ipVal, macVal, nameVal, errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neue Reservierung",
+		ice2kui::information(this, MBOX_OK, "Neue Reservierung",
 			"Die Reservierung für \"%s\" wurde erfolgreich erstellt.", ipVal.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1924,11 +1925,11 @@ long NewExclusionDialog::onAddExclusion(FXObject*, FXSelector, void*) {
 	FXString endVal = endIp.isEmpty() ? startVal : endIp.get();
 	FXString errorMsg;
 	if (mgr->createExclusion(scopeIdx, startVal, endVal, errorMsg)) {
-		FXMessageBox::information(this, MBOX_OK, "Neuer Ausschlussbereich",
+		ice2kui::information(this, MBOX_OK, "Neuer Ausschlussbereich",
 			"Der Ausschlussbereich \"%s - %s\" wurde erfolgreich erstellt.", startVal.text(), endVal.text());
 		resetFields();
 	} else {
-		FXMessageBox::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Fehler", "%s", errorMsg.text());
 	}
 	return 1;
 }
@@ -1942,7 +1943,7 @@ bool DhcpManager::checkService() {
 	statuslbl->setText("Der DHCP-Dienst ist nicht erreichbar -- Änderungen werden nicht wirksam.");
 	if (!serviceErrorShown && shown()) {
 		serviceErrorShown = true;
-		FXMessageBox::error(this, MBOX_OK, "DHCP-Manager", "%s",
+		ice2kui::error(this, MBOX_OK, "DHCP-Manager", "%s",
 			svcprobe::message("Der DHCP-Dienst (Kea)", "kea-dhcp4-server", r.detail).c_str());
 	}
 	return false;
@@ -1987,7 +1988,7 @@ int main(int argc, char* argv[]) {
 	win->show(PLACEMENT_SCREEN);
 
 	if (!g_haveRoot) {
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\n"
 			"Der DHCP-Manager kann bestehende Bereiche weiterhin anzeigen, aber keine\n"
 			"neuen Bereiche/Reservierungen anlegen und keine Demo-Konfiguration\n"

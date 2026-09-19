@@ -90,14 +90,8 @@ gemeinsam benutzen, statt ihn doppelt zu pflegen:
 |---|---|---|
 | [`common/svc/`](common/svc/) | Dienstverwaltung: GUI-freier systemd-Kern (`svccore`) plus fertige Ansicht als FOX-Widget (`svcpanel`) | `services`, `compmgmt` |
 | [`common/evt/`](common/evt/) | Ereignisse: GUI-freier Kern (`evtcore`, Journal bzw. /var/log) plus Ereignisliste mit Eigenschaften und Filter (`evtpanel`) | `eventvwr`, `compmgmt` |
+| [`common/ui/`](common/ui/) | Meldungsfenster mit deutscher Beschriftung ("Ja", "Nein", "Abbrechen") samt eigenen Symbolen -- Ersatz für `FXMessageBox`, dessen Knöpfe fest englisch sind | alle |
 | [`common/svcprobe/`](common/svcprobe/) | Prüfung, ob der verwaltete Dienst läuft, samt einheitlichem Meldungstext | `dnsmgr`, `dhcpmgr`, `compmgmt` |
-
-### Offene Punkte für später
-
-- **Ja/Nein-Rückfragen sind englisch beschriftet** ("Yes"/"No"): Die
-  Beschriftung kommt aus FOX (`FXMessageBox`) und ist dort fest
-  hinterlegt. Für eine deutsche Beschriftung braucht es einen eigenen
-  Rückfragedialog, der dann in allen Programmen verwendet wird.
 
 Alle Programme teilen sich denselben Grundaufbau:
 - **FOX-Toolkit** für die GUI (Fenster/Menü/Toolbar/Baum-/Listenansicht

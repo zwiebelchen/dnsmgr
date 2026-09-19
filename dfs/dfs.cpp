@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/wait.h>
+#include "../common/ui/msgbox.h"
 
 static FXApp* app = NULL;
 static bool g_haveRoot = false;
@@ -325,11 +326,11 @@ public:
 	long onOk(FXObject*, FXSelector, void*) {
 		std::string n = trimStr(nameField->getText().text()), p = trimStr(pathField->getText().text());
 		if (n.empty() || n.find_first_of(" \\/[]") != std::string::npos) {
-			FXMessageBox::error(this, MBOX_OK, "Neuer DFS-Stamm", "Geben Sie einen Stammnamen ohne Leer- und Sonderzeichen an.");
+			ice2kui::error(this, MBOX_OK, "Neuer DFS-Stamm", "Geben Sie einen Stammnamen ohne Leer- und Sonderzeichen an.");
 			return 1;
 		}
 		if (p.empty() || p[0] != '/') {
-			FXMessageBox::error(this, MBOX_OK, "Neuer DFS-Stamm", "Geben Sie einen absoluten Pfad für den Ordner an.");
+			ice2kui::error(this, MBOX_OK, "Neuer DFS-Stamm", "Geben Sie einen absoluten Pfad für den Ordner an.");
 			return 1;
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
@@ -377,12 +378,12 @@ public:
 		if (nameField) {
 			std::string n = trimStr(nameField->getText().text());
 			if (n.empty() || n.find_first_of(" \\/") != std::string::npos) {
-				FXMessageBox::error(this, MBOX_OK, "DFS", "Geben Sie einen Verknüpfungsnamen ohne Leer- und Sonderzeichen an.");
+				ice2kui::error(this, MBOX_OK, "DFS", "Geben Sie einen Verknüpfungsnamen ohne Leer- und Sonderzeichen an.");
 				return 1;
 			}
 		}
 		if (normalizeTarget(targetField->getText().text()).empty()) {
-			FXMessageBox::error(this, MBOX_OK, "DFS", "Geben Sie das Verweisziel als UNC-Pfad an, z.B. \\\\server\\freigabe.");
+			ice2kui::error(this, MBOX_OK, "DFS", "Geben Sie das Verweisziel als UNC-Pfad an, z.B. \\\\server\\freigabe.");
 			return 1;
 		}
 		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
@@ -653,12 +654,12 @@ long DfsWindow::onListRight(FXObject*, FXSelector, void* ptr) {
 }
 
 long DfsWindow::onNewRoot(FXObject*, FXSelector, void*) {
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "DFS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "DFS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
 	NewRootDialog dlg(this, host);
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	FXString errorMsg;
 	if (!createDfsRoot(dlg.name(), dlg.path(), dlg.comment(), errorMsg))
-		FXMessageBox::error(this, MBOX_OK, "Neuer DFS-Stamm", "%s", errorMsg.text());
+		ice2kui::error(this, MBOX_OK, "Neuer DFS-Stamm", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -666,13 +667,13 @@ long DfsWindow::onNewRoot(FXObject*, FXSelector, void*) {
 long DfsWindow::onDeleteRoot(FXObject*, FXSelector, void*) {
 	int ri = currentRoot();
 	if (ri < 0 || currentLink() >= 0) return 1;
-	if (FXMessageBox::question(this, MBOX_YES_NO, "DFS",
+	if (ice2kui::question(this, MBOX_YES_NO, "DFS",
 	        "Möchten Sie den DFS-Stamm \"%s\" wirklich entfernen?\n\n"
 	        "Die Freigabe wird aus der Konfiguration genommen. Das Verzeichnis %s\n"
 	        "und die darin liegenden Verknüpfungen bleiben erhalten.",
 	        roots[ri].share.c_str(), roots[ri].path.c_str()) != MBOX_CLICKED_YES) return 1;
 	FXString errorMsg;
-	if (!removeDfsRoot(roots[ri], errorMsg)) FXMessageBox::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
+	if (!removeDfsRoot(roots[ri], errorMsg)) ice2kui::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -680,7 +681,7 @@ long DfsWindow::onDeleteRoot(FXObject*, FXSelector, void*) {
 long DfsWindow::onNewLink(FXObject*, FXSelector, void*) {
 	int ri = currentRoot();
 	if (ri < 0) return 1;
-	if (!g_haveRoot) { FXMessageBox::error(this, MBOX_OK, "DFS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
+	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "DFS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
 	LinkDialog dlg(this, "Neue DFS-Verknüpfung", true,
 		FXString("Die Verknüpfung erscheint unter \\\\") + host.c_str() + "\\" + roots[ri].share.c_str() +
 		"\\<Name>\nund verweist auf eine Freigabe eines anderen Servers.");
@@ -689,7 +690,7 @@ long DfsWindow::onNewLink(FXObject*, FXSelector, void*) {
 	link.name = dlg.name();
 	link.targets = { dlg.target() };
 	FXString errorMsg;
-	if (!writeLink(roots[ri], link, errorMsg)) FXMessageBox::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
+	if (!writeLink(roots[ri], link, errorMsg)) ice2kui::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -702,10 +703,10 @@ long DfsWindow::onDeleteLink(FXObject*, FXSelector, void*) {
 		if (idx < 0 || idx >= (int)roots[ri].links.size()) return 1;
 		li = idx;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "DFS",
+	if (ice2kui::question(this, MBOX_YES_NO, "DFS",
 	        "Möchten Sie die Verknüpfung \"%s\" wirklich löschen?", roots[ri].links[li].name.c_str()) != MBOX_CLICKED_YES) return 1;
 	FXString errorMsg;
-	if (!removeLink(roots[ri], roots[ri].links[li], errorMsg)) FXMessageBox::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
+	if (!removeLink(roots[ri], roots[ri].links[li], errorMsg)) ice2kui::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -713,7 +714,7 @@ long DfsWindow::onDeleteLink(FXObject*, FXSelector, void*) {
 long DfsWindow::onNewReplica(FXObject*, FXSelector, void*) {
 	int ri = currentRoot(), li = currentLink();
 	if (ri < 0 || li < 0) {
-		FXMessageBox::information(this, MBOX_OK, "DFS", "Wählen Sie zuerst die Verknüpfung, zu der ein Replikat gehören soll.");
+		ice2kui::information(this, MBOX_OK, "DFS", "Wählen Sie zuerst die Verknüpfung, zu der ein Replikat gehören soll.");
 		return 1;
 	}
 	LinkDialog dlg(this, "Neues Replikat", false,
@@ -722,12 +723,12 @@ long DfsWindow::onNewReplica(FXObject*, FXSelector, void*) {
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
 	DfsLink link = roots[ri].links[li];
 	if (std::find(link.targets.begin(), link.targets.end(), dlg.target()) != link.targets.end()) {
-		FXMessageBox::error(this, MBOX_OK, "DFS", "Dieses Verweisziel ist bereits eingetragen.");
+		ice2kui::error(this, MBOX_OK, "DFS", "Dieses Verweisziel ist bereits eingetragen.");
 		return 1;
 	}
 	link.targets.push_back(dlg.target());
 	FXString errorMsg;
-	if (!writeLink(roots[ri], link, errorMsg)) FXMessageBox::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
+	if (!writeLink(roots[ri], link, errorMsg)) ice2kui::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -738,15 +739,15 @@ long DfsWindow::onDeleteReplica(FXObject*, FXSelector, void*) {
 	if (ri < 0 || li < 0 || idx < 0 || idx >= (int)roots[ri].links[li].targets.size()) return 1;
 	DfsLink link = roots[ri].links[li];
 	if (link.targets.size() <= 1) {
-		FXMessageBox::information(this, MBOX_OK, "DFS",
+		ice2kui::information(this, MBOX_OK, "DFS",
 			"Das letzte Verweisziel lässt sich nicht entfernen.\n\nLöschen Sie stattdessen die Verknüpfung.");
 		return 1;
 	}
-	if (FXMessageBox::question(this, MBOX_YES_NO, "DFS", "Möchten Sie das Verweisziel %s wirklich entfernen?",
+	if (ice2kui::question(this, MBOX_YES_NO, "DFS", "Möchten Sie das Verweisziel %s wirklich entfernen?",
 	        displayTarget(link.targets[idx]).text()) != MBOX_CLICKED_YES) return 1;
 	link.targets.erase(link.targets.begin() + idx);
 	FXString errorMsg;
-	if (!writeLink(roots[ri], link, errorMsg)) FXMessageBox::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
+	if (!writeLink(roots[ri], link, errorMsg)) ice2kui::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
 	reload();
 	return 1;
 }
@@ -754,7 +755,7 @@ long DfsWindow::onDeleteReplica(FXObject*, FXSelector, void*) {
 long DfsWindow::onRefresh(FXObject*, FXSelector, void*) { reload(); return 1; }
 
 long DfsWindow::onAbout(FXObject*, FXSelector, void*) {
-	FXMessageBox::information(this, MBOX_OK, "Info",
+	ice2kui::information(this, MBOX_OK, "Info",
 		"Verteiltes Dateisystem (ice2k)\n\n"
 		"Ein DFS-Stamm ist eine Samba-Freigabe mit \"msdfs root = yes\",\n"
 		"eine Verknüpfung ein Symlink mit dem Ziel \"msdfs:server\\freigabe\".\n"
@@ -770,7 +771,7 @@ int main(int argc, char* argv[]) {
 	DfsWindow* win = new DfsWindow(&application);
 	application.create();
 	if (!g_haveRoot)
-		FXMessageBox::warning(win, MBOX_OK, "Keine Root-Rechte",
+		ice2kui::warning(win, MBOX_OK, "Keine Root-Rechte",
 			"Es wurden keine Root-Rechte erlangt.\n\nDie Anzeige funktioniert, Änderungen sind nicht möglich.");
 	return application.run();
 }

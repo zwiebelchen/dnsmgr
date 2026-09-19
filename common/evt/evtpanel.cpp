@@ -9,6 +9,7 @@ using evt::LogKind;
 
 // Symbole fuer Fehler, Warnung und Informationen (eigene Nachbauten).
 #include "evticons.h"
+#include "../../common/ui/msgbox.h"
 
 static std::string trimStr(const std::string& x) {
 	size_t a = x.find_first_not_of(" \t\r\n");
@@ -260,18 +261,18 @@ bool EvtPanel::editFilter(FXWindow* owner) {
 // sagt das auch.
 void EvtPanel::clearLog(FXWindow* owner) {
 	if (!fromJournal) {
-		FXMessageBox::information(owner, MBOX_OK, "Ereignisanzeige",
+		ice2kui::information(owner, MBOX_OK, "Ereignisanzeige",
 			"Die Ereignisse stammen aus den Logdateien unter /var/log.\n\n"
 			"Diese werden von logrotate verwaltet und hier nicht gelöscht.");
 		return;
 	}
-	if (FXMessageBox::question(owner, MBOX_YES_NO, "Ereignisanzeige",
+	if (ice2kui::question(owner, MBOX_YES_NO, "Ereignisanzeige",
 	        "Möchten Sie wirklich alle Ereignisse löschen?\n\n"
 	        "Das systemd-Journal kennt die Trennung in Anwendung, Sicherheit und System\n"
 	        "nicht: Es wird vollständig geleert, nicht nur das gewählte Protokoll.") != MBOX_CLICKED_YES)
 		return;
 	std::string out;
 	if (!evt::clearJournal(out))
-		FXMessageBox::error(owner, MBOX_OK, "Ereignisanzeige", "Das Journal konnte nicht geleert werden:\n\n%s", trimStr(out).c_str());
+		ice2kui::error(owner, MBOX_OK, "Ereignisanzeige", "Das Journal konnte nicht geleert werden:\n\n%s", trimStr(out).c_str());
 	reload();
 }
