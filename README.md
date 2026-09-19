@@ -22,6 +22,7 @@ jeweiligen Unterordner.
 | [`rras/`](rras/README.md) | Routing und RAS | Linux-Kernel (IP-Weiterleitung) | Serverstatus, Aktivieren/Deaktivieren, Eigenschaften |
 | [`dfs/`](dfs/README.md) | Verteiltes Dateisystem | Samba (msdfs) | Stämme, Verknüpfungen, Replikate |
 | [`dssite/`](dssite/README.md) | AD-Standorte und -Dienste | LDAP (CN=Sites), samba-tool sites | Standorte, Subnetze, Standortverknüpfungen |
+| [`certsrv/`](certsrv/README.md) | Zertifizierungsstelle | openssl-CA unter /etc/ice2k/ca | ausstellen, sperren, Sperrliste |
 | [`eventvwr/`](eventvwr/README.md) | Ereignisanzeige | systemd-Journal, ersatzweise /var/log | drei Protokolle, Eigenschaften, Filter |
 | [`srvcfg/`](srvcfg/README.md) | Konfiguration des Servers | Zustand aus smb.conf, systemd und /etc/ice2k | Startseite mit Verweisen auf die übrigen Programme |
 | [`secpol/`](secpol/README.md) | Sicherheitsrichtlinien (Domäne, Domänencontroller, lokal) | dieselbe Quelle wie `dsadmin` (GPO-Sicherheitseinstellungen) | drei Konsolen über `--domain`, `--dc`, `--local` |
@@ -64,7 +65,7 @@ nicht im vollen Umfang des Originals.
 | 24 | Verbindungs-Manager-Verwaltungskit | -- | nicht geplant |
 | 25 | Verteiltes Dateisystem (DFS) | [`dfs/`](dfs/README.md) | **teilweise**: eigenständige DFS-Stämme, Verknüpfungen und Replikate über Samba `msdfs` (Freigabe mit `msdfs root = yes`, Symlinks `msdfs:server\freigabe`). Offen: domänenbasierte Stämme, Replikation der Inhalte |
 | 26 | WINS | -- | offen (Backend: Sambas WINS-Server `nmbd`) |
-| 27 | Zertifizierungsstelle | -- | offen (Backend: z.B. `openssl`/`easy-rsa`) |
+| 27 | Zertifizierungsstelle | [`certsrv/`](certsrv/README.md) | **umgesetzt**: eigene openssl-CA einrichten, Zertifikate ausstellen (Server, Client, Benutzer), sperren mit Grund, Sperrliste erzeugen und exportieren. Offen: Vorlagen, Anforderungen über das Netz, Veröffentlichung in AD |
 | 28 | Internetauthentifizierungsdienst | -- | offen (RADIUS, Backend: FreeRADIUS) |
 | 29 | Internetdienste-Manager | -- | offen (Backend: Apache oder nginx) |
 | 30 | QoS-Zugangssteuerung | -- | nicht geplant |
@@ -126,6 +127,7 @@ cd srvcfg && make && ./srvcfg
 cd eventvwr && make && ./eventvwr
 cd dfs && make && ./dfs
 cd dssite && make && ./dssite
+cd certsrv && make && ./certsrv
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,
