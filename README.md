@@ -21,6 +21,7 @@ jeweiligen Unterordner.
 | [`termsvc/`](termsvc/README.md) | Terminaldienstekonfiguration | xrdp + PAM/winbind | Terminaldienste aktivieren (Paketinstallation, Authentifizierung lokal/AD, Win2k-Anmeldebildschirm, Dienste starten) |
 | [`rras/`](rras/README.md) | Routing und RAS | Linux-Kernel (IP-Weiterleitung) | Serverstatus, Aktivieren/Deaktivieren, Eigenschaften |
 | [`dfs/`](dfs/README.md) | Verteiltes Dateisystem | Samba (msdfs) | Stämme, Verknüpfungen, Replikate |
+| [`dssite/`](dssite/README.md) | AD-Standorte und -Dienste | LDAP (CN=Sites), samba-tool sites | Standorte, Subnetze, Standortverknüpfungen |
 | [`eventvwr/`](eventvwr/README.md) | Ereignisanzeige | systemd-Journal, ersatzweise /var/log | drei Protokolle, Eigenschaften, Filter |
 | [`srvcfg/`](srvcfg/README.md) | Konfiguration des Servers | Zustand aus smb.conf, systemd und /etc/ice2k | Startseite mit Verweisen auf die übrigen Programme |
 | [`secpol/`](secpol/README.md) | Sicherheitsrichtlinien (Domäne, Domänencontroller, lokal) | dieselbe Quelle wie `dsadmin` (GPO-Sicherheitseinstellungen) | drei Konsolen über `--domain`, `--dc`, `--local` |
@@ -40,7 +41,7 @@ nicht im vollen Umfang des Originals.
 | 1 | Terminaldiensteclient | -- | nicht geplant (unter Linux ein gewöhnlicher RDP-Client, z.B. `xfreerdp`) |
 | 2 | Active Directory-Benutzer und -Computer | [`dsadmin/`](dsadmin/README.md) | **umgesetzt**: Baum/Listen, Benutzer (Allgemein, Adresse, Konto, Profil, Rufnummern, Organisation, Mitglied von), Gruppen (Allgemein, Mitglieder, Mitglied von, Verwaltet von), OU/Domäne (Allgemein, Verwaltet von, Gruppenrichtlinie), Computer, Kontakte, freigegebene Ordner, Suchen, Verschieben/Umbenennen/Löschen, Werkzeugleiste und Menü "Vorgang"; darin der vollständige Gruppenrichtlinienobjekt-Editor (siehe unten) |
 | 3 | Active Directory-Domänen und -Vertrauensstellungen | -- | offen (Backend: `samba-tool domain trust`) |
-| 4 | Active Directory-Standorte und -Dienste | -- | offen (Backend: LDAP unter `CN=Sites,CN=Configuration`) |
+| 4 | Active Directory-Standorte und -Dienste | [`dssite/`](dssite/README.md) | **teilweise**: Standorte, Server, Subnetze und Standortverknüpfungen (Kosten, Intervall, beteiligte Standorte); Änderungen über `samba-tool sites` und `ldbmodify`. Offen: Replikationstopologie (NTDS Settings), Verknüpfungsbrücken, Server verschieben, Zeitpläne |
 | 5 | Clusterverwaltung | -- | nicht geplant |
 | 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Ereignisanzeige (Anwendung, Sicherheit, System), Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Offen: Datenträgerverwaltung, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
 | 7 | Datenquellen (ODBC) | -- | nicht geplant |
@@ -124,6 +125,7 @@ cd rras && make && ./rras
 cd srvcfg && make && ./srvcfg
 cd eventvwr && make && ./eventvwr
 cd dfs && make && ./dfs
+cd dssite && make && ./dssite
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,
