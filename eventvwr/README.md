@@ -46,8 +46,9 @@ im Text entschieden.
   Protokoll -- journald kennt diese Trennung nicht. Die Rückfrage sagt
   das ausdrücklich. Bei der Rückfallebene über die Logdateien passiert
   nichts, die verwaltet logrotate.
-- Die Symbole für Fehler, Warnung und Informationen sind eigene
-  Nachbauten.
+- Die Symbole für Fehler, Warnung und Informationen stammen aus dem
+  Bitmap-Streifen der deutschen `els.dll` (Windows 2000 SP4), ebenso das
+  Symbol der Protokolle; die DLL selbst liegt nicht im Repository.
 - Noch nicht umgesetzt: Protokolleigenschaften (Größe, Überschreiben),
   Speichern unter, Sortieren nach Spalten, Suchen.
 

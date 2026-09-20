@@ -35,6 +35,24 @@ Eine openssl-Zertifizierungsstelle unter `/etc/ice2k/ca`:
 - **Sperrliste veröffentlichen** erzeugt `crl.pem` neu; CA-Zertifikat und
   Sperrliste lassen sich exportieren.
 
+## Abgleich mit dem Original
+
+Texte und Symbole stammen aus der deutschen `certmmc.dll` (Windows 2000
+SP4; die DLL selbst liegt nicht im Repository):
+
+- Knotennamen "Ausgestellte Zertifikate" und "Gesperrte Zertifikate"
+  (Texte 17, 18), Fenstertitel "Zertifizierungsstelle (Lokal)"
+  (Texte 11, 12)
+- Sperrdialog "Zertifikatssperrung" mit dem Wortlaut "Sind Sie sicher,
+  dass Sie das Zertifikat ... sperren möchten? Das Angeben eines Grunds
+  für das Sperren ist optional." (Text 26, Dialog 326)
+- Sperrgründe wortgleich: Nicht angegeben, Schlüsselkompromiss,
+  Stellenkompromiss, Zuordnung geändert, Abgelöst, Vorgangsende,
+  Zertifikat blockiert (Texte 150-156) -- sie erscheinen auch in der
+  Liste der gesperrten Zertifikate
+- Symbole unter `res/certmmc`: Zertifizierungsstelle, Zertifikat,
+  Schlüssel; der Ordner stammt aus `els.dll`
+
 ## Abweichungen vom Original
 
 - Windows kennt Zertifikatvorlagen, Anforderungen über das Netz (Web
@@ -45,8 +63,9 @@ Eine openssl-Zertifizierungsstelle unter `/etc/ice2k/ca`:
   automatische Zertifikatanforderung über Gruppenrichtlinien.
 - Die Sperrliste wird als Datei geschrieben; sie über HTTP oder LDAP
   bereitzustellen bleibt Handarbeit.
-- Beschriftungen und Symbole sind eigene; sobald `certmgr.dll` bzw.
-  `certsrv.exe` vorliegen, werden sie angeglichen.
+- Sicherung und Wiederherstellung der Zertifizierungsstelle
+  (Assistenten in `certmmc.dll`) sowie Richtlinien- und
+  Beendigungsmodule gibt es nicht.
 
 ## Bauen
 

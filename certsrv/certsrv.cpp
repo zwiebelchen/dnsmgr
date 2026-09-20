@@ -1,7 +1,8 @@
 // certsrv.cpp
 //
-// "Zertifizierungsstelle" fuer ice2k -- Nachbau von certsrv.msc aus
-// Windows 2000 Server.
+// "Zertifizierungsstelle" fuer ice2k -- Nachbau des Snap-Ins aus Windows
+// 2000 Server. Texte wortgleich aus certmmc.dll (deutsch, Windows 2000
+// SP4); die DLL selbst liegt nicht im Repository.
 //
 // Unterbau ist eine openssl-CA unter /etc/ice2k/ca mit der ueblichen
 // Ablage: ca.crt, private/ca.key, index.txt (die Datenbank von
@@ -138,6 +139,18 @@ struct CertEntry {
 	std::string commonName;
 	std::string reason;      // Sperrgrund
 };
+
+// openssl speichert den Grund englisch; hier die Wörter aus certmmc.dll.
+static FXString reasonName(const std::string& reason) {
+	if (reason.empty() || reason == "unspecified") return "Nicht angegeben";
+	if (reason == "keyCompromise") return "Schlüsselkompromiss";
+	if (reason == "CACompromise") return "Stellenkompromiss";
+	if (reason == "affiliationChanged") return "Zuordnung geändert";
+	if (reason == "superseded") return "Abgelöst";
+	if (reason == "cessationOfOperation") return "Vorgangsende";
+	if (reason == "certificateHold") return "Zertifikat blockiert";
+	return reason.c_str();
+}
 
 static bool caExists() {
 	return runAsRoot({ "test", "-f", std::string(CA_DIR) + "/ca.crt" }) == 0;
@@ -471,22 +484,24 @@ protected:
 	RevokeDialog() {}
 public:
 	RevokeDialog(FXWindow* owner, const std::string& cn)
-		: FXDialogBox(owner, "Zertifikat sperren", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,440,0) {
+		: FXDialogBox(owner, "Zertifikatssperrung", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,460,0) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,6);
-		new FXLabel(main, FXString("Das Zertifikat \"") + cn.c_str() + "\" wird gesperrt und in die\n"
-		                  "Sperrliste aufgenommen. Das lässt sich nicht rückgängig machen.", NULL, JUSTIFY_LEFT);
+		// Text 26 und Dialog 326 aus certmmc.dll.
+		new FXLabel(main, FXString("Sind Sie sicher, dass Sie das Zertifikat \"") + cn.c_str() + "\" sperren möchten?\n"
+		                  "Das Angeben eines Grunds für das Sperren ist optional.", NULL, JUSTIFY_LEFT);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 		FXHorizontalFrame* r = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
-		new FXLabel(r, "&Grund:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,120,0);
+		new FXLabel(r, "Grund:", NULL, LAYOUT_CENTER_Y | LAYOUT_FIX_WIDTH | JUSTIFY_LEFT, 0,0,120,0);
 		reasonBox = new FXListBox(r, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
 		// Gründe des Originals (RFC 5280).
+		// Sperrgründe wortgleich aus certmmc.dll (Texte 150-156).
 		reasonBox->appendItem("Nicht angegeben");
-		reasonBox->appendItem("Schlüssel kompromittiert");
-		reasonBox->appendItem("Zertifizierungsstelle kompromittiert");
-		reasonBox->appendItem("Zugehörigkeit geändert");
-		reasonBox->appendItem("Ersetzt");
-		reasonBox->appendItem("Betrieb eingestellt");
-		reasonBox->appendItem("Sperrung vorläufig");
+		reasonBox->appendItem("Schlüsselkompromiss");
+		reasonBox->appendItem("Stellenkompromiss");
+		reasonBox->appendItem("Zuordnung geändert");
+		reasonBox->appendItem("Abgelöst");
+		reasonBox->appendItem("Vorgangsende");
+		reasonBox->appendItem("Zertifikat blockiert");
 		reasonBox->setNumVisible(7);
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,8,0, 6,0);
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
@@ -557,10 +572,12 @@ FXIMPLEMENT(CertSrvWindow, FXMainWindow, CertSrvWindowMap, ARRAYNUMBER(CertSrvWi
 
 CertSrvWindow::CertSrvWindow(FXApp* a)
 	: FXMainWindow(a, "Zertifizierungsstelle", NULL, NULL, DECOR_ALL, 0,0, 920,560) {
-	icoRoot = new FXPNGIcon(a, resico_key, IMAGE_NEAREST);
-	icoCa = new FXPNGIcon(a, resico_server, IMAGE_NEAREST);
-	icoFolder = new FXPNGIcon(a, resico_folder, IMAGE_NEAREST);
-	icoCert = new FXPNGIcon(a, resico_key, IMAGE_NEAREST);
+	// Symbole aus certmmc.dll (Stelle, Zertifikat, Schlüssel) und els.dll
+	// (Ordner) -- deutsches Windows 2000 SP4.
+	icoRoot = new FXPNGIcon(a, resico_cert_key, IMAGE_NEAREST);
+	icoCa = new FXPNGIcon(a, resico_cert_ca, IMAGE_NEAREST);
+	icoFolder = new FXPNGIcon(a, resico_cert_folder, IMAGE_NEAREST);
+	icoCert = new FXPNGIcon(a, resico_cert_cert, IMAGE_NEAREST);
 	for (FXIcon* i : { icoRoot, icoCa, icoFolder, icoCert }) i->create();
 
 	FXMenuBar* menubar = new FXMenuBar(this, LAYOUT_SIDE_TOP | LAYOUT_FILL_X);
@@ -569,7 +586,7 @@ CertSrvWindow::CertSrvWindow(FXApp* a)
 	new FXMenuCommand(vorgang, "Zertifizierungsstelle ein&richten...", NULL, this, ID_SETUP);
 	new FXMenuCommand(vorgang, "&Neues Zertifikat...", NULL, this, ID_ISSUE);
 	new FXMenuSeparator(vorgang);
-	new FXMenuCommand(vorgang, "Sperrliste &veröffentlichen", NULL, this, ID_PUBLISH_CRL);
+	new FXMenuCommand(vorgang, "&Veröffentlichen", NULL, this, ID_PUBLISH_CRL);
 	new FXMenuCommand(vorgang, "&CA-Zertifikat exportieren...", NULL, this, ID_EXPORT_CA);
 	new FXMenuCommand(vorgang, "&Sperrliste exportieren...", NULL, this, ID_EXPORT_CRL);
 	new FXMenuSeparator(vorgang);
@@ -618,7 +635,8 @@ void CertSrvWindow::reload() {
 	nodes.clear();
 	char host[256] = { 0 };
 	gethostname(host, sizeof(host) - 1);
-	FXTreeItem* root = tree->appendItem(0, FXString("Zertifizierungsstelle (Lokal: ") + host + ")", icoRoot, icoRoot);
+	// "Zertifizierungsstelle (%s)" mit "Lokal" -- Texte 11 und 12.
+	FXTreeItem* root = tree->appendItem(0, FXString("Zertifizierungsstelle (Lokal)"), icoRoot, icoRoot);
 	nodes[root] = NK_ROOT;
 	FXTreeItem* select = root;
 	if (caExists()) {
@@ -696,11 +714,12 @@ void CertSrvWindow::showFor(FXTreeItem* item) {
 	list->appendHeader("Antragsteller", NULL, 220);
 	list->appendHeader("Sperrdatum", NULL, 160);
 	list->appendHeader("Sperrgrund", NULL, 200);
+	// Gründe in der Liste mit denselben Wörtern wie im Sperrdialog.
 	for (auto& c : certs) {
 		if (c.state != 'R') continue;
 		shown.push_back(c);
 		list->appendItem(FXString(c.serial.c_str()) + "\t" + c.commonName.c_str() + "\t" +
-		                 formatCertTime(c.revoked) + "\t" + (c.reason.empty() ? "Nicht angegeben" : c.reason.c_str()), icoCert, icoCert);
+		                 formatCertTime(c.revoked) + "\t" + reasonName(c.reason), icoCert, icoCert);
 	}
 	statusbar->setText(shown.empty() ? FXString(" Kein Zertifikat gesperrt.")
 	                                 : FXString(" ") + FXString(std::to_string(shown.size()).c_str()) + " gesperrt");
@@ -722,7 +741,7 @@ long CertSrvWindow::onListRight(FXObject*, FXSelector, void* ptr) {
 			new FXMenuCommand(&menu, "Zertifikat &sperren...", NULL, this, ID_REVOKE);
 		}
 	} else if (currentKind() == NK_REVOKED) {
-		new FXMenuCommand(&menu, "Sperrliste &veröffentlichen", NULL, this, ID_PUBLISH_CRL);
+		new FXMenuCommand(&menu, "&Veröffentlichen", NULL, this, ID_PUBLISH_CRL);
 		new FXMenuCommand(&menu, "Sperrliste &exportieren...", NULL, this, ID_EXPORT_CRL);
 	} else {
 		new FXMenuCommand(&menu, "&Neues Zertifikat...", NULL, this, ID_ISSUE);
