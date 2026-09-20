@@ -1,7 +1,8 @@
 // dfs.cpp
 //
-// "Verteiltes Dateisystem" (DFS) fuer ice2k -- Nachbau des Snap-Ins aus
-// Windows 2000 Server.
+// "Verteiltes Dateisystem (DFS)" fuer ice2k -- Nachbau des Snap-Ins aus
+// Windows 2000 Server. Texte wortgleich aus dfsgui.dll (deutsch,
+// Windows 2000 SP4); die DLL selbst liegt nicht im Repository.
 //
 // Unterbau ist Samba: Ein DFS-Stamm ist eine Freigabe mit
 // "msdfs root = yes", eine DFS-Verknuepfung ein Symlink im Verzeichnis
@@ -303,10 +304,12 @@ protected:
 public:
 	enum { ID_OK = FXDialogBox::ID_LAST };
 	NewRootDialog(FXWindow* owner, const std::string& host)
-		: FXDialogBox(owner, "Neuer DFS-Stamm", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,460,0) {
+		: FXDialogBox(owner, "Assistent zum Erstellen eines neuen DFS-Stamms", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,520,0) {
 		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,12,12, 0,4);
-		new FXLabel(main, FXString("Der Stamm entsteht als Freigabe auf ") + host.c_str() + " und ist danach\n"
-		                  "unter \\\\" + host.c_str() + "\\<Stammname> erreichbar.", NULL, JUSTIFY_LEFT);
+		// Texte 244/245 aus dfsgui.dll.
+		new FXLabel(main, FXString("Geben Sie die Freigabe für den DFS-Stammdatenträger an.\n") +
+		                  "Der Stamm entsteht als Freigabe auf " + host.c_str() + " und ist danach unter\n\\\\" +
+		                  host.c_str() + "\\<DFS-Stammname> erreichbar.", NULL, JUSTIFY_LEFT);
 		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
 		auto row = [&](const char* label, const char* value) {
 			FXHorizontalFrame* r = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
@@ -315,7 +318,7 @@ public:
 			tf->setText(value);
 			return tf;
 		};
-		nameField = row("&Stammname:", "dfs");
+		nameField = row("&DFS-Stammname:", "dfs");
 		pathField = row("&Ordner:", "/srv/dfs");
 		commentField = row("&Kommentar:", "");
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0, 6,0);
@@ -367,8 +370,10 @@ public:
 			tf->setText(value);
 			return tf;
 		};
+		// Beschriftungen wie dfsgui.dll (Dialoge 194 und 205).
 		if (withName) nameField = row("&Verknüpfungsname:", "");
-		targetField = row("&Verweisziel (UNC-Pfad):", "\\\\server\\freigabe");
+		targetField = row(withName ? "&Benutzer zu diesem freigegebenen Ordner senden:"
+		                           : "&Benutzer an diesen freigegebenen Ordner verweisen:", "\\\\server\\freigabe");
 		FXHorizontalFrame* btnf = new FXHorizontalFrame(main, LAYOUT_FILL_X, 0,0,0,0, 0,0,10,0, 6,0);
 		new FXFrame(btnf, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0);
 		new FXButton(btnf, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
@@ -453,18 +458,19 @@ FXDEFMAP(DfsWindow) DfsWindowMap[] = {
 FXIMPLEMENT(DfsWindow, FXMainWindow, DfsWindowMap, ARRAYNUMBER(DfsWindowMap))
 
 DfsWindow::DfsWindow(FXApp* a)
-	: FXMainWindow(a, "Verteiltes Dateisystem", NULL, NULL, DECOR_ALL, 0,0, 900,560) {
+	: FXMainWindow(a, "Verteiltes Dateisystem (DFS)", NULL, NULL, DECOR_ALL, 0,0, 900,560) {
 	host = netbiosName();
-	icoRoot = new FXPNGIcon(a, resico_network, IMAGE_NEAREST);
-	icoDfs = new FXPNGIcon(a, resico_server, IMAGE_NEAREST);
-	icoLink = new FXPNGIcon(a, resico_folder, IMAGE_NEAREST);
-	icoTarget = new FXPNGIcon(a, resico_network, IMAGE_NEAREST);
+	// Symbole aus dfsgui.dll (deutsches Windows 2000 SP4).
+	icoRoot = new FXPNGIcon(a, resico_dfs_root, IMAGE_NEAREST);
+	icoDfs = new FXPNGIcon(a, resico_dfs_dfsroot, IMAGE_NEAREST);
+	icoLink = new FXPNGIcon(a, resico_dfs_link, IMAGE_NEAREST);
+	icoTarget = new FXPNGIcon(a, resico_dfs_replica, IMAGE_NEAREST);
 	for (FXIcon* i : { icoRoot, icoDfs, icoLink, icoTarget }) i->create();
 
 	FXMenuBar* menubar = new FXMenuBar(this, LAYOUT_SIDE_TOP | LAYOUT_FILL_X);
 	FXMenuPane* vorgang = new FXMenuPane(this);
 	new FXMenuTitle(menubar, "&Vorgang", NULL, vorgang);
-	new FXMenuCommand(vorgang, "Neuen &DFS-Stamm...", NULL, this, ID_NEW_ROOT);
+	new FXMenuCommand(vorgang, "Ne&uen DFS-Stamm...", NULL, this, ID_NEW_ROOT);
 	new FXMenuCommand(vorgang, "Neue DFS-&Verknüpfung...", NULL, this, ID_NEW_LINK);
 	new FXMenuCommand(vorgang, "Neues &Replikat...", NULL, this, ID_NEW_REPLICA);
 	new FXMenuSeparator(vorgang);
@@ -520,7 +526,7 @@ void DfsWindow::reload() {
 	getApp()->endWaitCursor();
 	tree->clearItems();
 	itemIndex.clear();
-	rootItem = tree->appendItem(0, "Verteiltes Dateisystem", icoRoot, icoRoot);
+	rootItem = tree->appendItem(0, "Verteiltes Dateisystem (DFS)", icoRoot, icoRoot);
 	for (size_t i = 0; i < roots.size(); i++) {
 		FXTreeItem* ri = tree->appendItem(rootItem, (FXString("\\\\") + host.c_str() + "\\" + roots[i].share.c_str()), icoDfs, icoDfs);
 		itemIndex[ri] = { (int)i, -1 };
@@ -608,15 +614,15 @@ long DfsWindow::onTreeRight(FXObject*, FXSelector, void* ptr) {
 	FXMenuPane menu(this);
 	auto it = itemIndex.find(item);
 	if (it == itemIndex.end()) {
-		new FXMenuCommand(&menu, "Neuen &DFS-Stamm...", NULL, this, ID_NEW_ROOT);
+		new FXMenuCommand(&menu, "Ne&uen DFS-Stamm...", NULL, this, ID_NEW_ROOT);
 	} else if (it->second.second < 0) {
 		new FXMenuCommand(&menu, "Neue DFS-&Verknüpfung...", NULL, this, ID_NEW_LINK);
 		new FXMenuSeparator(&menu);
-		new FXMenuCommand(&menu, "Stamm &entfernen", NULL, this, ID_DELETE_ROOT);
+		new FXMenuCommand(&menu, "DFS-Stamm &löschen", NULL, this, ID_DELETE_ROOT);
 	} else {
 		new FXMenuCommand(&menu, "Neues &Replikat...", NULL, this, ID_NEW_REPLICA);
 		new FXMenuSeparator(&menu);
-		new FXMenuCommand(&menu, "Verknüpfung &löschen", NULL, this, ID_DELETE_LINK);
+		new FXMenuCommand(&menu, "DFS-Ver&knüpfung entfernen", NULL, this, ID_DELETE_LINK);
 	}
 	new FXMenuSeparator(&menu);
 	new FXMenuCommand(&menu, "&Aktualisieren", NULL, this, ID_REFRESH);
@@ -633,18 +639,18 @@ long DfsWindow::onListRight(FXObject*, FXSelector, void* ptr) {
 	auto it = itemIndex.find(tree->getCurrentItem());
 	FXMenuPane menu(this);
 	if (it == itemIndex.end()) {
-		new FXMenuCommand(&menu, "Neuen &DFS-Stamm...", NULL, this, ID_NEW_ROOT);
+		new FXMenuCommand(&menu, "Ne&uen DFS-Stamm...", NULL, this, ID_NEW_ROOT);
 	} else if (it->second.second < 0) {
 		new FXMenuCommand(&menu, "Neue DFS-&Verknüpfung...", NULL, this, ID_NEW_LINK);
 		if (idx >= 0) {
 			new FXMenuSeparator(&menu);
-			new FXMenuCommand(&menu, "Verknüpfung &löschen", NULL, this, ID_DELETE_LINK);
+			new FXMenuCommand(&menu, "DFS-Ver&knüpfung entfernen", NULL, this, ID_DELETE_LINK);
 		}
 	} else {
 		new FXMenuCommand(&menu, "Neues &Replikat...", NULL, this, ID_NEW_REPLICA);
 		if (idx >= 0) {
 			new FXMenuSeparator(&menu);
-			new FXMenuCommand(&menu, "Replikat &entfernen", NULL, this, ID_DELETE_REPLICA);
+			new FXMenuCommand(&menu, "&Replikat entfernen", NULL, this, ID_DELETE_REPLICA);
 		}
 	}
 	menu.create();
@@ -667,9 +673,12 @@ long DfsWindow::onNewRoot(FXObject*, FXSelector, void*) {
 long DfsWindow::onDeleteRoot(FXObject*, FXSelector, void*) {
 	int ri = currentRoot();
 	if (ri < 0 || currentLink() >= 0) return 1;
-	if (ice2kui::question(this, MBOX_YES_NO, "DFS",
-	        "Möchten Sie den DFS-Stamm \"%s\" wirklich entfernen?\n\n"
-	        "Die Freigabe wird aus der Konfiguration genommen. Das Verzeichnis %s\n"
+	// Wortlaut wie dfsgui.dll (Text 190), ergänzt um das, was hier wirklich
+	// passiert.
+	if (ice2kui::question(this, MBOX_YES_NO, "Verteiltes Dateisystem (DFS)",
+	        "Hiermit wird der DFS-Stamm gelöscht. Clients werden nicht mehr auf dieses\n"
+	        "verteilte Dateisystem (DFS) zugreifen können. Möchten Sie fortfahren?\n\n"
+	        "Die Freigabe \"%s\" wird aus der Konfiguration genommen; das Verzeichnis %s\n"
 	        "und die darin liegenden Verknüpfungen bleiben erhalten.",
 	        roots[ri].share.c_str(), roots[ri].path.c_str()) != MBOX_CLICKED_YES) return 1;
 	FXString errorMsg;
@@ -682,7 +691,7 @@ long DfsWindow::onNewLink(FXObject*, FXSelector, void*) {
 	int ri = currentRoot();
 	if (ri < 0) return 1;
 	if (!g_haveRoot) { ice2kui::error(this, MBOX_OK, "DFS", "Ohne Root-Rechte kann nichts geändert werden."); return 1; }
-	LinkDialog dlg(this, "Neue DFS-Verknüpfung", true,
+	LinkDialog dlg(this, "Neue DFS-Verknüpfung erstellen", true,
 		FXString("Die Verknüpfung erscheint unter \\\\") + host.c_str() + "\\" + roots[ri].share.c_str() +
 		"\\<Name>\nund verweist auf eine Freigabe eines anderen Servers.");
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
@@ -703,8 +712,11 @@ long DfsWindow::onDeleteLink(FXObject*, FXSelector, void*) {
 		if (idx < 0 || idx >= (int)roots[ri].links.size()) return 1;
 		li = idx;
 	}
-	if (ice2kui::question(this, MBOX_YES_NO, "DFS",
-	        "Möchten Sie die Verknüpfung \"%s\" wirklich löschen?", roots[ri].links[li].name.c_str()) != MBOX_CLICKED_YES) return 1;
+	// Text 193 aus dfsgui.dll.
+	if (ice2kui::question(this, MBOX_YES_NO, "Verteiltes Dateisystem (DFS)",
+	        "Dies entfernt die DFS-Verknüpfung %s vom logischen Namespace.\n"
+	        "Es werden keine Daten auf dem DFS-Verknüpfungsziel gelöscht.\n\n"
+	        "Möchten Sie fortfahren?", roots[ri].links[li].name.c_str()) != MBOX_CLICKED_YES) return 1;
 	FXString errorMsg;
 	if (!removeLink(roots[ri], roots[ri].links[li], errorMsg)) ice2kui::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());
 	reload();
@@ -717,7 +729,7 @@ long DfsWindow::onNewReplica(FXObject*, FXSelector, void*) {
 		ice2kui::information(this, MBOX_OK, "DFS", "Wählen Sie zuerst die Verknüpfung, zu der ein Replikat gehören soll.");
 		return 1;
 	}
-	LinkDialog dlg(this, "Neues Replikat", false,
+	LinkDialog dlg(this, "Neues Replikat hinzufügen", false,
 		FXString("Zusätzliches Verweisziel für die Verknüpfung \"") + roots[ri].links[li].name.c_str() + "\".\n"
 		"Clients wählen eines der Ziele aus; Samba hält die Inhalte nicht selbst gleich.");
 	if (!dlg.execute(PLACEMENT_OWNER)) return 1;
@@ -739,12 +751,15 @@ long DfsWindow::onDeleteReplica(FXObject*, FXSelector, void*) {
 	if (ri < 0 || li < 0 || idx < 0 || idx >= (int)roots[ri].links[li].targets.size()) return 1;
 	DfsLink link = roots[ri].links[li];
 	if (link.targets.size() <= 1) {
-		ice2kui::information(this, MBOX_OK, "DFS",
-			"Das letzte Verweisziel lässt sich nicht entfernen.\n\nLöschen Sie stattdessen die Verknüpfung.");
+		ice2kui::information(this, MBOX_OK, "Verteiltes Dateisystem (DFS)",
+			"Das letzte Replikat lässt sich nicht entfernen.\n\n"
+			"Entfernen Sie stattdessen die DFS-Verknüpfung.");
 		return 1;
 	}
-	if (ice2kui::question(this, MBOX_YES_NO, "DFS", "Möchten Sie das Verweisziel %s wirklich entfernen?",
-	        displayTarget(link.targets[idx]).text()) != MBOX_CLICKED_YES) return 1;
+	// Text 192 aus dfsgui.dll.
+	if (ice2kui::question(this, MBOX_YES_NO, "Verteiltes Dateisystem (DFS)",
+	        "Dies entfernt das Replikat %s von dieser DFS-Verknüpfung.\n\n"
+	        "Möchten Sie fortfahren?", displayTarget(link.targets[idx]).text()) != MBOX_CLICKED_YES) return 1;
 	link.targets.erase(link.targets.begin() + idx);
 	FXString errorMsg;
 	if (!writeLink(roots[ri], link, errorMsg)) ice2kui::error(this, MBOX_OK, "DFS", "%s", errorMsg.text());

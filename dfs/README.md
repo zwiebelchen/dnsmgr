@@ -31,6 +31,22 @@ Samba bildet DFS vollständig ab:
   eingegeben wird das Ziel als UNC-Pfad (`\\server\freigabe`).
 - `host msdfs = yes` ist Samba-Vorgabe und wird vorausgesetzt.
 
+## Abgleich mit dem Original
+
+Texte und Symbole stammen aus der deutschen `dfsgui.dll` (Windows 2000
+SP4; die DLL selbst liegt nicht im Repository):
+
+- Fenster- und Wurzeltitel "Verteiltes Dateisystem (DFS)" (Text 102)
+- Befehle "Ne&uen DFS-Stamm...", "Neue DFS-&Verknüpfung...", "Neues
+  &Replikat...", "DFS-Stamm &löschen", "DFS-Ver&knüpfung entfernen",
+  "&Replikat entfernen" (Texte 262, 300-303, 351-352, 400)
+- Rückfragen beim Löschen von Stamm, Verknüpfung und Replikat
+  (Texte 190, 192, 193)
+- Dialogtitel "Assistent zum Erstellen eines neuen DFS-Stamms", "Neue
+  DFS-Verknüpfung erstellen" und "Neues Replikat hinzufügen" samt ihren
+  Beschriftungen (Dialoge 116, 194, 205)
+- Symbole unter `res/dfsgui`: Wurzel, DFS-Stamm, Verknüpfung, Replikat
+
 ## Abweichungen vom Original
 
 - Windows kennt neben eigenständigen auch **domänenbasierte** DFS-Stämme
@@ -44,8 +60,11 @@ Samba bildet DFS vollständig ab:
   erreichbar ist.
 - Verknüpfungen haben keinen Kommentar und keinen Zwischenspeicher-Wert
   (Timeout), weil ein Symlink dafür keinen Platz bietet.
-- Beschriftungen und Symbole sind eigene; sobald `dfsgui.dll` vorliegt,
-  werden sie wie in den anderen Programmen angeglichen.
+- Noch nicht umgesetzt: der Assistent als mehrseitiger Ablauf
+  (Domänen- oder eigenständiger Stamm, Hostserver, Freigabe wählen),
+  "Anzeige des DFS-Stamms entfernen" (Konsole merkt sich keine fremden
+  Stämme), "Replikationsrichtlinie...", "Status überprüfen" und
+  "Replikat offline/online schalten".
 
 ## Bauen
 
