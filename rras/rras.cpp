@@ -243,7 +243,7 @@ static FXString hostName() {
 // ---------------------------------------------------------------------
 struct IfaceInfo {
 	std::string name;
-	std::string type;      // "Loopback", "Lokale Verbindung" ...
+	std::string type;      // "Loopback" oder "Dediziert" (ipsnap.dll)
 	bool up = false;       // Verwaltungsstatus (IFF_UP)
 	bool running = false;  // Verbindung besteht (LOWER_UP)
 	std::string address;   // erste IPv4-Adresse mit Praefix
@@ -264,7 +264,7 @@ static std::vector<IfaceInfo> listInterfaces() {
 		if (at != std::string::npos) i.name = i.name.substr(0, at);
 		i.up = line.find("UP") != std::string::npos;
 		i.running = line.find("LOWER_UP") != std::string::npos;
-		i.type = i.name == "lo" ? "Loopback" : "Lokale Verbindung";
+		i.type = i.name == "lo" ? "Loopback" : "Dediziert";   // ipsnap.dll 4004/4006
 		out.push_back(i);
 	}
 	raw.clear();
@@ -1495,9 +1495,10 @@ FXDEFMAP(FilterListDialog) FilterListDialogMap[] = {
 FXIMPLEMENT(FilterListDialog, FXDialogBox, FilterListDialogMap, ARRAYNUMBER(FilterListDialogMap))
 
 // ---------------------------------------------------------------------
-// "Neue statische Route" -- die Dialoge des IP-Routers stecken in
-// iprtrui.dll, die hier nicht vorliegt; Beschriftungen daher eigene,
-// aber mit den Feldern des Originals.
+// "Statische Route" -- Aufbau und Beschriftungen wie ipsnap.dll,
+// Dialog 13012 (Schnittstelle, Ziel, Netzwerkmaske, Gateway, Metrik).
+// "Ansicht" und "Bei Bedarf herzustellende Wählverbindungen über diese
+// Route initiieren" entfallen, weil es hier keine Wählverbindungen gibt.
 // ---------------------------------------------------------------------
 class StaticRouteDialog : public FXDialogBox {
 	FXDECLARE(StaticRouteDialog)
@@ -1533,7 +1534,7 @@ public:
 		new FXButton(btnf, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_FIX_WIDTH, 0,0,88,0, 4,4,3,3);
 	}
 	long onOk(FXObject*, FXSelector, void*) {
-		if (ifaces.empty()) { ice2kui::error(this, MBOX_OK, "Statische Route", "Es wurde keine Netzwerkschnittstelle gefunden."); return 1; }
+		if (ifaces.empty()) { ice2kui::error(this, MBOX_OK, "Statische Route", "Fügen Sie mindestens eine Schnittstelle hinzu, bevor Sie eine statische Route erstellen."); return 1; }
 		unsigned a,b,c,d;
 		if (sscanf(svcprobe::trimmed(destField->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4 ||
 		    a > 255 || b > 255 || c > 255 || d > 255) {
@@ -1819,11 +1820,12 @@ void RrasWindow::showFor(FXTreeItem* item) {
 			return;
 		}
 		if (item == ifacesItem) {
-			// Spalten wie mprsnap.dll (14-17).
+			// Spalten wie mprsnap.dll (14-17); Typ und Verbindungsstatus mit den
+			// Werten aus ipsnap.dll (4004/4006, 4008/4010).
 			setColumns({ { "Schnittstelle", 200 }, { "Typ", 160 }, { "Status", 120 }, { "Status der Verbindung", 160 } });
 			for (auto& i : listInterfaces())
 				itemList->appendItem(FXString(i.name.c_str()) + "\t" + i.type.c_str() + "\t" +
-				                     (i.up ? "Aktiviert" : "Deaktiviert") + "\t" + (i.running ? "Verbunden" : "Getrennt"),
+				                     (i.up ? "Aktiviert" : "Deaktiviert") + "\t" + (i.running ? "Verbindung hergestellt" : "Verbindung getrennt"),
 				                     icoNetwork, icoNetwork);
 			statusbar->setText(" LAN-Schnittstellen und Schnittstellen für Wählen bei Bedarf");
 		} else if (item == portsItem) {
@@ -1853,7 +1855,7 @@ void RrasWindow::showFor(FXTreeItem* item) {
 				                     (r.gateway.empty() ? FXString("Direkt verbunden") : FXString(r.gateway.c_str())) + "\t" +
 				                     r.iface.c_str() + "\t" + FXString(std::to_string(r.metric).c_str()),
 				                     icoNetwork, icoNetwork);
-			statusbar->setText(" Rechtsklick in die Liste: Neue statische Route anlegen oder eine Route löschen.");
+			statusbar->setText(" Rechtsklick in die Liste: Neue Statische Route anlegen oder eine Route löschen.");
 		}
 		return;
 	}
@@ -2074,7 +2076,7 @@ long RrasWindow::onListRightClick(FXObject*, FXSelector, void* ptr) {
 	FXint idx = itemList->getItemAt(ev->win_x, ev->win_y);
 	if (idx >= 0) { itemList->setCurrentItem(idx); itemList->selectItem(idx); }
 	FXMenuPane menu(this);
-	new FXMenuCommand(&menu, "&Neue statische Route...", NULL, this, ID_NEW_ROUTE);
+	new FXMenuCommand(&menu, "Neue &Statische Route...", NULL, this, ID_NEW_ROUTE);
 	if (idx >= 0 && idx < (int)shownRoutes.size()) {
 		new FXMenuSeparator(&menu);
 		new FXMenuCommand(&menu, "&Löschen", NULL, this, ID_DELETE_ROUTE);
