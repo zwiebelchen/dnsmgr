@@ -146,6 +146,13 @@ Statische Route..." (135) sowie die Werte für Typ ("Dediziert",
 herzustellende Wählverbindungen über diese Route initiieren" entfallen,
 weil es hier keine Wählverbindungen gibt.
 
+`iprtrmgr.dll` (IP-Routerverwaltung) enthält nur wenige Texte und keine
+Dialoge, `mprapi.dll`, `iprtprio.dll` und `ospf.dll` gar keine
+Ressourcen, `rasmontr.dll`, `ipmontr.dll`, `ippromon.dll` und
+`ifmon.dll` nur netsh-Hilfetexte; daraus war nichts zu übernehmen.
+`RASDLG.DLL` enthält die Dialoge des Einwahl-Clients, nicht die der
+Konsole. `rtrfiltr.dll` liefert die Paketfilter-Dialoge.
+
 ## Bauen
 
 ```sh
