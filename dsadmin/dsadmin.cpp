@@ -2999,6 +2999,9 @@ FXIMPLEMENT(LogonWorkstationsDialog, FXDialogBox, LogonWorkstationsDialogMap, AR
 
 static std::string crlfToLf(const std::string& s);
 static std::string ldapiReadAttr(const std::string& dn, const std::string& attr);
+static std::vector<std::multimap<std::string, std::string>> ldapiSearch(const std::string& base, const char* scope,
+                                                                        const std::string& filter,
+                                                                        const std::vector<std::string>& attrs);
 static std::vector<GroupEntry> listAllUsersAsEntries();
 static DirObject dirObjectFromDn(const std::string& dn, const DomainInfo& domain, ObjType type, const std::string& sam);
 
@@ -3221,10 +3224,24 @@ public:
 		upnName = new FXTextField(upnRow, 18, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
 		upnName->setText(upnUser.c_str());
 		upnSuffix = new FXListBox(upnRow, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
-		upnSuffix->appendItem(("@" + std::string(lowerRealm.text())).c_str());
-		if (lowerCopy(upnDomain) != lowerCopy("@" + std::string(lowerRealm.text()))) upnSuffix->appendItem(upnDomain.c_str());
-		upnSuffix->setNumVisible(upnSuffix->getNumItems());
-		upnSuffix->setCurrentItem(upnSuffix->getNumItems() - 1);
+		// Wie im Original: die Domäne selbst und die alternativen
+		// UPN-Suffixe, die "Active Directory-Domänen und
+		// -Vertrauensstellungen" pflegt (uPNSuffixes an CN=Partitions).
+		std::vector<std::string> suffixes = { "@" + std::string(lowerRealm.text()) };
+		for (auto& e : ldapiSearch("CN=Partitions,CN=Configuration," + std::string(domain.baseDN.text()), "base",
+		                           "(objectClass=*)", { "uPNSuffixes" }))
+			for (auto it = e.equal_range("upnsuffixes").first; it != e.equal_range("upnsuffixes").second; ++it)
+				suffixes.push_back("@" + it->second);
+		if (std::find_if(suffixes.begin(), suffixes.end(),
+		                 [&](const std::string& x) { return lowerCopy(x) == lowerCopy(upnDomain); }) == suffixes.end())
+			suffixes.push_back(upnDomain);
+		int currentSuffix = 0;
+		for (size_t i = 0; i < suffixes.size(); i++) {
+			upnSuffix->appendItem(suffixes[i].c_str());
+			if (lowerCopy(suffixes[i]) == lowerCopy(upnDomain)) currentSuffix = (int)i;
+		}
+		upnSuffix->setNumVisible(std::min<int>(8, upnSuffix->getNumItems()));
+		upnSuffix->setCurrentItem(currentSuffix);
 
 		std::string conf = readFileUnprivileged("/etc/samba/smb.conf");
 		FXString netbios = smbConfValue(conf, "workgroup");

@@ -23,6 +23,7 @@ jeweiligen Unterordner.
 | [`dfs/`](dfs/README.md) | Verteiltes Dateisystem | Samba (msdfs) | Stämme, Verknüpfungen, Replikate |
 | [`dssite/`](dssite/README.md) | AD-Standorte und -Dienste | LDAP (CN=Sites), samba-tool sites | Standorte, Subnetze, Standortverknüpfungen |
 | [`certsrv/`](certsrv/README.md) | Zertifizierungsstelle | openssl-CA unter /etc/ice2k/ca | ausstellen, sperren, Sperrliste |
+| [`domadmin/`](domadmin/README.md) | AD-Domänen und -Vertrauensstellungen | samba-tool domain trust/level/fsmo, ldb | Vertrauensstellungen, UPN-Suffixe, Betriebsmaster |
 | [`eventvwr/`](eventvwr/README.md) | Ereignisanzeige | systemd-Journal, ersatzweise /var/log | drei Protokolle, Eigenschaften, Filter |
 | [`srvcfg/`](srvcfg/README.md) | Konfiguration des Servers | Zustand aus smb.conf, systemd und /etc/ice2k | Startseite mit Verweisen auf die übrigen Programme |
 | [`secpol/`](secpol/README.md) | Sicherheitsrichtlinien (Domäne, Domänencontroller, lokal) | dieselbe Quelle wie `dsadmin` (GPO-Sicherheitseinstellungen) | drei Konsolen über `--domain`, `--dc`, `--local` |
@@ -41,7 +42,7 @@ nicht im vollen Umfang des Originals.
 |---|---|---|---|
 | 1 | Terminaldiensteclient | -- | nicht geplant (unter Linux ein gewöhnlicher RDP-Client, z.B. `xfreerdp`) |
 | 2 | Active Directory-Benutzer und -Computer | [`dsadmin/`](dsadmin/README.md) | **umgesetzt**: Baum/Listen, Benutzer (Allgemein, Adresse, Konto, Profil, Rufnummern, Organisation, Mitglied von), Gruppen (Allgemein, Mitglieder, Mitglied von, Verwaltet von), OU/Domäne (Allgemein, Verwaltet von, Gruppenrichtlinie), Computer, Kontakte, freigegebene Ordner, Suchen, Verschieben/Umbenennen/Löschen, Werkzeugleiste und Menü "Vorgang"; darin der vollständige Gruppenrichtlinienobjekt-Editor (siehe unten) |
-| 3 | Active Directory-Domänen und -Vertrauensstellungen | -- | offen (Backend: `samba-tool domain trust`) |
+| 3 | Active Directory-Domänen und -Vertrauensstellungen | [`domadmin/`](domadmin/README.md) | **umgesetzt**: Domäneneigenschaften, Vertrauensstellungen (anlegen, prüfen, aufheben), UPN-Suffixe (auch in dsadmin wählbar), Domänennamen-Betriebsmaster; Texte aus `domadmin.dll` und `dsprop.dll` |
 | 4 | Active Directory-Standorte und -Dienste | [`dssite/`](dssite/README.md) | **teilweise**: Standorte, Server, Subnetze, Standortverknüpfungen und die Replikationstopologie unter "NTDS Settings" (Verbindungen anlegen/löschen, "Jetzt replizieren", "Topologie prüfen"). Offen: Verknüpfungsbrücken, Server verschieben, Zeitpläne |
 | 5 | Clusterverwaltung | -- | nicht geplant |
 | 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Ereignisanzeige (Anwendung, Sicherheit, System), Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Offen: Datenträgerverwaltung, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
@@ -128,6 +129,7 @@ cd eventvwr && make && ./eventvwr
 cd dfs && make && ./dfs
 cd dssite && make && ./dssite
 cd certsrv && make && ./certsrv
+cd domadmin && make && ./domadmin
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,
