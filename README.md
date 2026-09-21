@@ -23,7 +23,7 @@ jeweiligen Unterordner.
 | [`dfs/`](dfs/README.md) | Verteiltes Dateisystem | Samba (msdfs) | Stämme, Verknüpfungen, Replikate |
 | [`dssite/`](dssite/README.md) | AD-Standorte und -Dienste | LDAP (CN=Sites), samba-tool sites | Standorte, Subnetze, Standortverknüpfungen |
 | [`certsrv/`](certsrv/README.md) | Zertifizierungsstelle | openssl-CA unter /etc/ice2k/ca | ausstellen, sperren, Sperrliste |
-| [`diskmgmt/`](diskmgmt/README.md) | Datenträgerverwaltung | lsblk, parted, blkid, LVM | Anzeige von Datenträgern, Partitionen und LVM |
+| [`diskmgmt/`](diskmgmt/README.md) | Datenträgerverwaltung | lsblk, parted, blkid, LVM | Anzeige, Partitionen anlegen/löschen, formatieren, Mountpunkte |
 | [`domadmin/`](domadmin/README.md) | AD-Domänen und -Vertrauensstellungen | samba-tool domain trust/level/fsmo, ldb | Vertrauensstellungen, UPN-Suffixe, Betriebsmaster |
 | [`eventvwr/`](eventvwr/README.md) | Ereignisanzeige | systemd-Journal, ersatzweise /var/log | drei Protokolle, Eigenschaften, Filter |
 | [`srvcfg/`](srvcfg/README.md) | Konfiguration des Servers | Zustand aus smb.conf, systemd und /etc/ice2k | Startseite mit Verweisen auf die übrigen Programme |
@@ -46,7 +46,7 @@ nicht im vollen Umfang des Originals.
 | 3 | Active Directory-Domänen und -Vertrauensstellungen | [`domadmin/`](domadmin/README.md) | **umgesetzt**: Domäneneigenschaften, Vertrauensstellungen (anlegen, prüfen, aufheben), UPN-Suffixe (auch in dsadmin wählbar), Domänennamen-Betriebsmaster; Texte aus `domadmin.dll` und `dsprop.dll` |
 | 4 | Active Directory-Standorte und -Dienste | [`dssite/`](dssite/README.md) | **teilweise**: Standorte, Server, Subnetze, Standortverknüpfungen und die Replikationstopologie unter "NTDS Settings" (Verbindungen anlegen/löschen, "Jetzt replizieren", "Topologie prüfen"). Offen: Verknüpfungsbrücken, Server verschieben, Zeitpläne |
 | 5 | Clusterverwaltung | -- | nicht geplant |
-| 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Ereignisanzeige (Anwendung, Sicherheit, System), Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Datenträgerverwaltung (vorerst nur Anzeige, samt LVM als dynamische Datenträger). Offen: Ändern von Datenträgern, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
+| 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Ereignisanzeige (Anwendung, Sicherheit, System), Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Datenträgerverwaltung (Anzeige samt LVM, Basisdatenträger ändern: Signatur, Partitionen anlegen/löschen, formatieren, Mountpunkt, aktiv). Offen: LVM ändern, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
 | 7 | Datenquellen (ODBC) | -- | nicht geplant |
 | 8 | DHCP | [`dhcpmgr/`](dhcpmgr/README.md) | **umgesetzt**: Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen (Kea DHCP) |
 | 9 | Dienste | [`services/`](services/README.md) | **umgesetzt**: auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten (systemd) |

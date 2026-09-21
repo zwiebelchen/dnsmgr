@@ -387,7 +387,10 @@ Snapshot collect(Runner run) {
 				continue;
 			}
 		}
-		if (type == "loop" && parts.empty() && whole.type != "LVM2_member") continue;
+		// Loop-Geräte: Snap-Pakete (squashfs) und schreibgeschützte weglassen,
+		// beschreibbare Image-Dateien zeigen -- auch leere, damit sich eine
+		// Signatur darauf schreiben lässt.
+		if (type == "loop" && (whole.type == "squashfs" || d["ro"].truthy())) continue;
 
 		// Ohne Partitionstabelle meldet parted die Kennung "loop" und eine
 		// Pseudo-Partition über das ganze Gerät. Liegt ein Dateisystem direkt
@@ -459,6 +462,8 @@ Snapshot collect(Runner run) {
 			seg.start = p.start;
 			seg.size = p.size;
 			seg.device = partitionPath(path, p.number);
+			seg.number = p.number;
+			seg.bootFlag = p.flags.find("boot") != std::string::npos;
 			bool isExtended = dk.table == "msdos" && p.number <= 4 && p.start == extStart && extEnd > extStart;
 			if (isExtended) { seg.kind = SEG_EXTENDED; top.push_back(seg); continue; }
 			FsInfo fi = probe(run, seg.device);

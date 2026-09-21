@@ -40,6 +40,8 @@ struct Segment {
 	std::string fstype, label, mountpoint;
 	std::string lvName, vgName;     // nur LVM
 	bool isPv = false;              // Partition trägt ein LVM-PV
+	int number = 0;                 // Partitionsnummer (parted), 0 = keine
+	bool bootFlag = false;          // "aktiv" (MBR-Startkennzeichen)
 };
 
 struct Disk {
