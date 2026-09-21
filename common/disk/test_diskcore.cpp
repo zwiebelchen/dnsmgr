@@ -116,6 +116,35 @@ int main() {
 	disk::Segment part; part.kind = disk::SEG_PRIMARY; dk.segments = { part };
 	CHECK(!disk::planConvertToDynamic(dk, "daten", true).ok());
 
+	// ---- Spiegelungen ----
+	auto first = [](const disk::Plan& p) {
+		std::string s;
+		for (auto& st : p.steps) if (st.kind == disk::Step::COMMAND) { for (auto& a : st.argv) s += (s.empty() ? "" : " ") + a; break; }
+		return s;
+	};
+	disk::Segment m; m.lvName = "vol1"; m.vgName = "daten";
+	CHECK(first(disk::planAddMirror(m, disk::SEG_SIMPLE, "/dev/sdc")) == "lvconvert -y --type raid1 -m 1 daten/vol1 /dev/sdc");
+	CHECK(!disk::planAddMirror(m, disk::SEG_STRIPED, "/dev/sdc").ok());
+	CHECK(first(disk::planRemoveMirror(m, disk::SEG_MIRRORED, "/dev/sdc")) == "lvconvert -y -m 0 daten/vol1 /dev/sdc");
+	CHECK(first(disk::planSplitMirror(m, disk::SEG_MIRRORED, "vol1_kopie")) == "lvconvert -y --splitmirrors 1 --name vol1_kopie daten/vol1");
+	CHECK(!disk::planSplitMirror(m, disk::SEG_SIMPLE, "x").ok());
+	CHECK(first(disk::planRepairVolume(m, disk::SEG_RAID5, "/dev/sde")) == "lvconvert -y --repair daten/vol1 /dev/sde");
+	CHECK(first(disk::planResync(m, disk::SEG_MIRRORED)) == "lvchange --syncaction repair daten/vol1");
+	CHECK(!disk::planResync(m, disk::SEG_SIMPLE).ok());
+
+	// Zustände
+	disk::LvInfo st; st.segtype = "raid1";
+	CHECK(disk::lvStatus(st) == "Fehlerfrei");
+	st.health = "partial";
+	CHECK(disk::lvStatus(st) == "Fehlerhafte Redundanz");
+	st.health = ""; st.syncPercent = 42;
+	CHECK(disk::lvStatus(st) == "Wird neu synchronisiert (42 %)");
+
+	// PVs eines Datenträgers aus den Segmenten (RAID-Teile zählen zum Haupt-LV)
+	disk::Snapshot sn; sn.pvsegs = segs;
+	auto pv = disk::pvsOfVolume(sn, "daten", "sicher");
+	CHECK(pv.size() == 1 && pv[0] == "/dev/sdb");
+
 	printf(failures ? "%d Fehler\n" : "Alle Prüfungen bestanden.\n", failures);
 	return failures ? 1 : 0;
 }

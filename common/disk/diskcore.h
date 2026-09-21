@@ -40,6 +40,7 @@ struct Segment {
 	std::string fstype, label, mountpoint;
 	std::string lvName, vgName;     // nur LVM
 	bool isPv = false;              // Partition trägt ein LVM-PV
+	std::string status;             // Zustandstext; leer = "Fehlerfrei"
 	int number = 0;                 // Partitionsnummer (parted), 0 = keine
 	bool bootFlag = false;          // "aktiv" (MBR-Startkennzeichen)
 };
@@ -71,6 +72,11 @@ struct Volume {
 	int overheadPercent = 0;
 };
 
+struct PvSegment {
+	std::string pv, lv, vg;
+	uint64_t start = 0, size = 0;       // Bytes
+};
+
 // Ein LVM-PV (ganze Platte oder Partition) mit seiner Volumegruppe.
 struct PvInfo {
 	std::string name, vg;
@@ -80,6 +86,7 @@ struct PvInfo {
 struct Snapshot {
 	std::vector<Disk> disks;
 	std::vector<PvInfo> pvs;
+	std::vector<PvSegment> pvsegs;      // welche LVs auf welchen PVs liegen
 	std::vector<Volume> volumes;
 	std::string error;      // leer, wenn alles geklappt hat
 };
@@ -101,12 +108,12 @@ struct LvInfo {
 	uint64_t size = 0;
 	int stripes = 1;
 	std::vector<std::string> devices;   // PVs
+	std::string health;                 // lv_health_status: "", "partial", "refresh needed" ...
+	int syncPercent = 100;              // bei RAID/Spiegel: Fortschritt der Synchronisierung
 };
+// Zustand wie im Original ("Fehlerfrei", "Fehlerhafte Redundanz" ...).
+std::string lvStatus(const LvInfo& lv);
 std::vector<LvInfo> parseLvs(const std::string& json);
-struct PvSegment {
-	std::string pv, lv, vg;
-	uint64_t start = 0, size = 0;       // Bytes
-};
 std::vector<PvSegment> parsePvSegments(const std::string& json);
 std::vector<PvInfo> parsePvs(const std::string& json);
 SegmentKind lvKind(const LvInfo& lv);

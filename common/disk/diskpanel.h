@@ -25,13 +25,15 @@ protected:
 public:
 	enum { ID_VOLUMES = FXVerticalFrame::ID_LAST, ID_MAP, ID_MAP_MENU,
 	       ID_SIGNATURE, ID_CREATE, ID_DELETE, ID_DELETE_EXT, ID_FORMAT, ID_MOUNTPOINT, ID_ACTIVE, ID_RESCAN,
-	       ID_CONVERT, ID_REVERT, ID_CREATE_VOL, ID_EXTEND_VOL, ID_DELETE_VOL, ID_LAST };
+	       ID_CONVERT, ID_REVERT, ID_CREATE_VOL, ID_EXTEND_VOL, ID_DELETE_VOL,
+	       ID_ADD_MIRROR, ID_REMOVE_MIRROR, ID_SPLIT_MIRROR, ID_REPAIR_VOL, ID_RESYNC, ID_LAST };
 	DiskPanel(FXComposite* p, FXuint opts = LAYOUT_FILL_X | LAYOUT_FILL_Y);
 	long onVolumeSelected(FXObject*, FXSelector, void*);
 	long onMapSelected(FXObject*, FXSelector, void*);
 	long onMapRightClick(FXObject*, FXSelector, void*);
 	long onAction(FXObject*, FXSelector, void*);
 	long onDynamicAction(FXObject*, FXSelector, void*);
+	long onMirrorAction(FXObject*, FXSelector, void*);
 
 	void reload();                        // neu einlesen (braucht root für parted/blkid)
 	FXString statusText() const;

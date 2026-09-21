@@ -203,6 +203,9 @@ std::vector<LvInfo> parseLvs(const std::string& json) {
 			l.size = lv["lv_size"].u64();
 			std::string stripes = lv["stripes"].str();
 			if (!stripes.empty()) l.stripes = std::max(1, atoi(stripes.c_str()));
+			l.health = lv["lv_health_status"].str();
+			std::string sync = lv["sync_percent"].str();
+			if (!sync.empty()) l.syncPercent = (int)strtod(sync.c_str(), NULL);
 			// "devices": "/dev/sdb(0),/dev/sdc(0)"
 			for (auto& d : splitOn(lv["devices"].str(), ',')) {
 				std::string dev = d.substr(0, d.find('('));
@@ -259,6 +262,17 @@ std::vector<PvInfo> parsePvs(const std::string& json) {
 			out.push_back(p);
 		}
 	return out;
+}
+
+std::string lvStatus(const LvInfo& lv) {
+	// Texte aus dmdskres.dll: 6503 "Fehlerfrei", 6505 "Fehlerhafte
+	// Redundanz", 6504 "Fehlgeschlagen". Die Synchronisierung hat im
+	// Original keinen eigenen Zustand in der Liste -- hier mit Prozent.
+	if (lv.health == "partial") return "Fehlerhafte Redundanz";
+	if (lv.health == "refresh needed" || lv.health == "mismatches exist") return "Fehlerhafte Redundanz";
+	if (!lv.health.empty()) return "Fehlgeschlagen";
+	if (lv.syncPercent < 100) return "Wird neu synchronisiert (" + std::to_string(lv.syncPercent) + " %)";
+	return "Fehlerfrei";
 }
 
 SegmentKind lvKind(const LvInfo& lv) {
@@ -348,7 +362,7 @@ Snapshot collect(Runner run) {
 	// LVM
 	std::string lvOut, segOut;
 	run({ "lvs", "--reportformat", "json", "--units", "b", "-a",
-	      "-o", "lv_name,vg_name,lv_size,segtype,stripes,devices,lv_path" }, lvOut);
+	      "-o", "lv_name,vg_name,lv_size,segtype,stripes,devices,lv_path,lv_health_status,sync_percent" }, lvOut);
 	run({ "pvs", "--segments", "--reportformat", "json", "--units", "b",
 	      "-o", "pv_name,vg_name,lv_name,pvseg_start,pvseg_size,vg_extent_size" }, segOut);
 	std::vector<LvInfo> lvs = parseLvs(lvOut);
@@ -356,6 +370,7 @@ Snapshot collect(Runner run) {
 	std::string pvOut;
 	run({ "pvs", "--reportformat", "json", "--units", "b", "-o", "pv_name,vg_name,pv_size,pv_free" }, pvOut);
 	snap.pvs = parsePvs(pvOut);
+	snap.pvsegs = pvsegs;
 	auto lvByName = [&](const std::string& vg, const std::string& lv) -> const LvInfo* {
 		for (auto& l : lvs) if (l.vg == vg && l.name == lv) return &l;
 		return nullptr;
@@ -451,6 +466,7 @@ Snapshot collect(Runner run) {
 					seg.lvName = s.lv;
 					seg.vgName = s.vg;
 					seg.device = lv ? lv->path : "/dev/" + s.vg + "/" + s.lv;
+					if (lv) seg.status = lvStatus(*lv);
 					FsInfo fi = probe(run, seg.device);
 					seg.fstype = fi.type;
 					seg.label = fi.label;
@@ -564,6 +580,7 @@ Snapshot collect(Runner run) {
 		v.type = "Dynamisch";
 		v.fstype = fi.type;
 		v.status = statusFor(mp);
+		if (lvStatus(lv) != "Fehlerfrei") v.status = lvStatus(lv);
 		v.capacity = lv.size;
 		if (!mp.empty() && avail.count(mp)) v.freeBytes = avail[mp];
 		v.faultTolerant = (k == SEG_MIRRORED || k == SEG_RAID5);

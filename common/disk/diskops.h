@@ -81,6 +81,17 @@ uint64_t volumeCapacity(const NewVolume& v);
 Plan planExtendVolume(const Segment& lv, SegmentKind kind, const std::vector<std::string>& pvs, uint64_t addPerDisk);
 Plan planDeleteVolume(const Segment& lv);
 
+// ---- Spiegelungen und Reparatur ----
+// PVs, auf denen ein Datenträger liegt.
+std::vector<std::string> pvsOfVolume(const Snapshot& snap, const std::string& vg, const std::string& lv);
+
+Plan planAddMirror(const Segment& lv, SegmentKind kind, const std::string& pv);
+Plan planRemoveMirror(const Segment& lv, SegmentKind kind, const std::string& pvToRemove);
+Plan planSplitMirror(const Segment& lv, SegmentKind kind, const std::string& newName);
+Plan planRepairVolume(const Segment& lv, SegmentKind kind, const std::string& replacementPv);
+// "Spiegelung erneut synchronisieren" bzw. "Parität erneut erzeugen"
+Plan planResync(const Segment& lv, SegmentKind kind);
+
 // Führt die Schritte nacheinander aus und bricht beim ersten Fehler ab.
 // log bekommt Befehle und Ausgaben.
 bool execute(const Plan& plan, Runner run, std::string& log);

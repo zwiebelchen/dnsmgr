@@ -154,8 +154,31 @@ fünf Typen sowie Erweitern, Löschen und Umwandeln sichert zusätzlich der
 Unit-Test `common/disk/test_diskcore.cpp`. **Auf einem echten Server
 sollten diese Befehle einmal mit Testplatten ausprobiert werden.**
 
-Noch nicht umgesetzt: Spiegelung hinzufügen, entfernen, aufteilen und
-Datenträger reparieren.
+### Spiegelungen und Reparatur
+
+| Datenträger | Befehle (Texte aus `dmdskres.dll`) | Unterbau |
+|---|---|---|
+| Einfach | Spiegelung hinzufügen... | `lvconvert --type raid1 -m 1` |
+| Gespiegelt | Spiegelung erneut synchronisieren... | `lvchange --syncaction repair` |
+| Gespiegelt | Spiegelung aufteilen... | `lvconvert --splitmirrors 1 --name` |
+| Gespiegelt | Spiegelung entfernen... | `lvconvert -m 0` (Kopie auf der gewählten Platte) |
+| Gespiegelt, RAID-5 | Datenträger reparieren... | `lvconvert --repair` auf eine Ersatzplatte |
+| RAID-5 | Parität erneut erzeugen | `lvchange --syncaction repair` |
+
+Die Auswahldialoge folgen "Spiegelung zu ... hinzufügen" (Dialog 165)
+und "RAID-5-Datenträger reparieren" (Dialog 383) samt Beschreibungen;
+angeboten werden nur Platten derselben Volumegruppe, auf denen der
+Datenträger noch nicht liegt und die genug Platz haben.
+
+Der **Zustand** kommt aus `lvs` (`lv_health_status`, `sync_percent`) und
+steht in Liste und Grafik: "Fehlerfrei", "Fehlerhafte Redundanz",
+"Fehlgeschlagen" (Texte 6503-6505) sowie "Wird neu synchronisiert (…%)"
+-- dafür hat das Original keinen eigenen Text.
+
+Wie beim Anlegen gilt: Die Befehle sind geplant, unit-getestet und in
+der Oberfläche bis zur Befehlsvorschau geprüft (die Anzeige mit
+gespiegelten und RAID-5-Datenträgern über eingespielte `lvs`/`pvs`-
+Ausgaben); ausgeführt werden können sie nur mit Device-Mapper.
 
 Benötigt: `parted`, `util-linux` (`partx`, `wipefs`) und `lvm2`.
 

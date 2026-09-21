@@ -406,6 +406,70 @@ Plan planDeleteVolume(const Segment& lv) {
 }
 
 // ---------------------------------------------------------------------
+// Spiegelungen und Reparatur
+// ---------------------------------------------------------------------
+std::vector<std::string> pvsOfVolume(const Snapshot& snap, const std::string& vg, const std::string& lv) {
+	std::vector<std::string> out;
+	for (auto& s : snap.pvsegs)
+		if (s.vg == vg && s.lv == lv && std::find(out.begin(), out.end(), s.pv) == out.end()) out.push_back(s.pv);
+	return out;
+}
+
+static std::string lvRef(const Segment& lv) { return lv.vgName + "/" + lv.lvName; }
+
+Plan planAddMirror(const Segment& lv, SegmentKind kind, const std::string& pv) {
+	Plan p;
+	if (lv.lvName.empty()) { p.error = "Das ist kein dynamischer Datenträger."; return p; }
+	if (kind != SEG_SIMPLE) { p.error = "Nur einfache Datenträger lassen sich spiegeln."; return p; }
+	if (pv.empty()) { p.error = "Wählen Sie eine Festplatte für die Spiegelung."; return p; }
+	// Text 4001
+	p.warning = "Das Hinzufügen eines Spiegels zu einem vorhandenen Datenträger führt zu Datenredundanz,\n"
+	            "da mehrfache Kopien der Datenträgerdaten gespeichert werden.";
+	p.steps.push_back({ { "lvconvert", "-y", "--type", "raid1", "-m", "1", lvRef(lv), pv }, "Spiegelung hinzufügen" });
+	return p;
+}
+
+Plan planRemoveMirror(const Segment& lv, SegmentKind kind, const std::string& pvToRemove) {
+	Plan p;
+	if (kind != SEG_MIRRORED) { p.error = "Der Datenträger ist nicht gespiegelt."; return p; }
+	if (pvToRemove.empty()) { p.error = "Wählen Sie die Festplatte, deren Spiegel entfernt werden soll."; return p; }
+	// Text 4007
+	p.warning = "Das Entfernen eines Spiegels dieses Datenträgers entfernt eine Kopie der Daten dieses\n"
+	            "Datenträgers. Der Datenträger wird nicht länger zusätzliche Daten enthalten.";
+	p.steps.push_back({ { "lvconvert", "-y", "-m", "0", lvRef(lv), pvToRemove }, "Spiegelung entfernen" });
+	return p;
+}
+
+Plan planSplitMirror(const Segment& lv, SegmentKind kind, const std::string& newName) {
+	Plan p;
+	if (kind != SEG_MIRRORED) { p.error = "Der Datenträger ist nicht gespiegelt."; return p; }
+	if (!validName(newName)) { p.error = "Der Name des neuen Datenträgers darf nur Buchstaben, Ziffern, _ - . + enthalten."; return p; }
+	// Text 53402
+	p.warning = "Wenn Sie die Spiegelung aufteilen, werden die Daten nicht mehr fehlertolerant sein.\n\n"
+	            "Sind Sie sicher, dass Sie die Spiegelung aufteilen möchten?\n\n"
+	            "Aus der zweiten Kopie entsteht der einfache Datenträger \"" + newName + "\".";
+	p.steps.push_back({ { "lvconvert", "-y", "--splitmirrors", "1", "--name", newName, lvRef(lv) }, "Spiegelung aufteilen" });
+	return p;
+}
+
+Plan planRepairVolume(const Segment& lv, SegmentKind kind, const std::string& replacementPv) {
+	Plan p;
+	if (kind != SEG_MIRRORED && kind != SEG_RAID5) { p.error = "Nur gespiegelte und RAID-5-Datenträger lassen sich reparieren."; return p; }
+	if (replacementPv.empty()) { p.error = "Wählen Sie eine Festplatte als Ersatz."; return p; }
+	std::vector<std::string> a = { "lvconvert", "-y", "--repair", lvRef(lv), replacementPv };
+	p.steps.push_back({ a, "Datenträger reparieren" });
+	return p;
+}
+
+Plan planResync(const Segment& lv, SegmentKind kind) {
+	Plan p;
+	if (kind != SEG_MIRRORED && kind != SEG_RAID5) { p.error = "Nur gespiegelte und RAID-5-Datenträger lassen sich neu synchronisieren."; return p; }
+	p.steps.push_back({ { "lvchange", "--syncaction", "repair", lvRef(lv) },
+	                    kind == SEG_RAID5 ? "Parität erneut erzeugen" : "Spiegelung erneut synchronisieren" });
+	return p;
+}
+
+// ---------------------------------------------------------------------
 // Ausführen
 // ---------------------------------------------------------------------
 

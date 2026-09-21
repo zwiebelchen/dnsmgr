@@ -204,7 +204,9 @@ public:
 					dc.drawText(bx + 4, ty, name.c_str());
 					dc.setFont(normal);
 					dc.drawText(bx + 4, ty + lineH, (disk::formatSize(s.size) + (s.fstype.empty() ? "" : " " + s.fstype)).c_str());
-					dc.drawText(bx + 4, ty + 2 * lineH, s.mountpoint == "/" ? "Fehlerfrei (System)" : "Fehlerfrei");
+					std::string st = !s.status.empty() && s.status != "Fehlerfrei" ? s.status
+					               : s.mountpoint == "/" ? "Fehlerfrei (System)" : "Fehlerfrei";
+					dc.drawText(bx + 4, ty + 2 * lineH, st.c_str());
 				}
 				dc.clearClipRectangle();
 				if ((int)di == selDisk && (int)si == selSeg) {
@@ -280,6 +282,7 @@ FXDEFMAP(DiskPanel) DiskPanelMap[] = {
 	FXMAPFUNC(SEL_RIGHTBUTTONRELEASE, DiskPanel::ID_MAP, DiskPanel::onMapRightClick),
 	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_SIGNATURE, DiskPanel::ID_RESCAN, DiskPanel::onAction),
 	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_CONVERT, DiskPanel::ID_DELETE_VOL, DiskPanel::onDynamicAction),
+	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_ADD_MIRROR, DiskPanel::ID_RESYNC, DiskPanel::onMirrorAction),
 };
 FXIMPLEMENT(DiskPanel, FXVerticalFrame, DiskPanelMap, ARRAYNUMBER(DiskPanelMap))
 
@@ -728,6 +731,21 @@ long DiskPanel::onMapRightClick(FXObject*, FXSelector, void* ptr) {
 			new FXMenuCommand(&menu, "&Formatieren...", NULL, this, ID_FORMAT);
 			if (sg.kind == disk::SEG_SIMPLE || sg.kind == disk::SEG_SPANNED)
 				new FXMenuCommand(&menu, "Da&tenträger erweitern...", NULL, this, ID_EXTEND_VOL);
+			// Texte 2027, 2031, 2043, 2029, 2055 und 4006
+			if (sg.kind == disk::SEG_SIMPLE)
+				new FXMenuCommand(&menu, "&Spiegelung hinzufügen...", NULL, this, ID_ADD_MIRROR);
+			if (sg.kind == disk::SEG_MIRRORED) {
+				new FXMenuSeparator(&menu);
+				new FXMenuCommand(&menu, "&Spiegelung erneut synchronisieren...", NULL, this, ID_RESYNC);
+				new FXMenuCommand(&menu, "Spiegelung auf&teilen...", NULL, this, ID_SPLIT_MIRROR);
+				new FXMenuCommand(&menu, "Spiegelung &entfernen...", NULL, this, ID_REMOVE_MIRROR);
+				new FXMenuCommand(&menu, "Datenträger &reparieren...", NULL, this, ID_REPAIR_VOL);
+			}
+			if (sg.kind == disk::SEG_RAID5) {
+				new FXMenuSeparator(&menu);
+				new FXMenuCommand(&menu, "&Parität erneut erzeugen", NULL, this, ID_RESYNC);
+				new FXMenuCommand(&menu, "Datenträger &reparieren...", NULL, this, ID_REPAIR_VOL);
+			}
 			new FXMenuSeparator(&menu);
 			new FXMenuCommand(&menu, "Datenträger &löschen...", NULL, this, ID_DELETE_VOL);
 			any = true;
@@ -1191,6 +1209,109 @@ long DiskPanel::onDynamicAction(FXObject*, FXSelector sel, void*) {
 		} else if (id == ID_DELETE_VOL) {
 			changed = runPlan(this, "Datenträger löschen", disk::planDeleteVolume(sg));
 		}
+	}
+	if (changed) reload();
+	return 1;
+}
+
+// =====================================================================
+// Spiegelungen und Reparatur
+// =====================================================================
+
+// Auswahl einer Festplatte -- Aufbau wie "Spiegelung zu ... hinzufügen"
+// (Dialog 165): Beschreibung, Aufforderung, Liste.
+static bool pickDiskDialog(FXWindow* owner, const FXString& title, const FXString& description,
+                           const FXString& prompt, const std::vector<std::string>& items,
+                           const FXString& okText, std::string& picked) {
+	if (items.empty()) {
+		ice2kui::information(owner, MBOX_OK, title.text(), "Es ist keine geeignete Festplatte vorhanden.\n\n"
+		                     "Benötigt wird eine dynamische Festplatte derselben Volumegruppe mit genügend freiem Speicher.");
+		return false;
+	}
+	FXDialogBox dlg(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,560,380, 12,12,12,12, 0,6);
+	// Knöpfe zuerst und unten verankert, damit die Liste sie nicht verdrängt.
+	FXHorizontalFrame* btns = new FXHorizontalFrame(&dlg, LAYOUT_SIDE_BOTTOM | LAYOUT_RIGHT, 0,0,0,0, 0,0,6,0, 6,0);
+	new FXButton(btns, okText, NULL, &dlg, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+	new FXButton(btns, "Abbrechen", NULL, &dlg, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+	FXGroupBox* g = new FXGroupBox(&dlg, "Beschreibung", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8);
+	new FXLabel(g, description, NULL, JUSTIFY_LEFT);
+	new FXLabel(&dlg, prompt, NULL, JUSTIFY_LEFT);
+	FXPacker* lf = new FXPacker(&dlg, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+	FXList* list = new FXList(lf, NULL, 0, LIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+	for (auto& i : items) list->appendItem(i.c_str());
+	list->setCurrentItem(0);
+	list->selectItem(0);
+	if (!dlg.execute(PLACEMENT_OWNER)) return false;
+	std::string t = list->getItemText(std::max(0, list->getCurrentItem())).text();
+	picked = t.substr(0, t.find(' '));
+	return true;
+}
+
+// Festplatten derselben Volumegruppe, auf denen der Datenträger noch
+// nicht liegt und die genug Platz haben.
+static std::vector<std::string> spareDisks(const disk::Snapshot& snap, const std::string& vg,
+                                           const std::vector<std::string>& used, uint64_t need) {
+	std::vector<std::string> out;
+	for (auto& p : snap.pvs)
+		if (p.vg == vg && p.free >= need && std::find(used.begin(), used.end(), p.name) == used.end())
+			out.push_back(p.name + " (" + disk::formatSize(p.free) + " frei)");
+	return out;
+}
+
+long DiskPanel::onMirrorAction(FXObject*, FXSelector sel, void*) {
+	int d = map->selectedDisk(), s = map->selectedSegment();
+	if (d < 0 || s < 0) return 1;
+	const disk::Segment sg = snap.disks[d].segments[s];
+	if (sg.lvName.empty()) return 1;
+	std::vector<std::string> used = disk::pvsOfVolume(snap, sg.vgName, sg.lvName);
+	FXString name = FXString(sg.vgName.c_str()) + "/" + sg.lvName.c_str();
+	bool changed = false;
+	std::string pv;
+	switch (FXSELID(sel)) {
+		case ID_ADD_MIRROR:
+			// Texte 4000, 4001, 4003
+			if (pickDiskDialog(this, FXString("Spiegelung zu ") + name + " hinzufügen",
+			        "Das Hinzufügen eines Spiegels zu einem vorhandenen Datenträger führt zu\n"
+			        "Datenredundanz, da mehrfache Kopien der Datenträgerdaten gespeichert werden.",
+			        FXString("Wählen Sie einen Datenträger, der als gespiegelter Speicherplatz für ") + name + "\nverwendet werden soll.",
+			        spareDisks(snap, sg.vgName, used, sg.size + (8ull << 20)), "Spiegelung hinzufügen", pv))
+				changed = runPlan(this, "Spiegelung hinzufügen", disk::planAddMirror(sg, sg.kind, pv));
+			break;
+		case ID_REMOVE_MIRROR: {
+			// Texte 4006, 4007, 4008
+			std::vector<std::string> items;
+			for (auto& u : used) items.push_back(u);
+			if (pickDiskDialog(this, "Spiegelung entfernen",
+			        "Das Entfernen eines Spiegels dieses Datenträgers entfernt eine Kopie der Daten\n"
+			        "dieses Datenträgers. Der Datenträger wird nicht länger zusätzliche Daten enthalten.",
+			        FXString("Wählen Sie einen Datenträger, um gespiegelten Speicherplatz von ") + name + "\nzu entfernen.",
+			        items, "Spiegelung entfernen", pv))
+				changed = runPlan(this, "Spiegelung entfernen", disk::planRemoveMirror(sg, sg.kind, pv));
+			break;
+		}
+		case ID_SPLIT_MIRROR: {
+			FXString newName = FXString(sg.lvName.c_str()) + "_2";
+			if (FXInputDialog::getString(newName, this, "Spiegelung aufteilen",
+			        "Name des einfachen Datenträgers, der aus der zweiten Kopie entsteht:"))
+				changed = runPlan(this, "Spiegelung aufteilen", disk::planSplitMirror(sg, sg.kind, newName.text()));
+			break;
+		}
+		case ID_REPAIR_VOL:
+			// Dialog 383 (RAID-5) bzw. sinngemäß für Spiegel
+			if (pickDiskDialog(this, sg.kind == disk::SEG_RAID5 ? "RAID-5-Datenträger reparieren" : "Gespiegelten Datenträger reparieren",
+			        sg.kind == disk::SEG_RAID5
+			            ? "Ein fehlender oder fehlerhafter Teil des Datenträgers wird auf einer anderen\nFestplatte neu erzeugt."
+			            : "Die fehlende oder fehlerhafte Kopie wird auf einer anderen Festplatte neu erzeugt.",
+			        sg.kind == disk::SEG_RAID5
+			            ? "Wählen Sie eine der unten aufgeführten Festplatten als Ersatz für den\nbeschädigten RAID-5-Datenträger."
+			            : "Wählen Sie eine der unten aufgeführten Festplatten als Ersatz für den\nbeschädigten gespiegelten Datenträger.",
+			        spareDisks(snap, sg.vgName, used, sg.size + (8ull << 20)), "OK", pv))
+				changed = runPlan(this, "Datenträger reparieren", disk::planRepairVolume(sg, sg.kind, pv));
+			break;
+		case ID_RESYNC:
+			changed = runPlan(this, sg.kind == disk::SEG_RAID5 ? "Parität erneut erzeugen" : "Spiegelung erneut synchronisieren",
+			                  disk::planResync(sg, sg.kind));
+			break;
 	}
 	if (changed) reload();
 	return 1;
