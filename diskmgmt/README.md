@@ -102,13 +102,62 @@ leere Platte; Ablehnen bei eingehängter und bei Systempartition.
 Bewusst **nicht** vorgesehen: Verkleinern und Verschieben von
 Partitionen.
 
-## Noch offen
+## Dynamische Datenträger (LVM)
 
-Dynamische Datenträger (LVM): in dynamische Festplatte umwandeln, die
-fünf Volumetypen anlegen, Datenträger erweitern.
+| Stelle | Befehle (Texte aus `dmdskres.dll`) | Unterbau |
+|---|---|---|
+| Plattenblock einer leeren Basisfestplatte | In dynamische Festplatte umwandeln... | `pvcreate`, dann `vgcreate` bzw. `vgextend` |
+| Plattenblock einer leeren dynamischen Festplatte | In eine Basisfestplatte zurückkonvertieren | `vgreduce` bzw. `vgremove`, dann `pvremove` |
+| Nicht zugeordneter Bereich einer dynamischen Festplatte | Datenträger erstellen... | `lvcreate` |
+| Datenträger (LV) | Laufwerkbuchstaben und -pfad ändern..., Formatieren..., Datenträger erweitern..., Datenträger löschen... | fstab/`mount`, `mkfs`, `lvextend -r`, `lvremove` |
 
-Benötigt: `parted` und `util-linux` (`partx`), für LVM zusätzlich
-`lvm2`.
+Beim Umwandeln wählt man eine vorhandene oder neue Volumegruppe --
+Windows 2000 hat eine einzige Datenträgergruppe je Rechner, LVM beliebig
+viele.
+
+Der **Assistent zum Erstellen von Datenträgern** hat die Seiten des
+Originals: Willkommen, Typ des Datenträgers (mit den Beschreibungen des
+Originals), Festplatten (zwei Listen mit "Hinzufügen >>", "<< Entfernen",
+"<< Alle entfernen" und "Für jede ausgewählte Festplatte: ... MB"),
+Laufwerkpfad, Formatieren, Fertigstellen. Hinzu kommt ein Feld für den
+Namen, den LVM verlangt.
+
+Die Größe wird wie im Original **je Festplatte** angegeben; daraus ergibt
+sich die nutzbare Größe:
+
+| Typ | Festplatten | nutzbar | `lvcreate` |
+|---|---|---|---|
+| Einfach | 1 | 1 × Größe | linear |
+| Übergreifend | ≥ 2 | n × Größe | linear über alle |
+| Stripeset | ≥ 2 | n × Größe | `-i n` |
+| Gespiegelt | 2 | 1 × Größe | `--type raid1 -m 1` |
+| RAID-5 | ≥ 3 | (n − 1) × Größe | `--type raid5 -i n−1` |
+
+**Erweitern** geht wie im Original nur für einfache und übergreifende
+Datenträger; `lvextend -r` vergrößert das Dateisystem gleich mit.
+**Löschen** verweigert eingehängte und den Systemdatenträger.
+
+Nur **leere** Basisfestplatten lassen sich umwandeln: Windows 2000
+behält beim Umwandeln die Partitionen, LVM könnte das nur, indem es die
+Daten verschiebt. Ebenso lassen sich nur leere dynamische Festplatten
+zurückkonvertieren.
+
+### Stand der Tests
+
+Umwandeln und Zurückkonvertieren sind mit Loop-Geräten vollständig
+getestet. Das Anlegen, Erweitern und Löschen von LVs braucht den
+Device-Mapper des Kernels, der in der Testumgebung (Container) fehlt;
+dort ist deshalb nur geprüft, dass die richtigen Befehle geplant, zur
+Bestätigung angezeigt und bei einem Fehler sauber abgebrochen werden --
+mit der vollständigen Meldung von LVM im Protokoll. Die Planung aller
+fünf Typen sowie Erweitern, Löschen und Umwandeln sichert zusätzlich der
+Unit-Test `common/disk/test_diskcore.cpp`. **Auf einem echten Server
+sollten diese Befehle einmal mit Testplatten ausprobiert werden.**
+
+Noch nicht umgesetzt: Spiegelung hinzufügen, entfernen, aufteilen und
+Datenträger reparieren.
+
+Benötigt: `parted`, `util-linux` (`partx`, `wipefs`) und `lvm2`.
 
 ## Bauen
 

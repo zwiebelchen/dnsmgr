@@ -246,6 +246,166 @@ Plan planSetActive(const Disk& d, const Segment& s) {
 }
 
 // ---------------------------------------------------------------------
+// Dynamische Datenträger (LVM)
+// ---------------------------------------------------------------------
+static bool validName(const std::string& n) {
+	if (n.empty() || n.size() > 60 || n[0] == '-') return false;
+	for (char c : n) if (!isalnum((unsigned char)c) && c != '_' && c != '-' && c != '.' && c != '+') return false;
+	return true;
+}
+
+Plan planConvertToDynamic(const Disk& d, const std::string& vg, bool newVg) {
+	Plan p;
+	if (d.cdrom || d.unreadable || d.removable) { p.error = "Dieser Datenträger kann nicht umgewandelt werden."; return p; }
+	if (d.dynamic) { p.error = "Die Festplatte ist bereits eine dynamische Festplatte."; return p; }
+	for (auto& s : d.segments)
+		if (s.kind != SEG_UNALLOCATED) {
+			// Windows wandelt auch Platten mit Partitionen um; LVM kann das
+			// nicht, ohne die Daten zu verschieben -- deshalb nur leere.
+			p.error = "Die Festplatte enthält Partitionen.\n\n"
+			          "Nur leere Basisfestplatten lassen sich hier in dynamische Festplatten umwandeln.";
+			return p;
+		}
+	if (!validName(vg)) { p.error = "Der Name der Volumegruppe darf nur Buchstaben, Ziffern, _ - . + enthalten."; return p; }
+	p.warning = "Die Festplatte " + d.path + " wird zu einer dynamischen Festplatte (LVM-PV)\n"
+	            "in der Volumegruppe \"" + vg + "\". Eine vorhandene, leere Partitionstabelle wird entfernt.";
+	if (!d.table.empty()) p.steps.push_back({ { "wipefs", "-a", d.path }, "Leere Partitionstabelle entfernen" });
+	p.steps.push_back({ { "pvcreate", "-y", d.path }, "Physisches Volume anlegen" });
+	if (newVg) p.steps.push_back({ { "vgcreate", vg, d.path }, "Volumegruppe anlegen" });
+	else p.steps.push_back({ { "vgextend", vg, d.path }, "Zur Volumegruppe hinzufügen" });
+	return p;
+}
+
+Plan planRevertToBasic(const Disk& d, const Snapshot& snap) {
+	Plan p;
+	if (!d.dynamic) { p.error = "Die Festplatte ist keine dynamische Festplatte."; return p; }
+	for (auto& s : d.segments)
+		if (s.kind != SEG_UNALLOCATED) {
+			p.error = "Auf der Festplatte befinden sich noch Datenträger.\n\n"
+			          "Nur leere dynamische Festplatten lassen sich zurückkonvertieren.";
+			return p;
+		}
+	std::string vg;
+	int pvsInVg = 0;
+	for (auto& pv : snap.pvs) if (pv.name == d.path) vg = pv.vg;
+	for (auto& pv : snap.pvs) if (!vg.empty() && pv.vg == vg) pvsInVg++;
+	// Text 53329 aus dmdskres.dll, sinngemäß
+	p.warning = "Wenn Sie diese Festplatte wieder zu einer Basisfestplatte zurückkonvertieren,\n"
+	            "wird sie aus der Volumegruppe \"" + vg + "\" entfernt.";
+	if (!vg.empty()) {
+		if (pvsInVg > 1) p.steps.push_back({ { "vgreduce", vg, d.path }, "Aus der Volumegruppe entfernen" });
+		else p.steps.push_back({ { "vgremove", "-y", vg }, "Leere Volumegruppe entfernen" });
+	}
+	p.steps.push_back({ { "pvremove", "-y", d.path }, "Physisches Volume entfernen" });
+	return p;
+}
+
+uint64_t volumeCapacity(const NewVolume& v) {
+	uint64_t n = v.pvs.size();
+	switch (v.kind) {
+		case SEG_MIRRORED: return v.sizePerDisk;
+		case SEG_RAID5: return n >= 3 ? v.sizePerDisk * (n - 1) : 0;
+		default: return v.sizePerDisk * n;
+	}
+}
+
+// Formatieren und Einhängen eines neuen Datenträgers (LV oder Partition).
+static void addFormatSteps(Plan& p, const std::string& dev, bool format, const std::string& fstype,
+                           const std::string& label, bool quick, const std::string& mountpoint) {
+	if (!format) return;
+	p.steps.push_back({ mkfsArgs(fstype, label, quick, dev), "Formatieren" });
+	if (mountpoint.empty()) return;
+	p.steps.push_back({ { "mkdir", "-p", mountpoint }, "Ordner anlegen" });
+	Step fs;
+	fs.kind = Step::FSTAB_SET;
+	fs.device = dev;
+	fs.mountpoint = mountpoint;
+	fs.fstype = fstype;
+	fs.description = "In /etc/fstab eintragen";
+	p.steps.push_back(fs);
+	p.steps.push_back({ { "mount", mountpoint }, "Einhängen" });
+}
+
+Plan planCreateVolume(const NewVolume& v) {
+	Plan p;
+	size_t n = v.pvs.size();
+	if (!validName(v.name)) { p.error = "Der Name des Datenträgers darf nur Buchstaben, Ziffern, _ - . + enthalten."; return p; }
+	if (!validName(v.vg)) { p.error = "Keine gültige Volumegruppe."; return p; }
+	if (v.sizePerDisk < (4ull << 20)) { p.error = "Der Datenträger ist zu klein."; return p; }
+	// Mindestzahl der Festplatten wie im Original
+	if (v.kind == SEG_SIMPLE && n != 1) { p.error = "Ein einfacher Datenträger liegt auf genau einer Festplatte."; return p; }
+	if (v.kind == SEG_SPANNED && n < 2) { p.error = "Ein übergreifender Datenträger braucht mindestens zwei Festplatten."; return p; }
+	if (v.kind == SEG_STRIPED && n < 2) { p.error = "Ein Stripesetdatenträger braucht mindestens zwei Festplatten."; return p; }
+	if (v.kind == SEG_MIRRORED && n != 2) { p.error = "Ein gespiegelter Datenträger braucht genau zwei Festplatten."; return p; }
+	if (v.kind == SEG_RAID5 && n < 3) { p.error = "Ein RAID-5-Datenträger braucht mindestens drei Festplatten."; return p; }
+
+	// LVM erwartet die nutzbare Größe; wir rechnen aus "je Festplatte" um.
+	uint64_t mib = 1024 * 1024;
+	uint64_t size = volumeCapacity(v) / mib * mib;
+	std::vector<std::string> a = { "lvcreate", "-y", "-n", v.name };
+	switch (v.kind) {
+		case SEG_STRIPED: a.push_back("-i"); a.push_back(std::to_string(n)); break;
+		case SEG_MIRRORED: a.push_back("--type"); a.push_back("raid1"); a.push_back("-m"); a.push_back("1"); break;
+		case SEG_RAID5: a.push_back("--type"); a.push_back("raid5"); a.push_back("-i"); a.push_back(std::to_string(n - 1)); break;
+		default: break;
+	}
+	a.push_back("-L");
+	a.push_back(std::to_string(size / mib) + "m");
+	a.push_back(v.vg);
+	for (auto& pv : v.pvs) a.push_back(pv);
+	p.steps.push_back({ a, "Datenträger anlegen" });
+	std::string dev = "/dev/" + v.vg + "/" + v.name;
+	Step wait;
+	wait.kind = Step::WAIT_DEVICE;
+	wait.device = dev;
+	wait.description = "auf " + dev + " warten";
+	p.steps.push_back(wait);
+	addFormatSteps(p, dev, v.format, v.fstype, v.label, v.quick, v.mountpoint);
+	return p;
+}
+
+Plan planExtendVolume(const Segment& lv, SegmentKind kind, const std::vector<std::string>& pvs, uint64_t addPerDisk) {
+	Plan p;
+	if (lv.lvName.empty()) { p.error = "Das ist kein dynamischer Datenträger."; return p; }
+	if (kind != SEG_SIMPLE && kind != SEG_SPANNED) {
+		// Text der Beschreibung 384: nur einfache und übergreifende
+		p.error = "Nur einfache und übergreifende Datenträger lassen sich erweitern.";
+		return p;
+	}
+	if (pvs.empty() || addPerDisk < (4ull << 20)) { p.error = "Wählen Sie Festplatten und eine Größe."; return p; }
+	uint64_t mib = 1024 * 1024;
+	uint64_t add = addPerDisk * pvs.size() / mib;
+	// -r vergrößert das Dateisystem gleich mit (ext4, xfs, btrfs).
+	std::vector<std::string> a = { "lvextend", "-r", "-L", "+" + std::to_string(add) + "m", lv.vgName + "/" + lv.lvName };
+	for (auto& pv : pvs) a.push_back(pv);
+	p.steps.push_back({ a, "Datenträger erweitern" });
+	return p;
+}
+
+Plan planDeleteVolume(const Segment& lv) {
+	Plan p;
+	if (lv.lvName.empty()) { p.error = "Das ist kein dynamischer Datenträger."; return p; }
+	if (lv.mountpoint == "/") { p.error = "Der Systemdatenträger kann nicht gelöscht werden."; return p; }   // Text 53483
+	if (!lv.mountpoint.empty()) {
+		p.error = "Der Datenträger ist unter " + lv.mountpoint + " eingehängt.\n\n"
+		          "Hängen Sie ihn zuerst aus: \"Laufwerkbuchstaben und -pfad ändern...\" und dort\n"
+		          "\"Keinen Laufwerkbuchstaben oder -pfad zuweisen\".";
+		return p;
+	}
+	std::string name = lv.label.empty() ? lv.lvName : lv.label + " (" + lv.lvName + ")";
+	// Text 40010
+	p.warning = "Alle Daten auf \"" + name + "\" werden verloren gehen.\n\n"
+	            "Sind Sie sicher, dass \"" + name + "\" gelöscht werden soll?";
+	Step rm;
+	rm.kind = Step::FSTAB_REMOVE;
+	rm.device = lv.device;
+	rm.description = "fstab-Einträge entfernen";
+	p.steps.push_back(rm);
+	p.steps.push_back({ { "lvremove", "-y", lv.vgName + "/" + lv.lvName }, "Datenträger löschen" });
+	return p;
+}
+
+// ---------------------------------------------------------------------
 // Ausführen
 // ---------------------------------------------------------------------
 
@@ -301,7 +461,7 @@ bool execute(const Plan& plan, Runner run, std::string& log) {
 			bool found = false;
 			for (int i = 0; i < 30 && !found; i++) {
 				if (run({ "test", "-b", s.device }, o) == 0) found = true;
-				else { run({ "partx", "-a", s.disk }, o); usleep(200000); }
+				else { if (!s.disk.empty()) run({ "partx", "-a", s.disk }, o); usleep(200000); }
 			}
 			if (!found) { log += "Das Gerät " + s.device + " ist nicht erschienen.\n"; return false; }
 			continue;

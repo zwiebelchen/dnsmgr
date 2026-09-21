@@ -71,8 +71,15 @@ struct Volume {
 	int overheadPercent = 0;
 };
 
+// Ein LVM-PV (ganze Platte oder Partition) mit seiner Volumegruppe.
+struct PvInfo {
+	std::string name, vg;
+	uint64_t size = 0, free = 0;
+};
+
 struct Snapshot {
 	std::vector<Disk> disks;
+	std::vector<PvInfo> pvs;
 	std::vector<Volume> volumes;
 	std::string error;      // leer, wenn alles geklappt hat
 };
@@ -101,6 +108,7 @@ struct PvSegment {
 	uint64_t start = 0, size = 0;       // Bytes
 };
 std::vector<PvSegment> parsePvSegments(const std::string& json);
+std::vector<PvInfo> parsePvs(const std::string& json);
 SegmentKind lvKind(const LvInfo& lv);
 
 } // namespace disk

@@ -36,6 +36,35 @@ static int runAsRoot(const std::vector<std::string>& args, std::string& out) {
 	return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
+// Für die Ausführung: Fehlerausgabe mitschneiden, damit das Protokoll
+// die Meldungen von parted, mkfs und LVM enthält.
+static int runAsRootWithErrors(const std::vector<std::string>& args, std::string& out) {
+	std::vector<std::string> full = { "i2ksudo" };
+	for (auto& a : args) full.push_back(a);
+	std::vector<char*> argv;
+	for (auto& a : full) argv.push_back((char*)a.c_str());
+	argv.push_back(NULL);
+	int fd[2];
+	if (pipe(fd) != 0) return -1;
+	pid_t pid = fork();
+	if (pid == 0) {
+		dup2(fd[1], STDOUT_FILENO);
+		dup2(fd[1], STDERR_FILENO);
+		close(fd[0]);
+		close(fd[1]);
+		execvp(argv[0], argv.data());
+		_exit(127);
+	}
+	close(fd[1]);
+	char buf[8192];
+	ssize_t n;
+	while ((n = read(fd[0], buf, sizeof(buf))) > 0) out.append(buf, n);
+	close(fd[0]);
+	int st = 0;
+	waitpid(pid, &st, 0);
+	return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
 // Farben der Legende wie im Original.
 static FXColor kindColor(disk::SegmentKind k) {
 	switch (k) {
@@ -250,6 +279,7 @@ FXDEFMAP(DiskPanel) DiskPanelMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DiskPanel::ID_MAP, DiskPanel::onMapSelected),
 	FXMAPFUNC(SEL_RIGHTBUTTONRELEASE, DiskPanel::ID_MAP, DiskPanel::onMapRightClick),
 	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_SIGNATURE, DiskPanel::ID_RESCAN, DiskPanel::onAction),
+	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_CONVERT, DiskPanel::ID_DELETE_VOL, DiskPanel::onDynamicAction),
 };
 FXIMPLEMENT(DiskPanel, FXVerticalFrame, DiskPanelMap, ARRAYNUMBER(DiskPanelMap))
 
@@ -306,6 +336,9 @@ void DiskPanel::reload() {
 	}
 	map->setSnapshot(&snap);
 	rebuildLegend();
+	// Den Besitzer (Programmfenster) informieren, damit er z.B. die
+	// Statuszeile nachzieht -- auch nach Änderungen aus dem Kontextmenü.
+	if (target) target->handle(this, FXSEL(SEL_CHANGED, message), NULL);
 }
 
 FXString DiskPanel::statusText() const {
@@ -378,7 +411,7 @@ static bool runPlan(FXWindow* owner, const FXString& title, const disk::Plan& pl
 	if (!confirmPlan(owner, title, plan)) return false;
 	owner->getApp()->beginWaitCursor();
 	std::string log;
-	bool ok = disk::execute(plan, runAsRoot, log);
+	bool ok = disk::execute(plan, runAsRootWithErrors, log);
 	owner->getApp()->endWaitCursor();
 	if (!ok) showLog(owner, title, log);
 	return ok;
@@ -664,8 +697,19 @@ long DiskPanel::onMapRightClick(FXObject*, FXSelector, void* ptr) {
 	if (d >= 0 && s < 0) {
 		// Klick auf den Plattenblock links
 		const disk::Disk& dk = snap.disks[d];
+		bool empty = true;
+		for (auto& sg : dk.segments) if (sg.kind != disk::SEG_UNALLOCATED) empty = false;
 		if (!dk.cdrom && !dk.unreadable && dk.table.empty() && !dk.dynamic) {
 			new FXMenuCommand(&menu, "&Signatur schreiben", NULL, this, ID_SIGNATURE);
+			any = true;
+		}
+		// Texte 2007 und 2045 aus dmdskres.dll
+		if (!dk.cdrom && !dk.unreadable && !dk.removable && !dk.dynamic && empty) {
+			new FXMenuCommand(&menu, "&In dynamische Festplatte umwandeln...", NULL, this, ID_CONVERT);
+			any = true;
+		}
+		if (dk.dynamic && empty) {
+			new FXMenuCommand(&menu, "In eine &Basisfestplatte zurückkonvertieren", NULL, this, ID_REVERT);
 			any = true;
 		}
 	} else if (d >= 0 && s >= 0) {
@@ -674,6 +718,18 @@ long DiskPanel::onMapRightClick(FXObject*, FXSelector, void* ptr) {
 		// Menütexte wortgleich aus dmdskres.dll (2003, 2005, 2013, 2015, 2017)
 		if (sg.kind == disk::SEG_UNALLOCATED && !dk.dynamic && !dk.table.empty()) {
 			new FXMenuCommand(&menu, "Partition &erstellen...", NULL, this, ID_CREATE);
+			any = true;
+		} else if (sg.kind == disk::SEG_UNALLOCATED && dk.dynamic) {
+			new FXMenuCommand(&menu, "&Datenträger erstellen...", NULL, this, ID_CREATE_VOL);   // Text 2001
+			any = true;
+		} else if (disk::kindIsDynamic(sg.kind) && !sg.lvName.empty()) {
+			// Texte 2013, 2017, 2025, 2021
+			new FXMenuCommand(&menu, "&Laufwerkbuchstaben und -pfad ändern...", NULL, this, ID_MOUNTPOINT);
+			new FXMenuCommand(&menu, "&Formatieren...", NULL, this, ID_FORMAT);
+			if (sg.kind == disk::SEG_SIMPLE || sg.kind == disk::SEG_SPANNED)
+				new FXMenuCommand(&menu, "Da&tenträger erweitern...", NULL, this, ID_EXTEND_VOL);
+			new FXMenuSeparator(&menu);
+			new FXMenuCommand(&menu, "Datenträger &löschen...", NULL, this, ID_DELETE_VOL);
 			any = true;
 		} else if (sg.kind == disk::SEG_FREE) {
 			new FXMenuCommand(&menu, "&Logisches Laufwerk erstellen...", NULL, this, ID_CREATE);
@@ -733,6 +789,407 @@ long DiskPanel::onAction(FXObject*, FXSelector sel, void*) {
 				changed = runPlan(this, "Laufwerkbuchstaben und -pfad ändern", disk::planSetMountpoint(sg, mp));
 		} else if (id == ID_ACTIVE) {
 			changed = runPlan(this, "Partition als aktiv markieren", disk::planSetActive(dk, sg));
+		}
+	}
+	if (changed) reload();
+	return 1;
+}
+
+// =====================================================================
+// Dynamische Datenträger (Schritt 3: LVM)
+// =====================================================================
+
+// Zwei Listen mit Hinzufügen/Entfernen wie Dialog 378/385; gibt die
+// gewählten Einträge zurück.
+struct DiskPicker {
+	FXList *avail = nullptr, *chosen = nullptr;
+	void build(FXComposite* p, FXObject* tgt, FXSelector add, FXSelector rem, FXSelector remAll) {
+		FXHorizontalFrame* h = new FXHorizontalFrame(p, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 8,0);
+		FXVerticalFrame* l = new FXVerticalFrame(h, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,2);
+		new FXLabel(l, "Alle &verfügbaren dynamischen Datenträger:", NULL, JUSTIFY_LEFT);
+		FXPacker* lf = new FXPacker(l, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		avail = new FXList(lf, NULL, 0, LIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		FXVerticalFrame* m = new FXVerticalFrame(h, LAYOUT_CENTER_Y | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,0,0, 0,4);
+		new FXButton(m, "&Hinzufügen >>", NULL, tgt, add, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 6,6,3,3);
+		new FXButton(m, "<< &Entfernen", NULL, tgt, rem, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 6,6,3,3);
+		new FXButton(m, "<< A&lle entfernen", NULL, tgt, remAll, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 6,6,3,3);
+		FXVerticalFrame* r = new FXVerticalFrame(h, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,2);
+		new FXLabel(r, "A&usgewählte dynamische Datenträger:", NULL, JUSTIFY_LEFT);
+		FXPacker* rf = new FXPacker(r, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		chosen = new FXList(rf, NULL, 0, LIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+	}
+	void move(FXList* from, FXList* to, int i) { if (i < 0) return; to->appendItem(from->getItemText(i)); from->removeItem(i); }
+	void add() { move(avail, chosen, avail->getCurrentItem()); }
+	void remove() { move(chosen, avail, chosen->getCurrentItem()); }
+	void removeAll() { while (chosen->getNumItems()) move(chosen, avail, 0); }
+	// Einträge haben die Form "/dev/sdb (256 MB frei)"
+	std::vector<std::string> selected() const {
+		std::vector<std::string> out;
+		for (int i = 0; i < chosen->getNumItems(); i++) {
+			std::string t = chosen->getItemText(i).text();
+			out.push_back(t.substr(0, t.find(' ')));
+		}
+		return out;
+	}
+};
+
+static uint64_t pvFree(const disk::Snapshot& snap, const std::string& pv) {
+	for (auto& p : snap.pvs) if (p.name == pv) return p.free;
+	return 0;
+}
+
+// ---------------------------------------------------------------------
+// In dynamische Festplatte umwandeln -- Volumegruppe wählen
+// ---------------------------------------------------------------------
+static bool convertDialog(FXWindow* owner, const disk::Snapshot& snap, const std::string& diskPath, std::string& vg, bool& newVg) {
+	std::vector<std::string> vgs;
+	for (auto& p : snap.pvs) if (!p.vg.empty() && std::find(vgs.begin(), vgs.end(), p.vg) == vgs.end()) vgs.push_back(p.vg);
+	FXDialogBox dlg(owner, "In dynamische Festplatte umwandeln", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,500,0, 12,12,12,12, 0,6);
+	// Text 1180 aus Dialog 364
+	new FXLabel(&dlg, FXString("Festplatte: ") + diskPath.c_str() + "\n\n"
+	                  "Dynamische Festplatten können verwendet werden, um softwarebasierte RAID-Datenträger\n"
+	                  "zu erstellen. Sie können auch einzelne Festplatten und übergreifende Datenträger\n"
+	                  "erweitern, ohne den Computer neu starten zu müssen.\n\n"
+	                  "Unter Linux entspricht das LVM: Die Festplatte wird ein physisches Volume in einer\n"
+	                  "Volumegruppe.", NULL, JUSTIFY_LEFT);
+	new FXHorizontalSeparator(&dlg, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+	FXint choice = vgs.empty() ? 1 : 0;
+	FXDataTarget target(choice);
+	FXRadioButton* r0 = new FXRadioButton(&dlg, "&Vorhandene Volumegruppe:", &target, FXDataTarget::ID_OPTION + 0);
+	FXListBox* box = new FXListBox(&dlg, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL, 0,0,0,0, 20,2,2,2);
+	for (auto& v : vgs) box->appendItem(v.c_str());
+	box->setNumVisible(std::max(1, std::min<int>(6, (int)vgs.size())));
+	if (vgs.empty()) { r0->disable(); box->disable(); }
+	new FXRadioButton(&dlg, "&Neue Volumegruppe:", &target, FXDataTarget::ID_OPTION + 1);
+	FXTextField* name = new FXTextField(&dlg, 24, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X, 0,0,0,0, 20,2,2,2);
+	name->setText(vgs.empty() ? "daten" : "daten2");
+	FXHorizontalFrame* btns = new FXHorizontalFrame(&dlg, LAYOUT_RIGHT | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,8,0, 6,0);
+	new FXButton(btns, "OK", NULL, &dlg, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+	new FXButton(btns, "Abbrechen", NULL, &dlg, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+	if (!dlg.execute(PLACEMENT_OWNER)) return false;
+	newVg = choice == 1;
+	vg = newVg ? std::string(name->getText().text()) : std::string(box->getItemText(std::max(0, box->getCurrentItem())).text());
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// "Assistent zum Erstellen von Datenträgern" (Dialoge 375, 376, 378, 381, 382, 380)
+// ---------------------------------------------------------------------
+class VolumeWizard : public FXDialogBox {
+	FXDECLARE(VolumeWizard)
+private:
+	FXSwitcher* pages = nullptr;
+	FXButton *backBtn = nullptr, *nextBtn = nullptr;
+	FXint typeChoice = 0, mountChoice = 0, formatChoice = 1;
+	FXDataTarget typeTarget, mountTarget, formatTarget;
+	FXLabel *typeDesc = nullptr, *totalLabel = nullptr, *maxLabel = nullptr;
+	FXSpinner* sizeSpin = nullptr;
+	FXTextField *nameField = nullptr, *pathField = nullptr, *labelField = nullptr;
+	FXListBox* fsBox = nullptr;
+	FXCheckButton* quickCheck = nullptr;
+	FXList* summary = nullptr;
+	DiskPicker picker;
+	std::vector<std::string> fsList;
+	const disk::Snapshot* snap;
+	std::string vg;
+	int page = 0;
+	static const int PAGES = 6;
+protected:
+	VolumeWizard() {}
+public:
+	enum { ID_BACK = FXDialogBox::ID_LAST, ID_NEXT, ID_TYPE, ID_ADD, ID_REM, ID_REMALL, ID_SIZE };
+	VolumeWizard(FXWindow* owner, const disk::Snapshot& s, const std::string& vg_, const std::string& clickedPv,
+	             const std::vector<std::string>& fs, const std::string& suggestedName)
+		: FXDialogBox(owner, "Assistent zum Erstellen von Datenträgern", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,600,440, 0,0,0,0, 0,0),
+		  typeTarget(typeChoice, this, ID_TYPE), mountTarget(mountChoice), formatTarget(formatChoice), fsList(fs), snap(&s), vg(vg_) {
+		FXVerticalFrame* main = new FXVerticalFrame(this, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,0);
+		pages = new FXSwitcher(main, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 20,20,16,10);
+		FXFontDesc fd; getApp()->getNormalFont()->getFontDesc(fd); fd.size = 160; fd.weight = FXFont::Bold;
+		FXFont* big = new FXFont(getApp(), fd);
+
+		// 1: Willkommen (375)
+		FXVerticalFrame* p1 = new FXVerticalFrame(pages, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,12);
+		(new FXLabel(p1, "Willkommen", NULL, JUSTIFY_LEFT))->setFont(big);
+		new FXLabel(p1, "Mit diesem Assistenten können Sie Datenträger auf dynamischen Festplatten erstellen.", NULL, JUSTIFY_LEFT);
+		new FXLabel(p1, "Ein Datenträger ist ein Teil einer oder mehrerer Festplatten, der als separate Festplatte\n"
+		                "behandelt wird. Ein Datenträger kann mit einem Dateisystem formatiert werden.", NULL, JUSTIFY_LEFT);
+		new FXLabel(p1, FXString("Volumegruppe: ") + vg.c_str(), NULL, JUSTIFY_LEFT);
+		new FXLabel(p1, "Klicken Sie auf \"Weiter\", um den Vorgang fortzusetzen.", NULL, JUSTIFY_LEFT);
+
+		// 2: Typ (376)
+		FXVerticalFrame* p2 = new FXVerticalFrame(pages, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		FXGroupBox* tg = new FXGroupBox(p2, "Typ des Datenträgers", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8);
+		FXMatrix* tm = new FXMatrix(tg, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 30,4);
+		new FXRadioButton(tm, "&Einfacher Datenträger", &typeTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(tm, "&Gespiegelter Datenträger", &typeTarget, FXDataTarget::ID_OPTION + 3);
+		new FXRadioButton(tm, "Ü&bergreifender Datenträger", &typeTarget, FXDataTarget::ID_OPTION + 1);
+		new FXRadioButton(tm, "&RAID-5-Datenträger", &typeTarget, FXDataTarget::ID_OPTION + 4);
+		new FXRadioButton(tm, "&Stripesetdatenträger", &typeTarget, FXDataTarget::ID_OPTION + 2);
+		FXGroupBox* dg = new FXGroupBox(p2, "Beschreibung", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 10,10,6,6);
+		typeDesc = new FXLabel(dg, "", NULL, JUSTIFY_LEFT | LAYOUT_FILL_X);
+
+		// 3: Festplatten und Größe (378) -- dazu der Name, den LVM braucht
+		FXVerticalFrame* p3 = new FXVerticalFrame(pages, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		picker.build(p3, this, ID_ADD, ID_REM, ID_REMALL);
+		for (auto& p : s.pvs) {
+			if (p.vg != vg || p.free < (8ull << 20)) continue;
+			FXString item = FXString(p.name.c_str()) + " (" + disk::formatSize(p.free).c_str() + " frei)";
+			if (p.name == clickedPv) picker.chosen->appendItem(item); else picker.avail->appendItem(item);
+		}
+		FXGroupBox* sg = new FXGroupBox(p3, "Größe", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,4,6);
+		FXHorizontalFrame* sr = new FXHorizontalFrame(sg, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXLabel(sr, "&Für jede ausgewählte Festplatte:", NULL, LAYOUT_CENTER_Y);
+		sizeSpin = new FXSpinner(sr, 7, this, ID_SIZE, FRAME_SUNKEN | FRAME_THICK | SPIN_NORMAL);
+		sizeSpin->setRange(8, 8);
+		new FXLabel(sr, "MB", NULL, LAYOUT_CENTER_Y);
+		maxLabel = new FXLabel(sr, "", NULL, LAYOUT_CENTER_Y);
+		totalLabel = new FXLabel(sg, "", NULL, JUSTIFY_LEFT);
+		FXHorizontalFrame* nr = new FXHorizontalFrame(p3, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXLabel(nr, "&Name des Datenträgers (LVM):", NULL, LAYOUT_CENTER_Y);
+		nameField = new FXTextField(nr, 20, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		nameField->setText(suggestedName.c_str());
+
+		// 4: Laufwerkpfad (381)
+		FXVerticalFrame* p4 = new FXVerticalFrame(pages, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		new FXLabel(p4, "Sie können über einen Laufwerkbuchstaben oder -pfad, den Sie dem Datenträger zuweisen,\n"
+		                "auf den Datenträger zugreifen. Laufwerkbuchstaben gibt es unter Linux nicht.", NULL, JUSTIFY_LEFT);
+		new FXRadioButton(p4, "&Diesen Datenträger in einem leeren Ordner bereitstellen, der Laufwerkpfade unterstützt:", &mountTarget, FXDataTarget::ID_OPTION + 0);
+		pathField = new FXTextField(p4, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X, 0,0,0,0, 16,2,2,2);
+		pathField->setText(("/srv/" + suggestedName).c_str());
+		new FXRadioButton(p4, "&Keinen Laufwerkbuchstaben oder -pfad zuordnen", &mountTarget, FXDataTarget::ID_OPTION + 1);
+
+		// 5: Formatieren (382)
+		FXVerticalFrame* p5 = new FXVerticalFrame(pages, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		new FXLabel(p5, "Geben Sie an, ob dieser Datenträger formatiert werden soll", NULL, JUSTIFY_LEFT);
+		new FXRadioButton(p5, "Diesen Datenträger &nicht formatieren", &formatTarget, FXDataTarget::ID_OPTION + 0);
+		new FXRadioButton(p5, "D&iesen Datenträger folgendermaßen formatieren:", &formatTarget, FXDataTarget::ID_OPTION + 1);
+		FXGroupBox* fg = new FXGroupBox(p5, "Formatierung", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,4,6);
+		FXMatrix* m5 = new FXMatrix(fg, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 12,4);
+		new FXLabel(m5, "Zu &verwendendes Dateisystem:", NULL, JUSTIFY_LEFT);
+		fsBox = new FXListBox(m5, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		fillFs(fsBox, fsList, "ext4");
+		new FXLabel(m5, "&Größe der Zuordnungseinheit:", NULL, JUSTIFY_LEFT);
+		FXListBox* au = new FXListBox(m5, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LISTBOX_NORMAL);
+		au->appendItem("Standard");
+		au->setNumVisible(1);
+		new FXLabel(m5, "&Datenträgerbezeichnung:", NULL, JUSTIFY_LEFT);
+		labelField = new FXTextField(m5, 16, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		labelField->setText("Daten");
+		quickCheck = new FXCheckButton(fg, "Formatierung mit &QuickFormat durchführen");
+		quickCheck->setCheck(TRUE);
+
+		// 6: Fertigstellen (380)
+		FXVerticalFrame* p6 = new FXVerticalFrame(pages, LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0, 0,6);
+		(new FXLabel(p6, "Fertigstellen des Assistenten", NULL, JUSTIFY_LEFT))->setFont(big);
+		new FXLabel(p6, "Sie haben neue Einstellungen für folgende Elemente gewählt:", NULL, JUSTIFY_LEFT);
+		FXPacker* sf = new FXPacker(p6, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		summary = new FXList(sf, NULL, 0, LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXLabel(p6, "Klicken Sie auf \"Fertig stellen\", um den Vorgang abzuschließen.", NULL, JUSTIFY_LEFT);
+
+		new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(main, LAYOUT_RIGHT | PACK_UNIFORM_WIDTH, 0,0,0,0, 10,10,8,10, 6,0);
+		backBtn = new FXButton(btns, "< &Zurück", NULL, this, ID_BACK, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		nextBtn = new FXButton(btns, "&Weiter >", NULL, this, ID_NEXT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		new FXButton(btns, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 12,12,3,3);
+		onType(NULL, 0, NULL);
+		updateSize();
+		showPage();
+	}
+	disk::SegmentKind kind() const {
+		const disk::SegmentKind k[] = { disk::SEG_SIMPLE, disk::SEG_SPANNED, disk::SEG_STRIPED, disk::SEG_MIRRORED, disk::SEG_RAID5 };
+		return k[typeChoice];
+	}
+	// Größte Größe je Festplatte: das Minimum des freien Platzes der
+	// gewählten Festplatten, bei RAID etwas weniger für die Metadaten.
+	void updateSize() {
+		std::vector<std::string> sel = picker.selected();
+		uint64_t minFree = 0;
+		for (size_t i = 0; i < sel.size(); i++) {
+			uint64_t f = pvFree(*snap, sel[i]);
+			minFree = i == 0 ? f : std::min(minFree, f);
+		}
+		if (kind() == disk::SEG_MIRRORED || kind() == disk::SEG_RAID5) minFree = minFree > (8ull << 20) ? minFree - (8ull << 20) : 0;
+		FXint maxMb = (FXint)(minFree >> 20);
+		FXint cur = sizeSpin->getValue();
+		sizeSpin->setRange(8, std::max<FXint>(8, maxMb));
+		sizeSpin->setValue(cur <= 8 || cur > maxMb ? std::max<FXint>(8, maxMb) : cur);
+		maxLabel->setText(FXString("  Max: ") + FXString(std::to_string(maxMb).c_str()) + " MB");
+		totalLabel->setText(FXString("Gesamtgröße des Datenträgers: ") + disk::formatSize(disk::volumeCapacity(result())).c_str());
+	}
+	void showPage() {
+		pages->setCurrent(page);
+		if (page == 0) backBtn->disable(); else backBtn->enable();
+		nextBtn->setText(page == PAGES - 1 ? "Fertig stellen" : "&Weiter >");
+		if (page == PAGES - 1) {
+			disk::NewVolume v = result();
+			summary->clearItems();
+			summary->appendItem(FXString("Datenträgertyp: ") + disk::kindName(v.kind));
+			FXString d;
+			for (auto& p : v.pvs) d += (d.empty() ? "" : ", ") + FXString(p.c_str());
+			summary->appendItem(FXString("Ausgewählte Festplatten: ") + d);
+			summary->appendItem(FXString("Größe: ") + disk::formatSize(disk::volumeCapacity(v)).c_str());
+			summary->appendItem(FXString("Name: ") + v.vg.c_str() + "/" + v.name.c_str());
+			summary->appendItem(FXString("Pfad: ") + (v.mountpoint.empty() ? FXString("Keiner") : FXString(v.mountpoint.c_str())));
+			summary->appendItem(v.format ? FXString("Dateisystem: ") + v.fstype.c_str() + ", Bezeichnung: " + v.label.c_str()
+			                             : FXString("Nicht formatieren"));
+		}
+	}
+	long onType(FXObject*, FXSelector, void*) {
+		// Beschreibungen wortgleich aus dmdskres.dll (6021-6025), gekürzt auf die ersten Sätze.
+		const char* desc[] = {
+			"Ein einfacher Datenträger wird aus freiem Speicherplatz auf einer einzigen dynamischen\n"
+			"Festplatte erstellt. Ein einfacher Datenträger kann erweitert werden, indem freier\n"
+			"Speicherplatz von der Festplatte oder einer anderen Festplatte hinzugefügt wird.",
+			"Ein übergreifender Datenträger wird aus freiem Speicherplatz auf mehr als einer dynamischen\n"
+			"Festplatte erstellt. Erstellen Sie einen übergreifenden Datenträger, wenn Sie einen\n"
+			"Datenträger benötigen, der für eine einzige Festplatte zu groß ist.",
+			"Ein Stripesetdatenträger speichert Daten auf mindestens zwei dynamischen Festplatten.\n"
+			"Mit einem Stripesetdatenträger kann schneller auf Daten zugegriffen werden als mit einem\n"
+			"einfachen oder übergreifenden Datenträger.",
+			"Ein gespiegelter Datenträger dupliziert Daten auf zwei dynamische Festplatten. Erstellen Sie\n"
+			"einen gespiegelten Datenträger, wenn Sie zwei separate Kopien aller Daten speichern möchten,\n"
+			"um Datenverlust zu verhindern.",
+			"Ein RAID-5-Datenträger speichert Daten in Stripes auf mindestens drei dynamischen Festplatten.\n"
+			"Wie bei einem gespiegelten Datenträger können Daten wiederhergestellt werden, wenn ein Teil\n"
+			"der Daten verloren gegangen ist." };
+		typeDesc->setText(desc[typeChoice]);
+		if (sizeSpin) updateSize();
+		return 1;
+	}
+	long onPick(FXObject*, FXSelector sel, void*) {
+		if (FXSELID(sel) == ID_ADD) picker.add();
+		else if (FXSELID(sel) == ID_REM) picker.remove();
+		else picker.removeAll();
+		updateSize();
+		return 1;
+	}
+	long onSize(FXObject*, FXSelector, void*) { updateSize(); return 1; }
+	long onBack(FXObject*, FXSelector, void*) { if (page > 0) page--; if (page == 3 && formatChoice == 0) {} showPage(); return 1; }
+	long onNext(FXObject*, FXSelector, void*) {
+		if (page == PAGES - 1) return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+		if (page == 2) {
+			disk::Plan test = disk::planCreateVolume(result());
+			if (!test.ok()) { ice2kui::error(this, MBOX_OK, "Assistent zum Erstellen von Datenträgern", "%s", test.error.c_str()); return 1; }
+		}
+		if (page == 3 && mountChoice == 0) {
+			std::string p = pathField->getText().text();
+			if (p.empty() || p[0] != '/') { ice2kui::error(this, MBOX_OK, "Assistent zum Erstellen von Datenträgern", "Geben Sie einen absoluten Pfad an, z.B. /srv/daten."); return 1; }
+		}
+		page++;
+		showPage();
+		return 1;
+	}
+	disk::NewVolume result() const {
+		disk::NewVolume v;
+		v.kind = kind();
+		v.vg = vg;
+		v.name = nameField->getText().text();
+		v.pvs = picker.selected();
+		v.sizePerDisk = (uint64_t)sizeSpin->getValue() << 20;
+		v.format = formatChoice == 1 && !fsList.empty();
+		if (v.format) v.fstype = fsList[std::max(0, fsBox->getCurrentItem())];
+		v.label = labelField->getText().text();
+		v.quick = quickCheck->getCheck();
+		if (v.format && mountChoice == 0) v.mountpoint = pathField->getText().text();
+		return v;
+	}
+	virtual ~VolumeWizard() {}
+};
+FXDEFMAP(VolumeWizard) VolumeWizardMap[] = {
+	FXMAPFUNC(SEL_COMMAND, VolumeWizard::ID_BACK, VolumeWizard::onBack),
+	FXMAPFUNC(SEL_COMMAND, VolumeWizard::ID_NEXT, VolumeWizard::onNext),
+	FXMAPFUNC(SEL_COMMAND, VolumeWizard::ID_TYPE, VolumeWizard::onType),
+	FXMAPFUNCS(SEL_COMMAND, VolumeWizard::ID_ADD, VolumeWizard::ID_REMALL, VolumeWizard::onPick),
+	FXMAPFUNC(SEL_COMMAND, VolumeWizard::ID_SIZE, VolumeWizard::onSize),
+	FXMAPFUNC(SEL_CHANGED, VolumeWizard::ID_SIZE, VolumeWizard::onSize),
+};
+FXIMPLEMENT(VolumeWizard, FXDialogBox, VolumeWizardMap, ARRAYNUMBER(VolumeWizardMap))
+
+// ---------------------------------------------------------------------
+// "Assistent zum Erweitern von Datenträgern" (385, auf eine Seite verkürzt)
+// ---------------------------------------------------------------------
+class ExtendDialog : public FXDialogBox {
+	FXDECLARE(ExtendDialog)
+private:
+	DiskPicker picker;
+	FXSpinner* sizeSpin = nullptr;
+	const disk::Snapshot* snap;
+protected:
+	ExtendDialog() {}
+public:
+	enum { ID_ADD = FXDialogBox::ID_LAST, ID_REM, ID_REMALL };
+	ExtendDialog(FXWindow* owner, const disk::Snapshot& s, const std::string& vg, const std::string& lvName)
+		: FXDialogBox(owner, "Assistent zum Erweitern von Datenträgern", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,560,340, 14,14,12,12, 0,6), snap(&s) {
+		new FXLabel(this, FXString("Datenträger: ") + vg.c_str() + "/" + lvName.c_str() + "\n"
+		                  "Mit diesem Assistenten können Sie die Größe von einfachen und übergreifenden\n"
+		                  "Datenträgern auf dynamischen Festplatten erhöhen. Das Dateisystem wird mit vergrößert.", NULL, JUSTIFY_LEFT);
+		picker.build(this, this, ID_ADD, ID_REM, ID_REMALL);
+		for (auto& p : s.pvs)
+			if (p.vg == vg && p.free >= (8ull << 20))
+				picker.avail->appendItem(FXString(p.name.c_str()) + " (" + disk::formatSize(p.free).c_str() + " frei)");
+		FXGroupBox* g = new FXGroupBox(this, "Größe des Datenträgers", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,4,6);
+		FXHorizontalFrame* r = new FXHorizontalFrame(g, LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 6,0);
+		new FXLabel(r, "&Für alle ausgewählten Festplatten:", NULL, LAYOUT_CENTER_Y);
+		sizeSpin = new FXSpinner(r, 7, NULL, 0, FRAME_SUNKEN | FRAME_THICK | SPIN_NORMAL);
+		sizeSpin->setRange(8, 1 << 30);
+		sizeSpin->setValue(100);
+		new FXLabel(r, "MB", NULL, LAYOUT_CENTER_Y);
+		FXHorizontalFrame* btns = new FXHorizontalFrame(this, LAYOUT_RIGHT | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,6,0, 6,0);
+		new FXButton(btns, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+		new FXButton(btns, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+	}
+	long onPick(FXObject*, FXSelector sel, void*) {
+		if (FXSELID(sel) == ID_ADD) picker.add(); else if (FXSELID(sel) == ID_REM) picker.remove(); else picker.removeAll();
+		return 1;
+	}
+	std::vector<std::string> pvs() const { return picker.selected(); }
+	uint64_t addPerDisk() const { return (uint64_t)sizeSpin->getValue() << 20; }
+	virtual ~ExtendDialog() {}
+};
+FXDEFMAP(ExtendDialog) ExtendDialogMap[] = {
+	FXMAPFUNCS(SEL_COMMAND, ExtendDialog::ID_ADD, ExtendDialog::ID_REMALL, ExtendDialog::onPick),
+};
+FXIMPLEMENT(ExtendDialog, FXDialogBox, ExtendDialogMap, ARRAYNUMBER(ExtendDialogMap))
+
+// Nächster freier Name für einen neuen Datenträger in der Volumegruppe.
+static std::string suggestVolumeName(const disk::Snapshot& snap, const std::string& vg) {
+	for (int i = 1; i < 1000; i++) {
+		std::string n = "datentraeger" + std::to_string(i);
+		bool used = false;
+		for (auto& d : snap.disks) for (auto& s : d.segments) if (s.vgName == vg && s.lvName == n) used = true;
+		if (!used) return n;
+	}
+	return "datentraeger";
+}
+
+long DiskPanel::onDynamicAction(FXObject*, FXSelector sel, void*) {
+	int d = map->selectedDisk(), s = map->selectedSegment();
+	if (d < 0) return 1;
+	const disk::Disk dk = snap.disks[d];
+	FXuint id = FXSELID(sel);
+	bool changed = false;
+	std::string vg;
+	for (auto& p : snap.pvs) if (p.name == dk.path) vg = p.vg;
+	if (id == ID_CONVERT) {
+		std::string target;
+		bool newVg = false;
+		if (convertDialog(this, snap, dk.path, target, newVg))
+			changed = runPlan(this, "In dynamische Festplatte umwandeln", disk::planConvertToDynamic(dk, target, newVg));
+	} else if (id == ID_REVERT) {
+		changed = runPlan(this, "In eine Basisfestplatte zurückkonvertieren", disk::planRevertToBasic(dk, snap));
+	} else if (id == ID_CREATE_VOL) {
+		if (vg.empty()) { ice2kui::error(this, MBOX_OK, "Datenträgerverwaltung", "Die Festplatte gehört zu keiner Volumegruppe."); return 1; }
+		VolumeWizard wiz(this, snap, vg, dk.path, disk::availableFilesystems(runAsRoot), suggestVolumeName(snap, vg));
+		if (wiz.execute(PLACEMENT_OWNER))
+			changed = runPlan(this, "Assistent zum Erstellen von Datenträgern", disk::planCreateVolume(wiz.result()));
+	} else if (s >= 0) {
+		const disk::Segment sg = dk.segments[s];
+		if (id == ID_EXTEND_VOL) {
+			ExtendDialog dlg(this, snap, sg.vgName, sg.lvName);
+			if (dlg.execute(PLACEMENT_OWNER))
+				changed = runPlan(this, "Assistent zum Erweitern von Datenträgern", disk::planExtendVolume(sg, sg.kind, dlg.pvs(), dlg.addPerDisk()));
+		} else if (id == ID_DELETE_VOL) {
+			changed = runPlan(this, "Datenträger löschen", disk::planDeleteVolume(sg));
 		}
 	}
 	if (changed) reload();

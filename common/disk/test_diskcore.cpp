@@ -4,6 +4,7 @@
 //
 //   g++ -std=c++17 test_diskcore.cpp diskcore.cpp -o test_diskcore && ./test_diskcore
 #include "diskcore.h"
+#include "diskops.h"
 #include <cstdio>
 
 static int failures = 0;
@@ -70,6 +71,50 @@ int main() {
 	CHECK(disk::formatSize(21474836480ull) == "20,00 GB");
 	CHECK(disk::formatSize(2048ull) == "2 KB");
 	CHECK(std::string(disk::kindName(disk::SEG_STRIPED)) == "Stripesetdatenträger");
+
+	// ---- Planung dynamischer Datenträger ----
+	auto cmd = [](const disk::Plan& p) {
+		std::string s;
+		for (auto& st : p.steps) if (st.kind == disk::Step::COMMAND && !st.argv.empty() && st.argv[0] == "lvcreate") {
+			for (auto& a : st.argv) s += (s.empty() ? "" : " ") + a;
+		}
+		return s;
+	};
+	disk::NewVolume v;
+	v.vg = "daten"; v.name = "vol1"; v.sizePerDisk = 100ull << 20; v.format = false;
+	v.kind = disk::SEG_SIMPLE; v.pvs = { "/dev/sdb" };
+	CHECK(cmd(disk::planCreateVolume(v)) == "lvcreate -y -n vol1 -L 100m daten /dev/sdb");
+	v.kind = disk::SEG_SPANNED; v.pvs = { "/dev/sdb", "/dev/sdc" };
+	CHECK(cmd(disk::planCreateVolume(v)) == "lvcreate -y -n vol1 -L 200m daten /dev/sdb /dev/sdc");
+	v.kind = disk::SEG_STRIPED;
+	CHECK(cmd(disk::planCreateVolume(v)) == "lvcreate -y -n vol1 -i 2 -L 200m daten /dev/sdb /dev/sdc");
+	v.kind = disk::SEG_MIRRORED;
+	CHECK(cmd(disk::planCreateVolume(v)) == "lvcreate -y -n vol1 --type raid1 -m 1 -L 100m daten /dev/sdb /dev/sdc");
+	v.kind = disk::SEG_RAID5;
+	CHECK(!disk::planCreateVolume(v).ok());            // nur zwei Festplatten
+	v.pvs = { "/dev/sdb", "/dev/sdc", "/dev/sdd" };
+	CHECK(cmd(disk::planCreateVolume(v)) == "lvcreate -y -n vol1 --type raid5 -i 2 -L 200m daten /dev/sdb /dev/sdc /dev/sdd");
+	CHECK(disk::volumeCapacity(v) == 200ull << 20);
+	v.kind = disk::SEG_SIMPLE;
+	CHECK(!disk::planCreateVolume(v).ok());            // einfach, aber drei Platten
+	v.pvs = { "/dev/sdb" }; v.name = "mit leerzeichen";
+	CHECK(!disk::planCreateVolume(v).ok());            // ungültiger Name
+
+	// Erweitern nur einfach/übergreifend; Löschen nicht, wenn eingehängt.
+	disk::Segment lvseg; lvseg.lvName = "vol1"; lvseg.vgName = "daten"; lvseg.device = "/dev/daten/vol1";
+	CHECK(disk::planExtendVolume(lvseg, disk::SEG_SIMPLE, { "/dev/sdc" }, 50ull << 20).ok());
+	CHECK(!disk::planExtendVolume(lvseg, disk::SEG_STRIPED, { "/dev/sdc" }, 50ull << 20).ok());
+	lvseg.mountpoint = "/srv/x";
+	CHECK(!disk::planDeleteVolume(lvseg).ok());
+	lvseg.mountpoint.clear();
+	CHECK(disk::planDeleteVolume(lvseg).ok());
+
+	// Umwandeln nur leerer Platten
+	disk::Disk dk; dk.path = "/dev/sde"; dk.size = 1ull << 30;
+	disk::Segment un; un.kind = disk::SEG_UNALLOCATED; un.size = dk.size; dk.segments = { un };
+	CHECK(disk::planConvertToDynamic(dk, "daten", true).ok());
+	disk::Segment part; part.kind = disk::SEG_PRIMARY; dk.segments = { part };
+	CHECK(!disk::planConvertToDynamic(dk, "daten", true).ok());
 
 	printf(failures ? "%d Fehler\n" : "Alle Prüfungen bestanden.\n", failures);
 	return failures ? 1 : 0;

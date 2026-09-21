@@ -246,6 +246,21 @@ std::vector<PvSegment> parsePvSegments(const std::string& json) {
 	return out;
 }
 
+std::vector<PvInfo> parsePvs(const std::string& json) {
+	std::vector<PvInfo> out;
+	Json root = parseJson(json);
+	for (auto& rep : root["report"].arr)
+		for (auto& pv : rep["pv"].arr) {
+			PvInfo p;
+			p.name = pv["pv_name"].str();
+			p.vg = pv["vg_name"].str();
+			p.size = pv["pv_size"].u64();
+			p.free = pv["pv_free"].u64();
+			out.push_back(p);
+		}
+	return out;
+}
+
 SegmentKind lvKind(const LvInfo& lv) {
 	if (lv.segtype == "raid1" || lv.segtype == "mirror") return SEG_MIRRORED;
 	if (lv.segtype.rfind("raid5", 0) == 0) return SEG_RAID5;
@@ -338,6 +353,9 @@ Snapshot collect(Runner run) {
 	      "-o", "pv_name,vg_name,lv_name,pvseg_start,pvseg_size,vg_extent_size" }, segOut);
 	std::vector<LvInfo> lvs = parseLvs(lvOut);
 	std::vector<PvSegment> pvsegs = parsePvSegments(segOut);
+	std::string pvOut;
+	run({ "pvs", "--reportformat", "json", "--units", "b", "-o", "pv_name,vg_name,pv_size,pv_free" }, pvOut);
+	snap.pvs = parsePvs(pvOut);
 	auto lvByName = [&](const std::string& vg, const std::string& lv) -> const LvInfo* {
 		for (auto& l : lvs) if (l.vg == vg && l.name == lv) return &l;
 		return nullptr;
@@ -433,6 +451,12 @@ Snapshot collect(Runner run) {
 					seg.lvName = s.lv;
 					seg.vgName = s.vg;
 					seg.device = lv ? lv->path : "/dev/" + s.vg + "/" + s.lv;
+					FsInfo fi = probe(run, seg.device);
+					seg.fstype = fi.type;
+					seg.label = fi.label;
+					std::string mapper = "/dev/mapper/" + s.vg + "-" + s.lv;
+					if (mounts.count(seg.device)) seg.mountpoint = mounts[seg.device];
+					else if (mounts.count(mapper)) seg.mountpoint = mounts[mapper];
 				}
 				dk.segments.push_back(seg);
 				pos = std::max(pos, s.start + s.size);

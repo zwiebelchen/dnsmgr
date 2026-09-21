@@ -22,7 +22,7 @@ private:
 protected:
 	DiskMgmtWindow() {}
 public:
-	enum { ID_REFRESH = FXMainWindow::ID_LAST, ID_ABOUT };
+	enum { ID_REFRESH = FXMainWindow::ID_LAST, ID_ABOUT, ID_PANEL };
 	DiskMgmtWindow(FXApp* a) : FXMainWindow(a, "Datenträgerverwaltung", NULL, NULL, DECOR_ALL, 0,0, 980,620) {
 		FXMenuBar* menubar = new FXMenuBar(this, LAYOUT_SIDE_TOP | LAYOUT_FILL_X);
 		FXMenuPane* vorgang = new FXMenuPane(this);
@@ -49,6 +49,8 @@ public:
 
 		statusbar = new FXLabel(this, " ", NULL, LABEL_NORMAL | FRAME_SUNKEN | LAYOUT_SIDE_BOTTOM | LAYOUT_FILL_X | JUSTIFY_LEFT, 0,0,0,0, 4,4,2,2);
 		panel = new DiskPanel(this);
+		panel->setTarget(this);
+		panel->setSelector(ID_PANEL);
 	}
 	virtual void create() {
 		FXMainWindow::create();
@@ -60,6 +62,7 @@ public:
 		statusbar->setText(panel->statusText());
 	}
 	long onRefresh(FXObject*, FXSelector, void*) { reload(); return 1; }
+	long onPanelChanged(FXObject*, FXSelector, void*) { statusbar->setText(panel->statusText()); return 1; }
 	long onAbout(FXObject*, FXSelector, void*) {
 		ice2kui::information(this, MBOX_OK, "Info",
 			"Datenträgerverwaltung (ice2k)\n\n"
@@ -73,6 +76,7 @@ public:
 FXDEFMAP(DiskMgmtWindow) DiskMgmtWindowMap[] = {
 	FXMAPFUNC(SEL_COMMAND, DiskMgmtWindow::ID_REFRESH, DiskMgmtWindow::onRefresh),
 	FXMAPFUNC(SEL_COMMAND, DiskMgmtWindow::ID_ABOUT, DiskMgmtWindow::onAbout),
+	FXMAPFUNC(SEL_CHANGED, DiskMgmtWindow::ID_PANEL, DiskMgmtWindow::onPanelChanged),
 };
 FXIMPLEMENT(DiskMgmtWindow, FXMainWindow, DiskMgmtWindowMap, ARRAYNUMBER(DiskMgmtWindowMap))
 

@@ -55,6 +55,32 @@ Plan planFormat(const Disk& d, const Segment& s, const std::string& fstype, cons
 Plan planSetMountpoint(const Segment& s, const std::string& newMountpoint);
 Plan planSetActive(const Disk& d, const Segment& s);
 
+// ---- Dynamische Datenträger (LVM) ----
+
+// "In dynamische Festplatte umwandeln": leere Platte wird LVM-PV und kommt
+// in eine vorhandene oder neue Volumegruppe.
+Plan planConvertToDynamic(const Disk& d, const std::string& vg, bool newVg);
+// "In eine Basisfestplatte zurückkonvertieren": nur ohne Datenträger darauf.
+Plan planRevertToBasic(const Disk& d, const Snapshot& snap);
+
+struct NewVolume {
+	SegmentKind kind = SEG_SIMPLE;           // SEG_SIMPLE ... SEG_RAID5
+	std::string vg, name;
+	std::vector<std::string> pvs;            // ausgewählte Festplatten
+	uint64_t sizePerDisk = 0;                // Bytes je Festplatte, wie im Original
+	bool format = true;
+	std::string fstype = "ext4", label;
+	bool quick = true;
+	std::string mountpoint;
+};
+Plan planCreateVolume(const NewVolume& v);
+// Nutzbare Größe des neuen Datenträgers (für die Anzeige im Assistenten).
+uint64_t volumeCapacity(const NewVolume& v);
+
+// "Datenträger erweitern": nur einfache und übergreifende, wie im Original.
+Plan planExtendVolume(const Segment& lv, SegmentKind kind, const std::vector<std::string>& pvs, uint64_t addPerDisk);
+Plan planDeleteVolume(const Segment& lv);
+
 // Führt die Schritte nacheinander aus und bricht beim ersten Fehler ab.
 // log bekommt Befehle und Ausgaben.
 bool execute(const Plan& plan, Runner run, std::string& log);
