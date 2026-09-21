@@ -92,6 +92,13 @@ Plan planRepairVolume(const Segment& lv, SegmentKind kind, const std::string& re
 // "Spiegelung erneut synchronisieren" bzw. "Parität erneut erzeugen"
 Plan planResync(const Segment& lv, SegmentKind kind);
 
+// ---- Eigenschaften ----
+// Bezeichnung des Dateisystems ändern (e2label, fatlabel, xfs_admin ...).
+Plan planSetLabel(const Segment& s, const std::string& label);
+// "Fehlerüberprüfung": eingehängt nur lesend prüfen, sonst auf Wunsch
+// reparieren.
+Plan planCheckFilesystem(const Segment& s, bool repair);
+
 // Führt die Schritte nacheinander aus und bricht beim ersten Fehler ab.
 // log bekommt Befehle und Ausgaben.
 bool execute(const Plan& plan, Runner run, std::string& log);

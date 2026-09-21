@@ -470,6 +470,47 @@ Plan planResync(const Segment& lv, SegmentKind kind) {
 }
 
 // ---------------------------------------------------------------------
+// Eigenschaften
+// ---------------------------------------------------------------------
+Plan planSetLabel(const Segment& s, const std::string& label) {
+	Plan p;
+	if (s.device.empty() || s.fstype.empty()) { p.error = "Der Datenträger ist nicht formatiert."; return p; }
+	const std::string& fs = s.fstype;
+	std::vector<std::string> a;
+	if (fs == "ext2" || fs == "ext3" || fs == "ext4") a = { "e2label", s.device, label.substr(0, 16) };
+	else if (fs == "vfat") a = { "fatlabel", s.device, label.substr(0, 11) };
+	else if (fs == "ntfs") a = { "ntfslabel", s.device, label };
+	else if (fs == "btrfs") a = { "btrfs", "filesystem", "label", s.mountpoint.empty() ? s.device : s.mountpoint, label };
+	else if (fs == "xfs") {
+		// xfs_admin geht nur ausgehängt
+		if (!s.mountpoint.empty()) { p.error = "Die Bezeichnung eines XFS-Dateisystems lässt sich nur ausgehängt ändern."; return p; }
+		a = { "xfs_admin", "-L", label.empty() ? "--" : label, s.device };
+	} else { p.error = "Für das Dateisystem " + fs + " lässt sich die Bezeichnung hier nicht ändern."; return p; }
+	p.steps.push_back({ a, "Bezeichnung ändern" });
+	return p;
+}
+
+Plan planCheckFilesystem(const Segment& s, bool repair) {
+	Plan p;
+	if (s.device.empty() || s.fstype.empty()) { p.error = "Der Datenträger ist nicht formatiert."; return p; }
+	if (!s.mountpoint.empty() || !repair) {
+		// Eingehängt nur lesend prüfen -- wie das Original, das die
+		// Reparatur auf den nächsten Neustart verschiebt.
+		if (repair)
+			p.warning = "Der Datenträger ist unter " + s.mountpoint + " eingehängt. Er wird nur geprüft, nicht repariert.\n"
+			            "Für eine Reparatur hängen Sie ihn zuerst aus.";
+		if (s.fstype == "xfs") p.steps.push_back({ { "xfs_repair", "-n", s.device }, "Prüfen (nur lesend)" });
+		else if (s.fstype == "btrfs") p.steps.push_back({ { "btrfs", "check", "--readonly", s.device }, "Prüfen (nur lesend)" });
+		else p.steps.push_back({ { "fsck", "-n", s.device }, "Prüfen (nur lesend)" });
+		return p;
+	}
+	if (s.fstype == "xfs") p.steps.push_back({ { "xfs_repair", s.device }, "Prüfen und reparieren" });
+	else if (s.fstype == "btrfs") p.steps.push_back({ { "btrfs", "check", "--repair", s.device }, "Prüfen und reparieren" });
+	else p.steps.push_back({ { "fsck", "-y", s.device }, "Prüfen und reparieren" });
+	return p;
+}
+
+// ---------------------------------------------------------------------
 // Ausführen
 // ---------------------------------------------------------------------
 

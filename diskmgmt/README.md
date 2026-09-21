@@ -182,6 +182,33 @@ Ausgaben); ausgeführt werden können sie nur mit Device-Mapper.
 
 Benötigt: `parted`, `util-linux` (`partx`, `wipefs`) und `lvm2`.
 
+## Eigenschaften
+
+"Eigenschaften" steht im Kontextmenü von Platten und Datenträgern;
+ein Doppelklick in der Liste oder in der Grafik öffnet sie ebenso.
+
+- **Datenträger** (Plattenblock), Reiter "Allgemein" nach
+  `dmdskres.dll`, Dialog 348: Laufwerk, Typ, Status, Kapazität,
+  Verfügbarer Speicher, Gerätetyp, Hardwarehersteller, dazu Seriennummer
+  und Partitionstabelle; unten "Datenträger auf diesem Laufwerk" mit
+  eigenem "Eigenschaften"-Knopf.
+- **Volume** (Partition oder LVM-Datenträger) mit den Reitern des
+  Explorer-Dialogs, den Windows 2000 hier zeigt:
+  - *Allgemein*: Bezeichnung (änderbar über `e2label`, `fatlabel`,
+    `ntfslabel`, `btrfs filesystem label` bzw. `xfs_admin`), Typ,
+    Dateisystem, Gerät, Pfad, Belegter und Freier Speicher samt
+    Kreisdiagramm.
+  - *Tools*: Fehlerüberprüfung "Jetzt prüfen..." -- eingehängt nur lesend
+    (`fsck -n`, `xfs_repair -n`, `btrfs check --readonly`), ausgehängt auf
+    Wunsch mit "Dateisystemfehler automatisch korrigieren". Das Ergebnis
+    wird immer angezeigt. Defragmentierung entfällt mit Hinweis.
+  - *Hardware*: die Platten, auf denen der Datenträger liegt -- bei
+    dynamischen Datenträgern alle beteiligten.
+
+Der Explorer-Dialog stammt im Original aus `shell32.dll`, die nicht
+vorliegt; dessen Beschriftungen sind nach dem bekannten Aufbau gesetzt.
+Die Reiter Freigabe, Sicherheit und Kontingent gibt es nicht.
+
 ## Bauen
 
 ```sh

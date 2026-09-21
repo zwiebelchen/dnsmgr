@@ -256,6 +256,13 @@ public:
 	}
 	long onLeftBtnPress(FXObject*, FXSelector, void* ptr) {
 		FXEvent* ev = (FXEvent*)ptr;
+		if (ev->click_count >= 2 && target) {
+			// Plattenblock links: Eigenschaften der Platte
+			int row = snap ? (ev->win_y - GAP) / (ROW_H + GAP) : -1;
+			if (ev->win_x < GAP + LEFT_W && row >= 0 && snap && row < (int)snap->disks.size()) select(row, -1);
+			target->handle(this, FXSEL(SEL_DOUBLECLICKED, message), NULL);
+			return 1;
+		}
 		for (auto& h : hits)
 			if (ev->win_x >= h.x && ev->win_x < h.x + h.w && ev->win_y >= h.y && ev->win_y < h.y + h.h) {
 				select(h.disk, h.seg);
@@ -283,6 +290,9 @@ FXDEFMAP(DiskPanel) DiskPanelMap[] = {
 	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_SIGNATURE, DiskPanel::ID_RESCAN, DiskPanel::onAction),
 	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_CONVERT, DiskPanel::ID_DELETE_VOL, DiskPanel::onDynamicAction),
 	FXMAPFUNCS(SEL_COMMAND, DiskPanel::ID_ADD_MIRROR, DiskPanel::ID_RESYNC, DiskPanel::onMirrorAction),
+	FXMAPFUNC(SEL_COMMAND, DiskPanel::ID_PROPERTIES, DiskPanel::onProperties),
+	FXMAPFUNC(SEL_DOUBLECLICKED, DiskPanel::ID_VOLUMES, DiskPanel::onOpenProperties),
+	FXMAPFUNC(SEL_DOUBLECLICKED, DiskPanel::ID_MAP, DiskPanel::onOpenProperties),
 };
 FXIMPLEMENT(DiskPanel, FXVerticalFrame, DiskPanelMap, ARRAYNUMBER(DiskPanelMap))
 
@@ -767,6 +777,12 @@ long DiskPanel::onMapRightClick(FXObject*, FXSelector, void* ptr) {
 	}
 	if (any) new FXMenuSeparator(&menu);
 	new FXMenuCommand(&menu, "&Festplatten neu einlesen", NULL, this, ID_RESCAN);   // Text 2057
+	bool propsPossible = d >= 0 && (s < 0 || (snap.disks[d].segments[s].kind != disk::SEG_UNALLOCATED &&
+	                                          snap.disks[d].segments[s].kind != disk::SEG_FREE));
+	if (propsPossible) {
+		new FXMenuSeparator(&menu);
+		new FXMenuCommand(&menu, "&Eigenschaften", NULL, this, ID_PROPERTIES);   // Text 2035
+	}
 	menu.create();
 	menu.popup(NULL, ev->root_x, ev->root_y);
 	getApp()->runModalWhileShown(&menu);
@@ -1315,4 +1331,279 @@ long DiskPanel::onMirrorAction(FXObject*, FXSelector sel, void*) {
 	}
 	if (changed) reload();
 	return 1;
+}
+
+// =====================================================================
+// Eigenschaften
+// =====================================================================
+
+// Kreisdiagramm "Belegter / Freier Speicher" wie im Explorer.
+class PieView : public FXFrame {
+	FXDECLARE(PieView)
+	double usedFraction = 0;
+protected:
+	PieView() {}
+public:
+	PieView(FXComposite* p, double used)
+		: FXFrame(p, FRAME_NONE | LAYOUT_FIX_WIDTH | LAYOUT_FIX_HEIGHT | LAYOUT_CENTER_X, 0,0,150,90), usedFraction(used) {}
+	long onPaint(FXObject*, FXSelector, void* ptr) {
+		FXDCWindow dc(this, (FXEvent*)ptr);
+		dc.setForeground(backColor);
+		dc.fillRectangle(0, 0, width, height);
+		const FXint w = width - 10, h = height - 24, x = 5, y = 4, depth = 12;
+		// Seitenwand (dunkler), dann Deckel
+		for (FXint d = depth; d > 0; d--) {
+			dc.setForeground(FXRGB(128, 0, 128));
+			dc.fillArc(x, y + d, w, h, 0, 360 * 64);
+			dc.setForeground(FXRGB(0, 0, 128));
+			dc.fillArc(x, y + d, w, h, 90 * 64, (FXint)(usedFraction * 360 * 64));
+		}
+		dc.setForeground(FXRGB(255, 0, 255));   // frei: Magenta
+		dc.fillArc(x, y, w, h, 0, 360 * 64);
+		dc.setForeground(FXRGB(0, 0, 255));     // belegt: Blau
+		dc.fillArc(x, y, w, h, 90 * 64, (FXint)(usedFraction * 360 * 64));
+		dc.setForeground(FXRGB(0, 0, 0));
+		dc.drawArc(x, y, w, h, 0, 360 * 64);
+		return 1;
+	}
+};
+FXDEFMAP(PieView) PieViewMap[] = { FXMAPFUNC(SEL_PAINT, 0, PieView::onPaint) };
+FXIMPLEMENT(PieView, FXFrame, PieViewMap, ARRAYNUMBER(PieViewMap))
+
+static void addRow(FXMatrix* m, const char* label, const FXString& value) {
+	new FXLabel(m, label, NULL, JUSTIFY_LEFT);
+	new FXLabel(m, value, NULL, JUSTIFY_LEFT);
+}
+
+// Ergebnis einer Prüfung anzeigen -- auch bei Erfolg, anders als runPlan.
+static void runAndShow(FXWindow* owner, const FXString& title, const disk::Plan& plan) {
+	if (!plan.ok()) { ice2kui::error(owner, MBOX_OK, "Datenträgerverwaltung", "%s", plan.error.c_str()); return; }
+	if (!plan.warning.empty() && ice2kui::information(owner, MBOX_OK_CANCEL, title.text(), "%s", plan.warning.c_str()) != MBOX_CLICKED_OK) return;
+	owner->getApp()->beginWaitCursor();
+	std::string log;
+	bool ok = disk::execute(plan, runAsRootWithErrors, log);
+	owner->getApp()->endWaitCursor();
+	FXDialogBox dlg(owner, title, DECOR_TITLE | DECOR_BORDER | DECOR_RESIZE, 0,0,600,380, 12,12,12,12, 0,6);
+	new FXButton(&dlg, "OK", NULL, &dlg, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK | LAYOUT_SIDE_BOTTOM | LAYOUT_RIGHT, 0,0,0,0, 16,16,3,3);
+	new FXLabel(&dlg, ok ? "Die Überprüfung wurde abgeschlossen:" : "Bei der Überprüfung wurden Probleme gemeldet:", NULL, JUSTIFY_LEFT);
+	FXPacker* tf = new FXPacker(&dlg, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+	FXText* text = new FXText(tf, NULL, 0, TEXT_READONLY | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+	text->setText(log.c_str());
+	dlg.execute(PLACEMENT_OWNER);
+}
+
+// ---------------------------------------------------------------------
+// Eigenschaften eines Volumes: Allgemein, Tools, Hardware
+// ---------------------------------------------------------------------
+class VolumePropertiesDialog : public FXDialogBox {
+	FXDECLARE(VolumePropertiesDialog)
+private:
+	disk::Segment seg;
+	const disk::Disk* dsk;
+	const disk::Snapshot* snap;
+	FXTextField* labelField = nullptr;
+	FXCheckButton* repairCheck = nullptr;
+protected:
+	VolumePropertiesDialog() {}
+public:
+	enum { ID_CHECK = FXDialogBox::ID_LAST, ID_OK };
+	bool changed = false;
+	VolumePropertiesDialog(FXWindow* owner, const disk::Snapshot& s, const disk::Disk& d, const disk::Segment& sg)
+		: FXDialogBox(owner, "", DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,500,480, 6,6,6,6, 0,6),
+		  seg(sg), dsk(&d), snap(&s) {
+		std::string where = !sg.mountpoint.empty() ? sg.mountpoint : sg.device.substr(sg.device.rfind('/') + 1);
+		setTitle(FXString("Eigenschaften von ") + (sg.label.empty() ? "" : (sg.label + " ").c_str()) + "(" + where.c_str() + ")");
+
+		FXHorizontalFrame* btns = new FXHorizontalFrame(this, LAYOUT_SIDE_BOTTOM | LAYOUT_RIGHT | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,4,0, 6,0);
+		new FXButton(btns, "OK", NULL, this, ID_OK, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+		new FXButton(btns, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+		FXTabBook* tabs = new FXTabBook(this, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+
+		// ---- Allgemein ----
+		new FXTabItem(tabs, "Allgemein", NULL);
+		FXVerticalFrame* gen = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,10,10, 0,6);
+		labelField = new FXTextField(gen, 30, NULL, 0, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X);
+		labelField->setText(sg.label.c_str());
+		if (sg.fstype.empty()) labelField->disable();
+		new FXHorizontalSeparator(gen, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXMatrix* m = new FXMatrix(gen, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 16,3);
+		addRow(m, "Typ:", disk::kindIsDynamic(sg.kind) ? "Dynamischer Datenträger" : "Lokaler Datenträger");
+		addRow(m, "Dateisystem:", sg.fstype.empty() ? FXString("Nicht formatiert") : FXString(sg.fstype.c_str()));
+		addRow(m, "Gerät:", sg.device.c_str());
+		addRow(m, "Pfad:", sg.mountpoint.empty() ? FXString("Nicht eingehängt") : FXString(sg.mountpoint.c_str()));
+		new FXHorizontalSeparator(gen, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXMatrix* m2 = new FXMatrix(gen, 3, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 12,3);
+		auto sizeRow = [&](const char* label, FXColor color, int64_t bytes) {
+			FXHorizontalFrame* l = new FXHorizontalFrame(m2, 0, 0,0,0,0, 0,0,0,0, 4,0);
+			if (color) { FXFrame* sw = new FXFrame(l, FRAME_LINE | LAYOUT_FIX_WIDTH | LAYOUT_FIX_HEIGHT | LAYOUT_CENTER_Y, 0,0,10,10); sw->setBackColor(color); }
+			new FXLabel(l, label, NULL, LAYOUT_CENTER_Y);
+			new FXLabel(m2, bytes < 0 ? FXString("-") : FXString((std::to_string(bytes) + " Byte").c_str()), NULL, JUSTIFY_RIGHT | LAYOUT_FILL_COLUMN);
+			new FXLabel(m2, bytes < 0 ? FXString("") : FXString(disk::formatSize((uint64_t)bytes).c_str()), NULL, JUSTIFY_RIGHT);
+		};
+		int64_t freeB = sg.freeBytes;
+		int64_t usedB = freeB < 0 ? -1 : (int64_t)sg.size - freeB;
+		sizeRow("Belegter Speicher:", FXRGB(0, 0, 255), usedB);
+		sizeRow("Freier Speicher:", FXRGB(255, 0, 255), freeB);
+		sizeRow("Speicherkapazität:", 0, (int64_t)sg.size);
+		if (freeB >= 0 && sg.size) new PieView(gen, (double)usedB / (double)sg.size);
+		else new FXLabel(gen, "Belegung erst nach dem Einhängen bekannt.", NULL, LAYOUT_CENTER_X);
+
+		// ---- Tools ----
+		new FXTabItem(tabs, "Tools", NULL);
+		FXVerticalFrame* tools = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,10,10, 0,8);
+		FXGroupBox* fe = new FXGroupBox(tools, "Fehlerüberprüfung", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8, 0,6);
+		new FXLabel(fe, "Mit dieser Option wird der Datenträger auf Fehler überprüft.", NULL, JUSTIFY_LEFT);
+		repairCheck = new FXCheckButton(fe, "Dateisystemfehler &automatisch korrigieren");
+		if (!sg.mountpoint.empty()) {
+			repairCheck->disable();
+			new FXLabel(fe, "Der Datenträger ist eingehängt und wird nur lesend geprüft.", NULL, JUSTIFY_LEFT);
+		}
+		FXButton* check = new FXButton(fe, "&Jetzt prüfen...", NULL, this, ID_CHECK, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_RIGHT, 0,0,0,0, 10,10,3,3);
+		if (sg.fstype.empty()) check->disable();
+		FXGroupBox* df = new FXGroupBox(tools, "Defragmentierung", GROUPBOX_TITLE_LEFT | FRAME_GROOVE | LAYOUT_FILL_X, 0,0,0,0, 10,10,6,8);
+		new FXLabel(df, "Linux-Dateisysteme wie ext4, XFS und btrfs brauchen im Betrieb\n"
+		                "keine regelmäßige Defragmentierung.", NULL, JUSTIFY_LEFT);
+
+		// ---- Hardware ----
+		new FXTabItem(tabs, "Hardware", NULL);
+		FXVerticalFrame* hw = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,10,10, 0,6);
+		new FXLabel(hw, "&Alle Laufwerke:", NULL, JUSTIFY_LEFT);
+		FXPacker* hf = new FXPacker(hw, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		FXIconList* hl = new FXIconList(hf, NULL, 0, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		hl->appendHeader("Name", NULL, 200);
+		hl->appendHeader("Typ", NULL, 150);
+		// Bei dynamischen Datenträgern alle Platten, auf denen er liegt.
+		std::vector<std::string> paths;
+		if (!sg.lvName.empty()) paths = disk::pvsOfVolume(s, sg.vgName, sg.lvName);
+		else paths.push_back(d.path);
+		for (auto& pth : paths)
+			for (auto& dd : s.disks)
+				if (dd.path == pth) {
+					std::string name = (dd.vendor.empty() ? "" : dd.vendor + " ") + (dd.model.empty() ? dd.name : dd.model);
+					hl->appendItem(FXString(name.c_str()) + "\tLaufwerke (" + dd.path.c_str() + ")");
+				}
+	}
+	long onCheck(FXObject*, FXSelector, void*) {
+		runAndShow(this, "Datenträger prüfen", disk::planCheckFilesystem(seg, repairCheck->getCheck()));
+		return 1;
+	}
+	long onOk(FXObject*, FXSelector, void*) {
+		std::string label = labelField->getText().text();
+		if (!seg.fstype.empty() && label != seg.label) {
+			changed = runPlan(this, "Bezeichnung ändern", disk::planSetLabel(seg, label));
+			if (!changed) return 1;
+		}
+		return handle(this, FXSEL(SEL_COMMAND, ID_ACCEPT), NULL);
+	}
+	virtual ~VolumePropertiesDialog() {}
+};
+FXDEFMAP(VolumePropertiesDialog) VolumePropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, VolumePropertiesDialog::ID_CHECK, VolumePropertiesDialog::onCheck),
+	FXMAPFUNC(SEL_COMMAND, VolumePropertiesDialog::ID_OK, VolumePropertiesDialog::onOk),
+};
+FXIMPLEMENT(VolumePropertiesDialog, FXDialogBox, VolumePropertiesDialogMap, ARRAYNUMBER(VolumePropertiesDialogMap))
+
+// ---------------------------------------------------------------------
+// Eigenschaften eines Datenträgers (dmdskres.dll, Dialog 348)
+// ---------------------------------------------------------------------
+class DiskPropertiesDialog : public FXDialogBox {
+	FXDECLARE(DiskPropertiesDialog)
+private:
+	const disk::Snapshot* snap;
+	const disk::Disk* dsk;
+	FXIconList* vols = nullptr;
+	std::vector<int> segIndex;
+protected:
+	DiskPropertiesDialog() {}
+public:
+	enum { ID_VOLPROPS = FXDialogBox::ID_LAST };
+	bool changed = false;
+	DiskPropertiesDialog(FXWindow* owner, const disk::Snapshot& s, const disk::Disk& d, const FXString& diskTitle)
+		: FXDialogBox(owner, FXString("Eigenschaften von ") + diskTitle, DECOR_TITLE | DECOR_BORDER | DECOR_CLOSE, 0,0,430,460, 6,6,6,6, 0,6),
+		  snap(&s), dsk(&d) {
+		FXHorizontalFrame* btns = new FXHorizontalFrame(this, LAYOUT_SIDE_BOTTOM | LAYOUT_RIGHT | PACK_UNIFORM_WIDTH, 0,0,0,0, 0,0,4,0, 6,0);
+		new FXButton(btns, "OK", NULL, this, FXDialogBox::ID_ACCEPT, BUTTON_NORMAL | BUTTON_DEFAULT | BUTTON_INITIAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+		new FXButton(btns, "Abbrechen", NULL, this, FXDialogBox::ID_CANCEL, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK, 0,0,0,0, 16,16,3,3);
+		FXTabBook* tabs = new FXTabBook(this, NULL, 0, TABBOOK_NORMAL | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		new FXTabItem(tabs, "Allgemein", NULL);
+		FXVerticalFrame* page = new FXVerticalFrame(tabs, FRAME_RAISED | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 12,12,10,10, 0,6);
+		uint64_t unalloc = 0;
+		for (auto& sg : d.segments) if (sg.kind == disk::SEG_UNALLOCATED) unalloc += sg.size;
+		FXMatrix* m = new FXMatrix(page, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 16,4);
+		// Beschriftungen wortgleich aus Dialog 348
+		addRow(m, "Laufwerk:", diskTitle + " (" + d.path.c_str() + ")");
+		addRow(m, "Typ:", d.cdrom ? "CD-ROM" : d.removable ? "Wechselmedium" : d.dynamic ? "Dynamisch" : "Basis");
+		addRow(m, "Status:", d.unreadable ? "Nicht lesbar" : "Online");
+		addRow(m, "Kapazität:", disk::formatSize(d.size).c_str());
+		addRow(m, "Verfügbarer Speicher:", disk::formatSize(unalloc).c_str());
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		FXMatrix* m2 = new FXMatrix(page, 2, MATRIX_BY_COLUMNS | LAYOUT_FILL_X, 0,0,0,0, 0,0,0,0, 16,4);
+		std::string tran = d.transport == "sata" ? "SATA" : d.transport == "nvme" ? "NVMe" : d.transport == "usb" ? "USB"
+		                 : d.transport == "sas" ? "SAS" : d.transport.empty() ? "Unbekannt" : d.transport;
+		addRow(m2, "Gerätetyp:", tran.c_str());
+		addRow(m2, "Hardwarehersteller:", ((d.vendor.empty() ? "" : d.vendor + " ") + (d.model.empty() ? "Unbekannt" : d.model)).c_str());
+		addRow(m2, "Seriennummer:", d.serial.empty() ? "Unbekannt" : d.serial.c_str());
+		addRow(m2, "Partitionstabelle:", d.table == "msdos" ? "MBR" : d.table == "gpt" ? "GPT" : d.dynamic ? "LVM" : "Keine");
+		new FXHorizontalSeparator(page, SEPARATOR_GROOVE | LAYOUT_FILL_X);
+		new FXLabel(page, "Datenträger auf diesem Laufwerk:", NULL, JUSTIFY_LEFT);
+		FXPacker* vf = new FXPacker(page, FRAME_SUNKEN | FRAME_THICK | LAYOUT_FILL_X | LAYOUT_FILL_Y, 0,0,0,0, 0,0,0,0);
+		vols = new FXIconList(vf, this, ID_VOLPROPS, ICONLIST_DETAILED | ICONLIST_BROWSESELECT | LAYOUT_FILL_X | LAYOUT_FILL_Y);
+		vols->appendHeader("Datenträger", NULL, 180);
+		vols->appendHeader("Kapazität", NULL, 90);
+		for (size_t i = 0; i < d.segments.size(); i++) {
+			const disk::Segment& sg = d.segments[i];
+			if (sg.kind == disk::SEG_UNALLOCATED || sg.kind == disk::SEG_FREE || sg.kind == disk::SEG_EXTENDED || sg.isPv) continue;
+			std::string where = !sg.mountpoint.empty() ? sg.mountpoint : !sg.lvName.empty() ? sg.lvName : sg.device.substr(sg.device.rfind('/') + 1);
+			vols->appendItem(FXString((sg.label.empty() ? "(" + where + ")" : sg.label + " (" + where + ")").c_str()) + "\t" + disk::formatSize(sg.size).c_str());
+			segIndex.push_back((int)i);
+		}
+		new FXButton(page, "&Eigenschaften", NULL, this, ID_VOLPROPS, BUTTON_NORMAL | FRAME_RAISED | FRAME_THICK | LAYOUT_RIGHT, 0,0,0,0, 10,10,3,3);
+	}
+	long onVolumeProps(FXObject*, FXSelector, void*) {
+		int i = vols->getCurrentItem();
+		if (i < 0 || i >= (int)segIndex.size()) return 1;
+		VolumePropertiesDialog dlg(this, *snap, *dsk, dsk->segments[segIndex[i]]);
+		dlg.execute(PLACEMENT_OWNER);
+		if (dlg.changed) changed = true;
+		return 1;
+	}
+	virtual ~DiskPropertiesDialog() {}
+};
+FXDEFMAP(DiskPropertiesDialog) DiskPropertiesDialogMap[] = {
+	FXMAPFUNC(SEL_COMMAND, DiskPropertiesDialog::ID_VOLPROPS, DiskPropertiesDialog::onVolumeProps),
+	FXMAPFUNC(SEL_DOUBLECLICKED, DiskPropertiesDialog::ID_VOLPROPS, DiskPropertiesDialog::onVolumeProps),
+};
+FXIMPLEMENT(DiskPropertiesDialog, FXDialogBox, DiskPropertiesDialogMap, ARRAYNUMBER(DiskPropertiesDialogMap))
+
+long DiskPanel::onProperties(FXObject*, FXSelector, void*) {
+	int d = map->selectedDisk(), s = map->selectedSegment();
+	if (d < 0) return 1;
+	const disk::Disk& dk = snap.disks[d];
+	bool changed = false;
+	if (s < 0) {
+		// Titel "Datenträger N" bzw. "CD-ROM N" wie in der Grafik
+		int diskNo = 0, cdNo = 0;
+		FXString title;
+		for (int i = 0; i <= d; i++) {
+			if (snap.disks[i].cdrom) { if (i == d) title = FXString("CD-ROM ") + FXString(std::to_string(cdNo).c_str()); cdNo++; }
+			else { if (i == d) title = FXString("Datenträger ") + FXString(std::to_string(diskNo).c_str()); diskNo++; }
+		}
+		DiskPropertiesDialog dlg(this, snap, dk, title);
+		dlg.execute(PLACEMENT_OWNER);
+		changed = dlg.changed;
+	} else {
+		const disk::Segment& sg = dk.segments[s];
+		if (sg.kind == disk::SEG_UNALLOCATED || sg.kind == disk::SEG_FREE) return 1;
+		VolumePropertiesDialog dlg(this, snap, dk, sg);
+		dlg.execute(PLACEMENT_OWNER);
+		changed = dlg.changed;
+	}
+	if (changed) reload();
+	return 1;
+}
+
+// Doppelklick in der Liste oder auf einen Abschnitt öffnet die Eigenschaften.
+long DiskPanel::onOpenProperties(FXObject* sender, FXSelector, void*) {
+	if (sender == volumes) onVolumeSelected(NULL, 0, NULL);
+	return onProperties(NULL, 0, NULL);
 }

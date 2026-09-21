@@ -334,7 +334,7 @@ static std::string partitionPath(const std::string& disk, int number) {
 Snapshot collect(Runner run) {
 	Snapshot snap;
 	std::string raw;
-	if (run({ "lsblk", "-J", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,RO,MODEL,MOUNTPOINT" }, raw) != 0) {
+	if (run({ "lsblk", "-J", "-b", "-o", "NAME,PATH,TYPE,SIZE,RM,RO,MODEL,VENDOR,TRAN,SERIAL,MOUNTPOINT" }, raw) != 0) {
 		snap.error = "lsblk ist fehlgeschlagen.";
 		return snap;
 	}
@@ -404,6 +404,9 @@ Snapshot collect(Runner run) {
 		dk.name = d["name"].str();
 		dk.path = path;
 		dk.model = d["model"].str();
+		dk.vendor = d["vendor"].str();
+		dk.transport = d["tran"].str();
+		dk.serial = d["serial"].str();
 		dk.size = size;
 		dk.removable = d["rm"].truthy();
 
@@ -537,6 +540,11 @@ Snapshot collect(Runner run) {
 		}
 		snap.disks.push_back(dk);
 	}
+
+	// Freier Platz eingehängter Dateisysteme je Abschnitt.
+	for (auto& dk : snap.disks)
+		for (auto& s : dk.segments)
+			if (!s.mountpoint.empty() && avail.count(s.mountpoint)) s.freeBytes = avail[s.mountpoint];
 
 	// Volumeliste: Partitionen mit Inhalt und alle LVs.
 	auto statusFor = [&](const std::string& mp) {

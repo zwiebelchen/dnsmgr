@@ -41,6 +41,7 @@ struct Segment {
 	std::string lvName, vgName;     // nur LVM
 	bool isPv = false;              // Partition trägt ein LVM-PV
 	std::string status;             // Zustandstext; leer = "Fehlerfrei"
+	int64_t freeBytes = -1;         // freier Platz im Dateisystem, -1 = unbekannt
 	int number = 0;                 // Partitionsnummer (parted), 0 = keine
 	bool bootFlag = false;          // "aktiv" (MBR-Startkennzeichen)
 };
@@ -48,7 +49,7 @@ struct Segment {
 struct Disk {
 	std::string name;       // sda
 	std::string path;       // /dev/sda
-	std::string model;
+	std::string model, vendor, transport, serial;   // für "Eigenschaften"
 	uint64_t size = 0;
 	bool removable = false;
 	bool cdrom = false;
