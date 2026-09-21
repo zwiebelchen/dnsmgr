@@ -140,10 +140,11 @@ SP4, 5.00.2195.6609; die DLL selbst liegt nicht im Repository):
 Dialoge, `mprapi.dll` gar keine Ressourcen und `rasmontr.dll` nur
 netsh-Hilfetexte; daraus war nichts zu übernehmen. `RASDLG.DLL` enthält
 die Dialoge des Einwahl-Clients (Verbindungen herstellen), nicht die der
-Konsole. Die Dialoge des IP-Routers -- etwa "Statische Route" -- stecken
-in `iprtrui.dll`, die bisher fehlt; die Beschriftungen dort sind deshalb
-eigene, mit den Feldern des Originals (Schnittstelle, Ziel,
-Netzwerkmaske, Gateway, Metrik). `rtrfiltr.dll` (Paketfilter) liegt vor
+Konsole. Der Dialog "Statische Route" selbst steckt in keiner der
+vorliegenden DLLs (vermutlich in `ipsnap.dll`); seine Beschriftungen sind
+deshalb eigene, mit den Feldern des Originals (Schnittstelle, Ziel,
+Netzwerkmaske, Gateway, Metrik). Die Prüfmeldungen zur Netzwerkmaske
+stammen dagegen wortgleich aus `mprsnap.dll` (Texte 3133, 5700). `rtrfiltr.dll` (Paketfilter) liegt vor
 und ist die Vorlage für die noch fehlenden Ein-/Ausgangsfilter.
 
 ## Bauen

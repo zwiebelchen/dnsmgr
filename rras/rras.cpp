@@ -1535,11 +1535,25 @@ public:
 	long onOk(FXObject*, FXSelector, void*) {
 		if (ifaces.empty()) { ice2kui::error(this, MBOX_OK, "Statische Route", "Es wurde keine Netzwerkschnittstelle gefunden."); return 1; }
 		unsigned a,b,c,d;
-		if (sscanf(svcprobe::trimmed(destField->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
+		if (sscanf(svcprobe::trimmed(destField->getText().text()).c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4 ||
+		    a > 255 || b > 255 || c > 255 || d > 255) {
 			ice2kui::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige IP-Adresse für das Ziel an."); return 1;
 		}
+		// Meldungen wortgleich aus mprsnap.dll (Texte 5700, 3133).
 		if (maskToPrefix(svcprobe::trimmed(maskField->getText().text())) < 0) {
-			ice2kui::error(this, MBOX_OK, "Statische Route", "Geben Sie eine gültige Netzwerkmaske an (z.B. 255.255.255.0)."); return 1;
+			ice2kui::error(this, MBOX_OK, "Statische Route",
+				"Die Netzwerkmaske ist ungültig.\nGeben Sie eine zusammenhängende Netzwerkmaske ein."); return 1;
+		}
+		{
+			unsigned long addr = (a << 24) | (b << 16) | (c << 8) | d;
+			int bits = maskToPrefix(svcprobe::trimmed(maskField->getText().text()));
+			unsigned long mask = bits == 0 ? 0ul : (0xFFFFFFFFul << (32 - bits)) & 0xFFFFFFFFul;
+			if ((addr & ~mask & 0xFFFFFFFFul) != 0) {
+				ice2kui::error(this, MBOX_OK, "Statische Route",
+					"Die angegebene Netzwerkmaske ist ungültig.\n"
+					"Die Zieladresse darf nicht detaillierter als die Netzwerkmaske sein.");
+				return 1;
+			}
 		}
 		std::string gw = svcprobe::trimmed(gwField->getText().text());
 		if (!gw.empty() && sscanf(gw.c_str(), "%u.%u.%u.%u", &a,&b,&c,&d) != 4) {
