@@ -23,6 +23,7 @@ jeweiligen Unterordner.
 | [`dfs/`](dfs/README.md) | Verteiltes Dateisystem | Samba (msdfs) | Stämme, Verknüpfungen, Replikate |
 | [`dssite/`](dssite/README.md) | AD-Standorte und -Dienste | LDAP (CN=Sites), samba-tool sites | Standorte, Subnetze, Standortverknüpfungen |
 | [`certsrv/`](certsrv/README.md) | Zertifizierungsstelle | openssl-CA unter /etc/ice2k/ca | ausstellen, sperren, Sperrliste |
+| [`diskmgmt/`](diskmgmt/README.md) | Datenträgerverwaltung | lsblk, parted, blkid, LVM | Anzeige von Datenträgern, Partitionen und LVM |
 | [`domadmin/`](domadmin/README.md) | AD-Domänen und -Vertrauensstellungen | samba-tool domain trust/level/fsmo, ldb | Vertrauensstellungen, UPN-Suffixe, Betriebsmaster |
 | [`eventvwr/`](eventvwr/README.md) | Ereignisanzeige | systemd-Journal, ersatzweise /var/log | drei Protokolle, Eigenschaften, Filter |
 | [`srvcfg/`](srvcfg/README.md) | Konfiguration des Servers | Zustand aus smb.conf, systemd und /etc/ice2k | Startseite mit Verweisen auf die übrigen Programme |
@@ -45,7 +46,7 @@ nicht im vollen Umfang des Originals.
 | 3 | Active Directory-Domänen und -Vertrauensstellungen | [`domadmin/`](domadmin/README.md) | **umgesetzt**: Domäneneigenschaften, Vertrauensstellungen (anlegen, prüfen, aufheben), UPN-Suffixe (auch in dsadmin wählbar), Domänennamen-Betriebsmaster; Texte aus `domadmin.dll` und `dsprop.dll` |
 | 4 | Active Directory-Standorte und -Dienste | [`dssite/`](dssite/README.md) | **teilweise**: Standorte, Server, Subnetze, Standortverknüpfungen und die Replikationstopologie unter "NTDS Settings" (Verbindungen anlegen/löschen, "Jetzt replizieren", "Topologie prüfen"). Offen: Verknüpfungsbrücken, Server verschieben, Zeitpläne |
 | 5 | Clusterverwaltung | -- | nicht geplant |
-| 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Ereignisanzeige (Anwendung, Sicherheit, System), Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Offen: Datenträgerverwaltung, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
+| 6 | Computerverwaltung | [`compmgmt/`](compmgmt/README.md) | **teilweise**: Ereignisanzeige (Anwendung, Sicherheit, System), Lokale Benutzer und Gruppen, Freigegebene Ordner (Freigaben, Sitzungen, geöffnete Dateien), Dienste und Anwendungen. Datenträgerverwaltung (vorerst nur Anzeige, samt LVM als dynamische Datenträger). Offen: Ändern von Datenträgern, Systeminformationen, Leistungsprotokolle, Geräte-Manager (kommt aus ice2k) |
 | 7 | Datenquellen (ODBC) | -- | nicht geplant |
 | 8 | DHCP | [`dhcpmgr/`](dhcpmgr/README.md) | **umgesetzt**: Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen (Kea DHCP) |
 | 9 | Dienste | [`services/`](services/README.md) | **umgesetzt**: auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten (systemd) |
@@ -93,6 +94,7 @@ gemeinsam benutzen, statt ihn doppelt zu pflegen:
 |---|---|---|
 | [`common/svc/`](common/svc/) | Dienstverwaltung: GUI-freier systemd-Kern (`svccore`) plus fertige Ansicht als FOX-Widget (`svcpanel`) | `services`, `compmgmt` |
 | [`common/evt/`](common/evt/) | Ereignisse: GUI-freier Kern (`evtcore`, Journal bzw. /var/log) plus Ereignisliste mit Eigenschaften und Filter (`evtpanel`) | `eventvwr`, `compmgmt` |
+| [`common/disk/`](common/disk/) | Datenträger: GUI-freier Kern (`diskcore`: lsblk, parted, blkid, LVM) samt Unit-Test plus Volumeliste und grafische Ansicht (`diskpanel`) | `diskmgmt`, `compmgmt` |
 | [`common/ui/`](common/ui/) | Meldungsfenster mit deutscher Beschriftung ("Ja", "Nein", "Abbrechen") samt eigenen Symbolen -- Ersatz für `FXMessageBox`, dessen Knöpfe fest englisch sind | alle |
 | [`common/svcprobe/`](common/svcprobe/) | Prüfung, ob der verwaltete Dienst läuft, samt einheitlichem Meldungstext | `dnsmgr`, `dhcpmgr`, `compmgmt` |
 
@@ -130,6 +132,7 @@ cd dfs && make && ./dfs
 cd dssite && make && ./dssite
 cd certsrv && make && ./certsrv
 cd domadmin && make && ./domadmin
+cd diskmgmt && make && ./diskmgmt
 ```
 
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`,

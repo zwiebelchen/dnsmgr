@@ -13,6 +13,8 @@ dcpromo/dcpromo
 dsadmin/dsadmin
 termsvc/termsvc
 services/services
+common/disk/test_diskcore
+diskmgmt/diskmgmt
 domadmin/domadmin
 secpol/secpol
 srvcfg/srvcfg

@@ -9,7 +9,7 @@ LDFLAGS = `fox-config --libs`
 PREFIX = /usr/local
 
 ICONS = res/*/*.gif res/*/*.png res/*.gif
-SOURCES = compmgmt.cpp ../common/disk/diskcore.cpp ../common/disk/diskpanel.cpp ../common/evt/evtcore.cpp ../common/evt/evtpanel.cpp ../common/evt/evticons.cpp ../common/svc/svccore.cpp ../common/svc/svcpanel.cpp ../common/ui/msgicons.cpp
+SOURCES = diskmgmt.cpp ../common/disk/diskcore.cpp ../common/disk/diskpanel.cpp ../common/ui/msgicons.cpp
 OBJECTS = $(SOURCES:.cpp=.o)
 DEPS = $(OBJECTS:.o=.d)
 
@@ -18,7 +18,7 @@ DEPS = $(OBJECTS:.o=.d)
 # Header-Aenderung nicht neu -- z.B. compmgmt.o nach der Aenderung des
 # SvcPanel-Konstruktors in ../common/svc/svcpanel.h ("undefined reference").
 DEPFLAGS = -MMD -MP
-EXECUTABLE = compmgmt
+EXECUTABLE = diskmgmt
 
 CPPFLAGS += `fox-config --cflags`
 CPPFLAGS += $(DEPFLAGS)
@@ -34,6 +34,9 @@ res/foxres.h: $(ICONS)
 
 $(EXECUTABLE): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(LDFLAGS)
+
+test_svccore: ../common/svc/test_svccore.cpp ../common/svc/svccore.cpp
+	$(CC) -Wall -std=c++17 -o ../common/svc/test_svccore.cpp ../common/svc/svccore.cpp
 
 clean:
 	rm -f res/foxres.h $(OBJECTS) $(DEPS) $(EXECUTABLE)

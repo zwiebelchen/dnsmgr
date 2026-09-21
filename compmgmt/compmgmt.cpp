@@ -30,6 +30,7 @@
 #include <algorithm>
 #include "../common/svcprobe/svcprobe.h"
 #include "../common/evt/evtpanel.h"
+#include "../common/disk/diskpanel.h"
 #include "../common/ui/msgbox.h"
 
 FXApp* app;
@@ -782,6 +783,8 @@ private:
 	FXTreeItem *rootItem, *sysToolsItem, *lugItem, *usersItem, *groupsItem;
 	FXTreeItem *eventViewerItem = NULL, *appLogItem = NULL, *secLogItem = NULL, *sysLogItem = NULL;
 	EvtPanel* evtPanel = NULL;
+	DiskPanel* diskPanel = NULL;
+	FXTreeItem *storageItem = NULL, *diskItem = NULL;
 	bool eventsLoaded = false;
 	FXTreeItem *sharedFoldersItem, *sharesItem, *sessionsItem, *openFilesItem;
 	FXTreeItem *svcAppsItem, *servicesItem;
@@ -970,11 +973,16 @@ CompMgmt::CompMgmt(FXApp* a)
 	sharesItem = tree->appendItem(sharedFoldersItem, "Freigaben", icoFolder, icoFolder);
 	sessionsItem = tree->appendItem(sharedFoldersItem, "Sitzungen", icoFolder, icoFolder);
 	openFilesItem = tree->appendItem(sharedFoldersItem, "Geöffnete Dateien", icoFolder, icoFolder);
+	// Zweig "Datenspeicher" wie im Original, mit der Datenträgerverwaltung
+	// aus common/disk.
+	storageItem = tree->appendItem(rootItem, "Datenspeicher", icoFolder, icoFolder);
+	diskItem = tree->appendItem(storageItem, "Datenträgerverwaltung", icoFolder, icoFolder);
 	svcAppsItem = tree->appendItem(rootItem, "Dienste und Anwendungen", icoFolder, icoFolder);
 	servicesItem = tree->appendItem(svcAppsItem, "Dienste", icoKey, icoKey);
 	svcPanel = new SvcPanel(rightPane, icoKey);
 	// Dieselbe Ereignisansicht wie im eigenen Programm (common/evt).
 	evtPanel = new EvtPanel(rightPane);
+	diskPanel = new DiskPanel(rightPane);   // Seite 3
 	tree->expandTree(rootItem);
 	tree->expandTree(sysToolsItem);
 	tree->expandTree(lugItem);
@@ -1077,6 +1085,18 @@ long CompMgmt::onTreeChanged(FXObject*, FXSelector, void*) {
 		                : cur == secLogItem ? evt::LOG_SECURITY : evt::LOG_SYSTEM);
 		rightPane->setCurrent(2);
 		statuslbl->setText(evtPanel->statusText());
+		return 1;
+	}
+	if (cur == diskItem) {
+		diskPanel->reload();
+		rightPane->setCurrent(3);
+		statuslbl->setText(diskPanel->statusText());
+		return 1;
+	}
+	if (cur == storageItem) {
+		rightPane->setCurrent(0);
+		list->clearItems();
+		statuslbl->setText("Datenträgerverwaltung: Datenträger, Partitionen und LVM-Volumes.");
 		return 1;
 	}
 	if (cur == eventViewerItem) {
