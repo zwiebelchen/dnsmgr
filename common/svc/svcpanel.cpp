@@ -2,6 +2,7 @@
 
 #include "svcpanel.h"
 #include <cstdio>
+#include "../../common/ui/msgbox.h"
 
 using namespace svc;
 
@@ -236,7 +237,7 @@ void SvcPropsDialog::refreshStatus() {
 long SvcPropsDialog::onStart(FXObject*, FXSelector, void*) {
 	std::string err;
 	if (!startService(unit, err))
-		FXMessageBox::error(this, MBOX_OK, "Dienst starten", "%s", err.c_str());
+		ice2kui::error(this, MBOX_OK, "Dienst starten", "%s", err.c_str());
 	refreshStatus();
 	return 1;
 }
@@ -244,7 +245,7 @@ long SvcPropsDialog::onStart(FXObject*, FXSelector, void*) {
 long SvcPropsDialog::onStop(FXObject*, FXSelector, void*) {
 	std::string err;
 	if (!stopService(unit, err))
-		FXMessageBox::error(this, MBOX_OK, "Dienst beenden", "%s", err.c_str());
+		ice2kui::error(this, MBOX_OK, "Dienst beenden", "%s", err.c_str());
 	refreshStatus();
 	return 1;
 }
@@ -273,7 +274,7 @@ bool SvcPropsDialog::apply() {
 	else if (startTypeCombo->getCurrentItem() == 2) wanted = START_DISABLED;
 
 	if (wanted != info.startType() && !setStartType(unit, wanted, err)) {
-		FXMessageBox::error(this, MBOX_OK, "Starttyp ändern", "%s", err.c_str());
+		ice2kui::error(this, MBOX_OK, "Starttyp ändern", "%s", err.c_str());
 		return false;
 	}
 
@@ -281,7 +282,7 @@ bool SvcPropsDialog::apply() {
 	if (rbAccount->getCheck()) {
 		account = accountField->getText().text();
 		if (account.empty()) {
-			FXMessageBox::error(this, MBOX_OK, "Anmelden", "Bitte einen Kontonamen eingeben.");
+			ice2kui::error(this, MBOX_OK, "Anmelden", "Bitte einen Kontonamen eingeben.");
 			return false;
 		}
 	}
@@ -292,7 +293,7 @@ bool SvcPropsDialog::apply() {
 	r.resetDays = resetDaysSpin->getValue();
 
 	if (!applySettings(unit, account, r, err)) {
-		FXMessageBox::error(this, MBOX_OK, "Einstellungen speichern", "%s", err.c_str());
+		ice2kui::error(this, MBOX_OK, "Einstellungen speichern", "%s", err.c_str());
 		return false;
 	}
 
@@ -373,7 +374,7 @@ void SvcPanel::startSelected() {
 	if (!hasSelection()) return;
 	std::string err;
 	if (!startService(services[list->getCurrentItem()].unit, err))
-		FXMessageBox::error(this, MBOX_OK, "Dienst starten", "%s", err.c_str());
+		ice2kui::error(this, MBOX_OK, "Dienst starten", "%s", err.c_str());
 	reload();
 }
 
@@ -381,7 +382,7 @@ void SvcPanel::stopSelected() {
 	if (!hasSelection()) return;
 	std::string err;
 	if (!stopService(services[list->getCurrentItem()].unit, err))
-		FXMessageBox::error(this, MBOX_OK, "Dienst beenden", "%s", err.c_str());
+		ice2kui::error(this, MBOX_OK, "Dienst beenden", "%s", err.c_str());
 	reload();
 }
 
@@ -389,7 +390,7 @@ void SvcPanel::restartSelected() {
 	if (!hasSelection()) return;
 	std::string err;
 	if (!restartService(services[list->getCurrentItem()].unit, err))
-		FXMessageBox::error(this, MBOX_OK, "Dienst neu starten", "%s", err.c_str());
+		ice2kui::error(this, MBOX_OK, "Dienst neu starten", "%s", err.c_str());
 	reload();
 }
 
@@ -406,7 +407,7 @@ void SvcPanel::propertiesForSelected() {
 	RecoverySettings rec;
 	Dependencies deps;
 	if (!loadService(unit, info, rec, deps)) {
-		FXMessageBox::error(this, MBOX_OK, "Eigenschaften",
+		ice2kui::error(this, MBOX_OK, "Eigenschaften",
 			"Die Eigenschaften von %s konnten nicht gelesen werden.", unit.c_str());
 		return;
 	}

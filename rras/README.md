@@ -136,16 +136,15 @@ SP4, 5.00.2195.6609; die DLL selbst liegt nicht im Repository):
   Zuständen gestartet/beendet -- der Knoten wechselt sein Symbol wie im
   Original
 
-`iprtrmgr.dll` (IP-Routerverwaltung) enthält nur vier Texte und keine
-Dialoge, `mprapi.dll` gar keine Ressourcen und `rasmontr.dll` nur
-netsh-Hilfetexte; daraus war nichts zu übernehmen. `RASDLG.DLL` enthält
-die Dialoge des Einwahl-Clients (Verbindungen herstellen), nicht die der
-Konsole. Der Dialog "Statische Route" selbst steckt in keiner der
-vorliegenden DLLs (vermutlich in `ipsnap.dll`); seine Beschriftungen sind
-deshalb eigene, mit den Feldern des Originals (Schnittstelle, Ziel,
-Netzwerkmaske, Gateway, Metrik). Die Prüfmeldungen zur Netzwerkmaske
-stammen dagegen wortgleich aus `mprsnap.dll` (Texte 3133, 5700). `rtrfiltr.dll` (Paketfilter) liegt vor
-und ist die Vorlage für die noch fehlenden Ein-/Ausgangsfilter.
+Die Dialoge des IP-Routers stecken in `ipsnap.dll`: Der Dialog
+"Statische Route" (13012) mit Schnittstelle, Ziel, Netzwerkmaske,
+Gateway und Metrik, die Spalten unter "IP-Routing → Allgemein"
+(1000-1004) und "Statische Routen" (1019-1023), der Menüeintrag "Neue
+Statische Route..." (135) sowie die Werte für Typ ("Dediziert",
+"Loopback") und Verbindungsstatus ("Verbindung hergestellt",
+"Verbindung getrennt") stammen von dort. "Ansicht" und "Bei Bedarf
+herzustellende Wählverbindungen über diese Route initiieren" entfallen,
+weil es hier keine Wählverbindungen gibt.
 
 ## Bauen
 

@@ -13,6 +13,14 @@ dcpromo/dcpromo
 dsadmin/dsadmin
 termsvc/termsvc
 services/services
+secpol/secpol
+srvcfg/srvcfg
+rras/rras
+eventvwr/eventvwr
+dfs/dfs
+dssite/dssite
+certsrv/certsrv
+dsadmin/test_admenc
 
 # Testprogramme aus dsadmin/Makefile
 dsadmin/test_admparser
