@@ -19,7 +19,7 @@ jeweiligen Unterordner.
 | [`dfs/`](dfs/README.md) | Verteiltes Dateisystem (DFS) | Samba (`msdfs`) | Stämme, Verknüpfungen, Replikate |
 | [`dhcpmgr/`](dhcpmgr/README.md) | DHCP | Kea DHCP | Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen |
 | [`diskmgmt/`](diskmgmt/README.md) | Datenträgerverwaltung | lsblk, parted, blkid, LVM | Partitionen und dynamische Datenträger (LVM) anlegen, formatieren, erweitern, spiegeln, reparieren, löschen; Eigenschaften |
-| [`dnsmgr/`](dnsmgr/README.md) | DNS | BIND9 | Zonen, alle gängigen Datensatztypen |
+| [`dnsmgr/`](dnsmgr/README.md) | DNS | BIND9, samba-tool dns | Datei- und Active Directory-integrierte Zonen, alle gängigen Datensatztypen |
 | [`domadmin/`](domadmin/README.md) | AD-Domänen und -Vertrauensstellungen | samba-tool domain trust/level/fsmo, ldb | Vertrauensstellungen, UPN-Suffixe, Betriebsmaster |
 | [`dsadmin/`](dsadmin/README.md) | Active Directory-Benutzer und -Computer | samba-tool, LDAP, SYSVOL | Konten, Gruppen, OUs, GPOs samt vollständigem Gruppenrichtlinienobjekt-Editor |
 | [`dssite/`](dssite/README.md) | AD-Standorte und -Dienste | LDAP (`CN=Sites`), samba-tool sites/drs | Standorte, Subnetze, Standortverknüpfungen, Replikationstopologie |
@@ -52,7 +52,7 @@ nicht im vollen Umfang des Originals.
 | 7 | Datenquellen (ODBC) | -- | nicht geplant |
 | 8 | DHCP | [`dhcpmgr/`](dhcpmgr/README.md) | **umgesetzt**: Bereiche, Reservierungen, Ausschlussbereiche, Bereichsoptionen (Kea DHCP) |
 | 9 | Dienste | [`services/`](services/README.md) | **umgesetzt**: auflisten, starten/beenden/neu starten, Starttyp, Konto, Wiederherstellung, Abhängigkeiten (systemd) |
-| 10 | DNS | [`dnsmgr/`](dnsmgr/README.md) | **umgesetzt**: Forward-/Reverse-Zonen, gängige Datensatztypen (BIND9) |
+| 10 | DNS | [`dnsmgr/`](dnsmgr/README.md) | **umgesetzt**: Forward-/Reverse-Zonen als Zonendatei (BIND9) und Active Directory-integriert (`samba-tool dns`), gängige Datensatztypen |
 | 11 | Ereignisanzeige | [`eventvwr/`](eventvwr/README.md) | **umgesetzt**: Protokolle Anwendung, Sicherheit und System aus dem systemd-Journal (ersatzweise aus `/var/log`), Liste mit den Spalten des Originals, Ereigniseigenschaften mit Blättern und Kopieren, Filter; Symbole aus `els.dll`. Offen: Protokolleigenschaften, Speichern unter, Sortieren, Suchen |
 | 12 | Komponentendienste | -- | nicht geplant (COM+ hat unter Linux keine Entsprechung) |
 | 13 | Konfiguration des Servers | [`srvcfg/`](srvcfg/README.md) | **umgesetzt**: Original-Banner und -Symbole aus `srvwiz.dll`, Navigationsleiste und Inhaltsseiten wie im Original; jede Seite zeigt den Zustand des Dienstes und startet das passende Programm. Für Dienste ohne eigenes Programm (Druck, Web, Medien, Datenbank, E-Mail) nennt sie die Linux-Gegenstücke |

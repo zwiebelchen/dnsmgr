@@ -58,6 +58,40 @@ Alle privilegierten Schreib-/Löschaktionen laufen über `i2ksudo`
 (`runAsRoot()`/`writeFileAsRoot()` in `dnsmgr.cpp`) -- es läuft nie die
 komplette GUI als root, nur die einzelnen Dateizugriffe.
 
+
+## Active Directory-integrierte Zonen
+
+Auf einem Domänencontroller liegt die AD-Zone nicht in einer Zonendatei,
+sondern in der Samba-Datenbank -- im Windows-2000-kompatiblen Modus
+bedient sie Sambas eigener DNS-Server, im modernen Modus BIND über DLZ.
+dnsmgr zeigt diese Zonen deshalb zusätzlich zu den Dateizonen aus
+`named.conf.local` an und verwaltet sie über `samba-tool dns` (als root
+mit dem Maschinenkonto, `-P`, ohne Kennwortabfrage):
+
+- Anzeige aller Einträge samt SOA, Namenserver, Hosts, Mailaustausch,
+  Diensten; Unterdomänen wie `_tcp`, `_msdcs` erscheinen als
+  "(Unterdomäne)".
+- Hosts, Aliasse, Mailaustausch, Zeiger und die übrigen Typen anlegen
+  -- dieselben Dialoge wie bei Dateizonen; ein PTR-Eintrag landet auf
+  Wunsch in einer passenden AD-Reverse-Zone.
+- Hosts bearbeiten (`samba-tool dns update`), Einträge löschen.
+- Neue Zonen legt dnsmgr auf einem Domänencontroller als AD-integrierte
+  Zone an (`zonecreate`), wie im Original. Die Domänenzone und
+  `_msdcs.<Domäne>` lassen sich nicht löschen.
+- Zoneneigenschaften zeigen "Active Directory-integriert" und die
+  SOA-Werte aus der Datenbank.
+
+Noch nicht: andere Typen als Hosts direkt bearbeiten (löschen und neu
+anlegen geht), in Unterdomänen hineinnavigieren.
+
+**Wichtig:** Früher schrieb dnsmgr eine Beispielzone nach
+`/etc/bind/named.conf.local`, wenn die Datei kein `zone` enthielt -- auf
+einem Domänencontroller im modernen Modus hätte das die DLZ-Einbindung
+von Samba überschrieben. Heute wird die Beispielzone nur noch angelegt,
+wenn die Datei gar nicht existiert und kein Domänencontroller vorhanden
+ist; Beispieldaten im Speicher sind im Baum als "(Beispieldaten)"
+gekennzeichnet.
+
 ## Bauen
 Voraussetzung: ein ice2k-Debian-13-System (stellt `fox-config`, `reswrap`
 und `i2ksudo` bereit, siehe [ice2k](https://github.com/comdlg32/ice2k)).

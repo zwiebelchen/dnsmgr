@@ -19,6 +19,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <ctype.h>
@@ -128,7 +129,9 @@ static bool writeFileAsRoot(const FXString& path, const FXString& content) {
 struct ZoneInfo {
 	FXString name;
 	FXString file;
-	bool isReverse;
+	bool isReverse = false;
+	bool adIntegrated = false;   // liegt in Active Directory, verwaltet über samba-tool dns
+	bool isDemo = false;         // Beispieldaten nur im Speicher
 };
 
 struct ResourceRecord {
@@ -137,6 +140,8 @@ struct ResourceRecord {
 	FXString type;   // SOA / NS / A / CNAME / MX ...
 	FXString data;   // Anzeigetext fuer die Datenspalte
 	FXString rawIp;  // bei A-Records: reine IP, fuer den Eigenschaften-Dialog
+	FXString rawType, rawData;   // AD-Zonen: Typ und Daten in der Schreibweise von samba-tool
+	bool isFolder = false;       // AD-Zonen: Unterdomäne (_tcp, _msdcs ...)
 };
 
 static const char* NAMED_CONF_LOCAL = "/etc/bind/named.conf.local";
@@ -343,6 +348,203 @@ static FXString typeKeywordFor(const FXString& displayType) {
 	return "";
 }
 
+// ---------------------------------------------------------------------
+// Active Directory-integrierte Zonen
+//
+// Im Domänencontroller-Betrieb liegt die AD-Zone nicht in einer
+// Zonendatei, sondern in der Samba-Datenbank -- beim Windows-2000-
+// kompatiblen Modus bedient Sambas eigener DNS-Server sie, im modernen
+// Modus BIND über DLZ. In beiden Fällen ist "samba-tool dns" der Weg
+// hinein. Als root genügt das Maschinenkonto (-P); eine Kennwortabfrage
+// entfällt.
+// ---------------------------------------------------------------------
+static std::string g_adRealm;   // kleingeschrieben, leer = kein Domänencontroller
+
+static bool adDcPresent() {
+	std::ifstream in("/etc/samba/smb.conf");
+	if (!in.is_open()) return false;
+	std::string line;
+	bool dc = false;
+	std::string realm;
+	while (std::getline(in, line)) {
+		size_t eq = line.find('=');
+		if (eq == std::string::npos) continue;
+		std::string k = line.substr(0, eq), v = line.substr(eq + 1);
+		auto trim = [](std::string x) { size_t a = x.find_first_not_of(" \t"); size_t b = x.find_last_not_of(" \t\r"); return a == std::string::npos ? std::string() : x.substr(a, b - a + 1); };
+		k = trim(k); v = trim(v);
+		std::transform(k.begin(), k.end(), k.begin(), ::tolower);
+		if (k == "server role" && v.find("domain controller") != std::string::npos) dc = true;
+		if (k == "realm") { realm = v; std::transform(realm.begin(), realm.end(), realm.begin(), ::tolower); }
+	}
+	g_adRealm = dc ? realm : "";
+	return dc;
+}
+
+static int sambaDns(std::vector<FXString> args, std::string& out) {
+	std::vector<FXString> full = { FXString("timeout"), FXString("30"), FXString("samba-tool"), FXString("dns") };
+	for (auto& a : args) full.push_back(a);
+	full.push_back(FXString("-P"));
+	return runAsRootCaptured(full, out);
+}
+
+// Letzte aussagekräftige Zeile einer samba-tool-Fehlermeldung.
+static FXString sambaError(const std::string& out) {
+	std::string last;
+	std::istringstream iss(out);
+	std::string l;
+	while (std::getline(iss, l)) if (l.find_first_not_of(" \t") != std::string::npos) last = l;
+	return last.c_str();
+}
+
+static std::vector<FXString> listAdZones() {
+	std::vector<FXString> out;
+	std::string raw;
+	if (sambaDns({ FXString("zonelist"), FXString("localhost") }, raw) != 0) return out;
+	std::istringstream iss(raw);
+	std::string line;
+	while (std::getline(iss, line)) {
+		size_t p = line.find("pszZoneName");
+		if (p == std::string::npos) continue;
+		size_t c = line.find(':', p);
+		if (c == std::string::npos) continue;
+		std::string name = line.substr(c + 1);
+		name.erase(0, name.find_first_not_of(" \t"));
+		while (!name.empty() && (name.back() == ' ' || name.back() == '\r')) name.pop_back();
+		// Die Wurzelhinweis-Zone ".." und RootDNSServers zeigt das Original nicht.
+		if (name.empty() || name == ".." || name == "RootDNSServers") continue;
+		out.push_back(name.c_str());
+	}
+	return out;
+}
+
+static FXString displayTypeFor(const std::string& kw) {
+	if (kw == "SOA") return "Autoritätsursprung";
+	if (kw == "A") return "Host";
+	if (kw == "AAAA") return "IPv6-Host";
+	if (kw == "CNAME") return "Alias";
+	if (kw == "MX") return "Mailaustausch";
+	if (kw == "PTR") return "Zeiger";
+	if (kw == "NS") return "Namenserver";
+	if (kw == "TXT") return "Text";
+	if (kw == "SRV") return "Dienst";
+	return kw.c_str();
+}
+
+// "samba-tool dns query localhost ZONE @ ALL":
+//   Name=vm, Records=1, Children=0
+//     A: 192.0.2.2 (flags=f0, serial=1, ttl=900)
+static std::vector<ResourceRecord> queryAdZone(const FXString& zone) {
+	std::vector<ResourceRecord> recs;
+	std::string raw;
+	if (sambaDns({ FXString("query"), FXString("localhost"), zone, FXString("@"), FXString("ALL") }, raw) != 0) return recs;
+	std::istringstream iss(raw);
+	std::string line, curName;
+	while (std::getline(iss, line)) {
+		size_t np = line.find("Name=");
+		if (np != std::string::npos && line.find("Records=") != std::string::npos) {
+			curName = line.substr(np + 5, line.find(',', np) - np - 5);
+			size_t cp = line.find("Children=");
+			int children = cp == std::string::npos ? 0 : atoi(line.c_str() + cp + 9);
+			if (children > 0 && !curName.empty()) {
+				ResourceRecord f;
+				f.name = curName.c_str(); f.rawName = curName.c_str();
+				f.type = "(Unterdomäne)"; f.data = ""; f.isFolder = true;
+				recs.push_back(f);
+			}
+			continue;
+		}
+		size_t colon = line.find(':');
+		if (colon == std::string::npos) continue;
+		std::string kw = line.substr(0, colon);
+		kw.erase(0, kw.find_first_not_of(" \t"));
+		if (kw.empty() || kw.find(' ') != std::string::npos) continue;
+		std::string data = line.substr(colon + 1);
+		data.erase(0, data.find_first_not_of(" \t"));
+		size_t fl = data.find(" (flags=");
+		if (fl != std::string::npos) data = data.substr(0, fl);
+
+		ResourceRecord r;
+		r.rawName = curName.empty() ? "@" : curName.c_str();
+		r.name = curName.empty() ? FXString("(identisch mit übergeordnetem...)") : FXString(curName.c_str());
+		r.type = displayTypeFor(kw);
+		r.rawType = kw.c_str();
+		r.rawData = data.c_str();
+		r.data = data.c_str();
+		if (kw == "A") r.rawIp = data.c_str();
+		if (kw == "SOA") {
+			// "serial=1, refresh=..., ns=vm..., email=hostmaster..." -> "[1], vm..., hostmaster..."
+			auto field = [&](const char* k) { size_t p = data.find(std::string(k) + "="); if (p == std::string::npos) return std::string(); p += strlen(k) + 1; return data.substr(p, data.find(',', p) - p); };
+			r.data = FXString("[") + field("serial").c_str() + "], " + field("ns").c_str() + ", " + field("email").c_str();
+		} else if (kw == "MX") {
+			// "mail.example.org. (10)" -> "[10] mail.example.org."; zum Löschen "ziel 10"
+			size_t lp = data.rfind(" ("), rp = data.rfind(')');
+			if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
+				std::string target = data.substr(0, lp), prio = data.substr(lp + 2, rp - lp - 2);
+				r.data = FXString("[") + prio.c_str() + "] " + target.c_str();
+				r.rawData = (target + " " + prio).c_str();
+			}
+		} else if (kw == "SRV") {
+			// "vm.example.org. (389, 0, 100)" -> "[0][100][389] vm.example.org."; zum Löschen "ziel port prio gewicht"
+			size_t lp = data.rfind(" ("), rp = data.rfind(')');
+			if (lp != std::string::npos && rp != std::string::npos && rp > lp) {
+				std::string target = data.substr(0, lp);
+				std::istringstream nums(data.substr(lp + 2, rp - lp - 2));
+				std::string port, prio, weight;
+				std::getline(nums, port, ','); std::getline(nums, prio, ','); std::getline(nums, weight, ',');
+				auto t = [](std::string x) { x.erase(0, x.find_first_not_of(' ')); return x; };
+				r.data = FXString("[") + t(prio).c_str() + "][" + t(weight).c_str() + "][" + t(port).c_str() + "] " + target.c_str();
+				r.rawData = (target + " " + t(port) + " " + t(prio) + " " + t(weight)).c_str();
+			}
+		}
+		recs.push_back(r);
+	}
+	return recs;
+}
+
+static bool adAddRecord(const FXString& zone, const FXString& name, const FXString& type, const FXString& data, FXString& err) {
+	std::string out;
+	if (sambaDns({ FXString("add"), FXString("localhost"), zone, name, type, data }, out) != 0) { err = sambaError(out); return false; }
+	return true;
+}
+
+static bool adDeleteRecord(const FXString& zone, const FXString& name, const FXString& type, const FXString& data, FXString& err) {
+	std::string out;
+	if (sambaDns({ FXString("delete"), FXString("localhost"), zone, name, type, data }, out) != 0) { err = sambaError(out); return false; }
+	return true;
+}
+
+static bool adUpdateRecord(const FXString& zone, const FXString& name, const FXString& type,
+                           const FXString& oldData, const FXString& newData, FXString& err) {
+	std::string out;
+	if (sambaDns({ FXString("update"), FXString("localhost"), zone, name, type, oldData, newData }, out) != 0) { err = sambaError(out); return false; }
+	return true;
+}
+
+// Eine Zeile im Zonendatei-Format ("name IN TYPE daten") in den Aufruf von
+// samba-tool übersetzen -- so funktionieren alle vorhandenen Dialoge
+// (Host, Alias, Mailaustausch, weitere Typen) auch für AD-Zonen.
+static bool adAddFromZoneLine(const FXString& zone, const FXString& fullLine, FXString& err) {
+	std::istringstream iss(fullLine.text());
+	std::vector<std::string> tok;
+	std::string t;
+	while (iss >> t) tok.push_back(t);
+	if (tok.size() < 3) { err = "Ungültiger Datensatz."; return false; }
+	size_t i = 1;
+	if (tok[i] == "IN" || tok[i] == "in") i++;
+	if (i >= tok.size()) { err = "Ungültiger Datensatz."; return false; }
+	std::string type = tok[i];
+	std::transform(type.begin(), type.end(), type.begin(), ::toupper);
+	std::vector<std::string> rest(tok.begin() + i + 1, tok.end());
+	std::string data;
+	if (type == "MX" && rest.size() >= 2) data = rest[1] + " " + rest[0];                        // "prio ziel" -> "ziel prio"
+	else if (type == "SRV" && rest.size() >= 4) data = rest[3] + " " + rest[2] + " " + rest[0] + " " + rest[1]; // "prio gew port ziel" -> "ziel port prio gew"
+	else {
+		for (size_t k = 0; k < rest.size(); k++) data += (k ? " " : "") + rest[k];
+		if (type == "TXT" && data.size() >= 2 && data.front() == '"' && data.back() == '"') data = data.substr(1, data.size() - 2);
+	}
+	return adAddRecord(zone, tok[0].c_str(), type.c_str(), data.c_str(), err);
+}
+
 static bool parseSoaFields(const FXString& path, long& serial, long& refresh, long& retry, long& expire, long& minimum) {
 	std::ifstream in(path.text());
 	if (!in.is_open()) return false;
@@ -408,11 +610,13 @@ static bool updateARecord(const FXString& zoneFile, const FXString& hostName,
 
 // Prueft, ob named.conf.local fehlt oder eine "Dummy"-Datei ohne jede
 // Zonendefinition ist (z.B. eine frisch von BIND9 mitgelieferte Leerdatei).
+// Nur wenn die Datei gar nicht existiert. Früher galt eine Datei ohne das
+// Wort "zone" als Platzhalter und wurde durch eine Beispielzone ersetzt --
+// damit hätte dnsmgr auf einem Domänencontroller die DLZ-Einbindung von
+// Samba überschreiben und die AD-Zone aus dem DNS nehmen können.
 static bool namedConfLocalIsMissingOrDummy() {
-	std::ifstream in(NAMED_CONF_LOCAL);
-	if (!in.is_open()) return true;
-	std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-	return content.find("zone") == std::string::npos;
+	if (adDcPresent()) return false;
+	return access(NAMED_CONF_LOCAL, F_OK) != 0;
 }
 
 // Legt eine Demo-Zone (analog zum Original-Screenshot) direkt auf der
@@ -1178,7 +1382,26 @@ void DnsManager::loadZones() {
 	zoneRecords.clear();
 	zoneItems.clear();
 
-	if (zones.empty()) {
+	// AD-integrierte Zonen des Domänencontrollers
+	size_t fileZones = zones.size();
+	if (g_haveRoot && adDcPresent()) {
+		for (auto& name : listAdZones()) {
+			bool dup = false;
+			for (auto& z : zones) if (z.name == name) dup = true;
+			if (dup) continue;
+			ZoneInfo zi;
+			zi.name = name;
+			zi.isReverse = name.find("in-addr.arpa") >= 0 || name.find("ip6.arpa") >= 0;
+			zi.adIntegrated = true;
+			zones.push_back(zi);
+		}
+	}
+
+	if (zones.empty() && adDcPresent()) {
+		statuslbl->setText(g_haveRoot
+			? "Die Active Directory-Zonen konnten nicht gelesen werden (samba-tool dns)."
+			: "Keine Root-Rechte -- die Active Directory-Zonen lassen sich nicht lesen.");
+	} else if (zones.empty()) {
 		// Fallback, falls wir keine Root-Rechte haben (oder das Schreiben
 		// trotzdem fehlgeschlagen ist): Demo nur im Speicher, wie bisher.
 		statuslbl->setText(g_haveRoot
@@ -1189,6 +1412,7 @@ void DnsManager::loadZones() {
 		demo.name = "zwiebelchen.org";
 		demo.file = "";
 		demo.isReverse = false;
+		demo.isDemo = true;
 		zones.push_back(demo);
 
 		std::vector<ResourceRecord> recs;
@@ -1199,14 +1423,19 @@ void DnsManager::loadZones() {
 		zoneRecords.push_back(recs);
 	} else {
 		for (auto& z : zones) {
-			std::vector<ResourceRecord> recs = z.file.empty() ? std::vector<ResourceRecord>() : parseZoneFile(z.file, z.name);
+			std::vector<ResourceRecord> recs = z.adIntegrated ? queryAdZone(z.name)
+			                                 : z.file.empty() ? std::vector<ResourceRecord>() : parseZoneFile(z.file, z.name);
 			zoneRecords.push_back(recs);
 		}
+		if (zones.size() > fileZones)
+			statuslbl->setText(FXString(std::to_string(zones.size() - fileZones).c_str()) + " Active Directory-integrierte Zone(n) geladen.");
 	}
 
 	for (auto& z : zones) {
 		FXTreeItem* parent = z.isReverse ? revItem : fwdItem;
-		FXTreeItem* item = tree->appendItem(parent, z.name, icoFolder, icoFolder);
+		// Beispieldaten deutlich kennzeichnen, damit sie niemand für echt hält.
+		FXString label = z.isDemo ? z.name + " (Beispieldaten)" : z.name;
+		FXTreeItem* item = tree->appendItem(parent, label, icoFolder, icoFolder);
 		zoneItems.push_back(item);
 	}
 }
@@ -1296,6 +1525,21 @@ long DnsManager::onNewZone(FXObject*, FXSelector, void*) {
 		}
 	}
 
+	// Auf einem Domänencontroller wie im Original als Active Directory-
+	// integrierte Zone -- beim Windows-2000-kompatiblen Modus würde eine
+	// Zonendatei in BIND von den Clients gar nicht gefragt, weil dort Sambas
+	// eigener DNS-Server auf Port 53 antwortet.
+	if (adDcPresent()) {
+		std::string out;
+		if (sambaDns({ FXString("zonecreate"), FXString("localhost"), zoneName }, out) != 0) {
+			ice2kui::error(this, MBOX_OK, "Neue Zone", "Die Zone konnte nicht angelegt werden:\n\n%s", sambaError(out).text());
+			return 1;
+		}
+		onRefresh(NULL, 0, NULL);
+		statuslbl->setText("Active Directory-integrierte Zone " + zoneName + " angelegt.");
+		return 1;
+	}
+
 	FXString zoneFile = "/etc/bind/db." + zoneName;
 	char hn[256] = {0}; gethostname(hn, sizeof(hn));
 	FXString hostnameStr = (hn[0] != '\0') ? FXString(hn) : FXString("win2k-server");
@@ -1339,9 +1583,11 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
 
-	if (z.file.empty()) {
+	if (z.file.empty() && !z.adIntegrated) {
 		ice2kui::error(this, MBOX_OK, "Keine Zonendatei",
-			"Für diese Zone ist keine Zonendatei bekannt (Demo-Modus?).");
+			z.isDemo ? "Das sind nur Beispieldaten, die im Speicher angezeigt werden -- es wurde\n"
+			           "keine Zone gefunden. Legen Sie über \"Neue Zone...\" eine Zone an."
+			         : "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
 	if (!g_haveRoot) {
@@ -1360,7 +1606,7 @@ long DnsManager::onNewHost(FXObject*, FXSelector, void*) {
 long DnsManager::onNewCname(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
-	if (z.file.empty()) {
+	if (z.file.empty() && !z.adIntegrated) {
 		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
@@ -1376,7 +1622,7 @@ long DnsManager::onNewCname(FXObject*, FXSelector, void*) {
 long DnsManager::onNewMx(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
-	if (z.file.empty()) {
+	if (z.file.empty() && !z.adIntegrated) {
 		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
@@ -1392,7 +1638,7 @@ long DnsManager::onNewMx(FXObject*, FXSelector, void*) {
 long DnsManager::onNewPtr(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
-	if (z.file.empty()) {
+	if (z.file.empty() && !z.adIntegrated) {
 		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
@@ -1419,7 +1665,7 @@ long DnsManager::onNewPtr(FXObject*, FXSelector, void*) {
 long DnsManager::onNewOther(FXObject*, FXSelector, void*) {
 	if (contextZoneIdx < 0 || contextZoneIdx >= (int)zones.size()) return 1;
 	ZoneInfo z = zones[contextZoneIdx];
-	if (z.file.empty()) {
+	if (z.file.empty() && !z.adIntegrated) {
 		ice2kui::error(this, MBOX_OK, "Keine Zonendatei", "Für diese Zone ist keine Zonendatei bekannt.");
 		return 1;
 	}
@@ -1528,7 +1774,19 @@ long DnsManager::onZoneProperties(FXObject*, FXSelector, void*) {
 			: netPrefix;
 	}
 
-	ZonePropertiesDialog dlg(this, z.name, z.file, serial, refresh, retry, expire, minimum, soaOk, z.isReverse, networkId);
+	// AD-Zone: SOA-Werte aus samba-tool, statt Zonendatei der Speicherort
+	FXString where = z.file;
+	if (z.adIntegrated) {
+		where = "Active Directory-integriert";
+		for (auto& r : zoneRecords[contextZoneIdx]) {
+			if (r.rawType != "SOA") continue;
+			std::string d = r.rawData.text();
+			auto num = [&](const char* k) { size_t p = d.find(std::string(k) + "="); return p == std::string::npos ? 0L : atol(d.c_str() + p + strlen(k) + 1); };
+			serial = num("serial"); refresh = num("refresh"); retry = num("retry"); expire = num("expire"); minimum = num("minttl");
+			soaOk = true;
+		}
+	}
+	ZonePropertiesDialog dlg(this, z.name, where, serial, refresh, retry, expire, minimum, soaOk, z.isReverse, networkId);
 	dlg.execute(PLACEMENT_OWNER);
 	return 1;
 }
@@ -1540,6 +1798,12 @@ long DnsManager::onZoneProperties(FXObject*, FXSelector, void*) {
 bool DnsManager::appendZoneRecord(int zoneIdx, const FXString& fullLine, FXString& errorMsg) {
 	if (zoneIdx < 0 || zoneIdx >= (int)zones.size()) { errorMsg = "Ungültige Zone."; return false; }
 	ZoneInfo z = zones[zoneIdx];
+	if (z.adIntegrated) {
+		// AD-Zone: dieselbe Zeile über samba-tool statt in eine Datei
+		if (!adAddFromZoneLine(z.name, fullLine, errorMsg)) return false;
+		onRefresh(NULL, 0, NULL);
+		return true;
+	}
 	if (z.file.empty()) { errorMsg = "Für diese Zone ist keine Zonendatei bekannt."; return false; }
 
 	std::ifstream in(z.file.text());
@@ -1601,6 +1865,11 @@ bool DnsManager::createHostRecord(int zoneIdx, const FXString& host, const FXStr
 		if (octs.size() == 4) {
 			FXString revZoneName = FXString(octs[2].c_str()) + "." + octs[1].c_str() + "." + octs[0].c_str() + ".in-addr.arpa";
 			for (auto& zi : zones) {
+				if (zi.name == revZoneName && zi.adIntegrated) {
+					FXString e;
+					adAddRecord(zi.name, octs[3].c_str(), "PTR", host + "." + zoneName + ".", e);
+					break;
+				}
 				if (zi.name == revZoneName && !zi.file.empty()) {
 					std::ifstream rin(zi.file.text());
 					std::string rcontent((std::istreambuf_iterator<char>(rin)), std::istreambuf_iterator<char>());
@@ -1772,6 +2041,17 @@ void DnsManager::openHostProperties(int zoneIdx, int recIdx) {
 		HostPropertiesDialog dlg(this, zoneName, zoneFile, hostDisplay, rr.rawIp);
 		if (dlg.execute(PLACEMENT_OWNER)) {
 			FXString newIp = dlg.getNewIp();
+			if (newIp != rr.rawIp && zones[zoneIdx].adIntegrated) {
+				FXString err;
+				if (adUpdateRecord(zoneName, rr.rawName, "A", rr.rawIp, newIp, err)) {
+					loadZones();
+					showZoneRecords(zoneIdx);
+					statuslbl->setText("Host " + hostDisplay + " aktualisiert auf " + newIp);
+				} else {
+					ice2kui::error(this, MBOX_OK, "DNS", "Der Eintrag konnte nicht geändert werden:\n\n%s", err.text());
+				}
+				return;
+			}
 			if (newIp != rr.rawIp && !zoneFile.empty()) {
 				if (updateARecord(zoneFile, hostDisplay, rr.rawIp, newIp, zoneName)) {
 					loadZones();
@@ -1787,6 +2067,16 @@ void DnsManager::openHostProperties(int zoneIdx, int recIdx) {
 
 	FXString typeKeyword = typeKeywordFor(rr.type);
 	if (typeKeyword.empty()) return; // unbekannter Typ
+
+	if (zones[zoneIdx].adIntegrated) {
+		// Für AD-Zonen sind bisher nur Hosts direkt bearbeitbar; die übrigen
+		// Typen zeigen ihre Daten und lassen sich löschen und neu anlegen.
+		ice2kui::information(this, MBOX_OK, "Eigenschaften",
+			"%s (%s) in der Active Directory-integrierten Zone %s:\n\n    %s\n\n"
+			"Zum Ändern löschen Sie den Eintrag und legen ihn neu an.",
+			hostDisplay.text(), rr.type.text(), zoneName.text(), rr.data.text());
+		return;
+	}
 
 	FXString info = "Eigenschaften von " + hostDisplay + " (" + rr.type + ") in Zone " + zoneName;
 
@@ -1998,11 +2288,28 @@ long DnsManager::onDeleteRecord(FXObject*, FXSelector, void*) {
 	if (rr.type == "Autoritätsursprung") return 1; // SOA nicht loeschbar
 
 	ZoneInfo z = zones[zoneIdx];
-	if (z.file.empty()) return 1;
 	if (!g_haveRoot) {
 		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann nichts gelöscht werden.");
 		return 1;
 	}
+	if (z.adIntegrated) {
+		if (rr.isFolder) {
+			ice2kui::information(this, MBOX_OK, "DNS", "Unterdomänen wie \"%s\" werden hier nicht gelöscht.", rr.rawName.text());
+			return 1;
+		}
+		if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
+		        "%s-Eintrag \"%s\" wirklich löschen?", rr.type.text(), rr.rawName.text()) != MBOX_CLICKED_YES) return 1;
+		FXString err;
+		if (adDeleteRecord(z.name, rr.rawName, rr.rawType, rr.rawData, err)) {
+			loadZones();
+			showZoneRecords(zoneIdx);
+			statuslbl->setText(rr.type + "-Eintrag \"" + rr.rawName + "\" gelöscht.");
+		} else {
+			ice2kui::error(this, MBOX_OK, "DNS", "Der Eintrag konnte nicht gelöscht werden:\n\n%s", err.text());
+		}
+		return 1;
+	}
+	if (z.file.empty()) return 1;
 
 	FXString hostDisplay = rr.rawName;
 	if (ice2kui::question(this, MBOX_YES_NO, "Löschen bestätigen",
@@ -2102,6 +2409,23 @@ long DnsManager::onDeleteZone(FXObject*, FXSelector, void*) {
 
 	if (!g_haveRoot) {
 		ice2kui::error(this, MBOX_OK, "Keine Root-Rechte", "Ohne Root-Rechte kann keine Zone gelöscht werden.");
+		return 1;
+	}
+	if (z.adIntegrated) {
+		std::string nm = z.name.text();
+		std::transform(nm.begin(), nm.end(), nm.begin(), ::tolower);
+		if (!g_adRealm.empty() && (nm == g_adRealm || nm == "_msdcs." + g_adRealm)) {
+			ice2kui::error(this, MBOX_OK, "Zone löschen",
+				"Die Zone \"%s\" gehört zur Domäne und wird für Active Directory benötigt.\n"
+				"Sie lässt sich nicht löschen.", z.name.text());
+			return 1;
+		}
+		if (ice2kui::question(this, MBOX_YES_NO, "Zone löschen",
+		        "Active Directory-integrierte Zone \"%s\" wirklich löschen?", z.name.text()) != MBOX_CLICKED_YES) return 1;
+		std::string out;
+		if (sambaDns({ FXString("zonedelete"), FXString("localhost"), z.name }, out) != 0)
+			ice2kui::error(this, MBOX_OK, "Zone löschen", "Die Zone konnte nicht gelöscht werden:\n\n%s", sambaError(out).text());
+		onRefresh(NULL, 0, NULL);
 		return 1;
 	}
 	if (ice2kui::question(this, MBOX_YES_NO, "Zone löschen",
