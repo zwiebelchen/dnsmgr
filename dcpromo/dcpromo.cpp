@@ -47,6 +47,9 @@ static std::atomic<bool> g_workerDone(false);
 static bool g_workerResult = false;
 static FXString g_workerErrorMsg;
 static std::string g_workerLog;
+// Ergebnis der Dienstprüfung am Ende -- bestimmt den Abschlusstext.
+static bool g_servicesRunning = true;
+static bool g_servicesEnabled = true;
 
 static const char* SMB_CONF = "/etc/samba/smb.conf";
 static const char* BIND_LOCAL = "/etc/bind/named.conf.local";
@@ -572,6 +575,38 @@ static bool isServiceActive(const FXString& name) {
 	return runAsRoot({ FXString("systemctl"), FXString("is-active"), FXString("--quiet"), name }) == 0;
 }
 
+// Startet bind9 und samba-ad-dc neu und aktiviert beide für den
+// Systemstart. samba-ad-dc ist unter Debian nach der Paketinstallation
+// maskiert, und "Active Directory entfernen" schaltet ihn aus -- ohne
+// unmask/enable liefe der Domänencontroller nur bis zum nächsten Neustart.
+static void restartAndEnableAdServices(std::string& log) {
+	runAsRoot({ FXString("systemctl"), FXString("unmask"), FXString("samba-ad-dc") });
+	runAsRoot({ FXString("systemctl"), FXString("enable"), FXString("samba-ad-dc") });
+	runAsRoot({ FXString("systemctl"), FXString("enable"), FXString("bind9") });
+	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") });
+	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") });
+	sleep(2); // kurz warten, damit ein Absturz kurz nach dem Start erkannt wird
+	bool bindOk = isServiceActive("bind9");
+	bool sambaOk = isServiceActive("samba-ad-dc");
+	bool bindEn = runAsRoot({ FXString("systemctl"), FXString("is-enabled"), FXString("--quiet"), FXString("bind9") }) == 0;
+	bool sambaEn = runAsRoot({ FXString("systemctl"), FXString("is-enabled"), FXString("--quiet"), FXString("samba-ad-dc") }) == 0;
+	g_servicesRunning = bindOk && sambaOk;
+	g_servicesEnabled = bindEn && sambaEn;
+	if (!g_servicesRunning) {
+		log += "Achtung: ";
+		if (!bindOk) log += "bind9 läuft nicht (mehr). ";
+		if (!sambaOk) log += "samba-ad-dc läuft nicht (mehr). ";
+		log += "Bitte 'systemctl status bind9'/'systemctl status samba-ad-dc' und\n"
+		       "'journalctl -xeu <dienst>' prüfen.\n";
+	} else {
+		log += "bind9 und samba-ad-dc laufen.\n";
+	}
+	if (!g_servicesEnabled)
+		log += "Achtung: bind9 oder samba-ad-dc ist nicht für den Systemstart aktiviert.\n";
+	else
+		log += "bind9 und samba-ad-dc starten auch nach einem Neustart des Systems automatisch.\n";
+}
+
 static const char* RESOLV_CONF = "/etc/resolv.conf";
 static const char* RESOLV_CONF_HEAD = "/etc/resolv.conf.head";
 
@@ -691,21 +726,9 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 
 	if (!configureNtpForWindows(log, errorMsg)) return false;
 
-	log += "Starte kea-dhcp4-server unveraendert weiter; starte bind9 und samba neu...\n";
-	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") });
-	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") });
-	sleep(2); // kurz warten, damit ein Absturz kurz nach dem Start erkannt wird
-	bool bindOk = isServiceActive("bind9");
-	bool sambaOk = isServiceActive("samba-ad-dc");
-	if (!bindOk || !sambaOk) {
-		log += "Achtung: ";
-		if (!bindOk) log += "bind9 läuft nicht (mehr). ";
-		if (!sambaOk) log += "samba-ad-dc läuft nicht (mehr). ";
-		log += "Bitte 'systemctl status bind9'/'systemctl status samba-ad-dc' und\n"
-		       "'journalctl -xeu <dienst>' prüfen.\n";
-	} else {
-		log += "bind9 und samba-ad-dc laufen.\n";
-	}
+	log += "kea-dhcp4-server läuft unverändert weiter; starte bind9 und samba-ad-dc neu\n"
+	       "und aktiviere beide für den Systemstart...\n";
+	restartAndEnableAdServices(log);
 
 	pointDnsAtSelf(log);
 	return true;
@@ -827,21 +850,8 @@ static bool migrateToModernAd(const FXString& dnsName, std::string& log, FXStrin
 	log += "Richte BIND9-DLZ-Integration ein...\n";
 	if (!configureBindForModernAd(dnsName, errorMsg)) return false;
 
-	log += "Starte bind9 und samba-ad-dc neu...\n";
-	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("bind9") });
-	runAsRoot({ FXString("systemctl"), FXString("restart"), FXString("samba-ad-dc") });
-	sleep(2);
-	bool bindOk = isServiceActive("bind9");
-	bool sambaOk = isServiceActive("samba-ad-dc");
-	if (!bindOk || !sambaOk) {
-		log += "Achtung: ";
-		if (!bindOk) log += "bind9 läuft nicht (mehr). ";
-		if (!sambaOk) log += "samba-ad-dc läuft nicht (mehr). ";
-		log += "Bitte 'systemctl status bind9'/'systemctl status samba-ad-dc' und\n"
-		       "'journalctl -xeu <dienst>' prüfen.\n";
-	} else {
-		log += "bind9 und samba-ad-dc laufen.\n";
-	}
+	log += "Starte bind9 und samba-ad-dc neu und aktiviere beide für den Systemstart...\n";
+	restartAndEnableAdServices(log);
 	log += "Migration abgeschlossen -- Windows-2000-Kompatibilität wurde aufgehoben.\n";
 	return true;
 }
@@ -1110,12 +1120,8 @@ DcPromoWizard::DcPromoWizard(FXApp* a)
 	{
 		FXVerticalFrame* p = new FXVerticalFrame(switcher, LAYOUT_FILL_X | LAYOUT_FILL_Y);
 		new FXLabel(p, "Fertigstellen des Assistenten", NULL, LABEL_NORMAL | JUSTIFY_LEFT);
-		finishLabel = new FXLabel(p,
-			"Active Directory wurde konfiguriert.\n\n"
-			"Damit alle Dienste den neuen Zustand übernehmen, wird ein\n"
-			"Neustart der betroffenen Dienste (bzw. des Systems) empfohlen.\n\n"
-			"Klicken Sie auf \"Schließen\", um den Assistenten zu beenden.",
-			NULL, JUSTIFY_LEFT);
+		// Der eigentliche Text wird in gotoPage() je nach Ergebnis gesetzt.
+		finishLabel = new FXLabel(p, "", NULL, JUSTIFY_LEFT);
 	}
 
 	new FXHorizontalSeparator(main, SEPARATOR_GROOVE | LAYOUT_FILL_X);
@@ -1159,14 +1165,26 @@ void DcPromoWizard::gotoPage(int page) {
 				"Active Directory wurde entfernt.\n\n"
 				"Der Server ist wieder ein eigenständiger Server -- die lokale\n"
 				"Benutzerverwaltung (Computerverwaltung) funktioniert wieder wie zuvor.\n"
-				"Ein Neustart der betroffenen Dienste (bzw. des Systems) wird empfohlen.\n\n"
+				"samba-ad-dc wurde beendet und ausgeschaltet; bind9 sowie die Dateifreigabe-\n"
+				"Dienste smbd, nmbd und winbind laufen wieder. Ein Neustart ist nicht nötig.\n\n"
+				"Klicken Sie auf \"Schließen\", um den Assistenten zu beenden.");
+		} else if (g_servicesRunning && g_servicesEnabled) {
+			finishLabel->setText(
+				"Active Directory wurde konfiguriert.\n\n"
+				"Die Dienste bind9 und samba-ad-dc wurden neu gestartet und laufen.\n"
+				"Sie starten auch nach einem Neustart des Systems automatisch --\n"
+				"ein Neustart ist nicht nötig.\n\n"
+				"Bereits geöffnete Verwaltungsprogramme (z.B. \"Active Directory-Benutzer\n"
+				"und -Computer\") sollten Sie neu öffnen, damit sie die neue Domäne sehen.\n\n"
 				"Klicken Sie auf \"Schließen\", um den Assistenten zu beenden.");
 		} else {
 			finishLabel->setText(
-				"Active Directory wurde konfiguriert.\n\n"
-				"Damit alle Dienste den neuen Zustand übernehmen, wird ein\n"
-				"Neustart der betroffenen Dienste (bzw. des Systems) empfohlen.\n\n"
-				"Klicken Sie auf \"Schließen\", um den Assistenten zu beenden.");
+				"Active Directory wurde konfiguriert, aber nicht alle Dienste sind bereit.\n\n"
+				+ FXString(g_servicesRunning ? "" : "bind9 oder samba-ad-dc läuft nicht.\n")
+				+ FXString(g_servicesEnabled ? "" : "bind9 oder samba-ad-dc ist nicht für den Systemstart aktiviert.\n")
+				+ "\nDetails stehen im Protokoll auf der vorigen Seite; prüfen Sie außerdem\n"
+				  "    systemctl status bind9 samba-ad-dc\n\n"
+				  "Klicken Sie auf \"Schließen\", um den Assistenten zu beenden.");
 		}
 		btnBack->hide(); btnNext->hide(); btnCancel->hide();
 		btnFinish->show();
