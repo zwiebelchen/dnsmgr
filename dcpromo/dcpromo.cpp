@@ -226,10 +226,22 @@ static bool writeFileAsRoot(const FXString& path, const std::string& content) {
 	return true;
 }
 
-static std::string readFileUnprivileged(const FXString& path) {
+// Liest eine Datei; ist sie für den angemeldeten Benutzer nicht lesbar,
+// über root. Nötig z.B. für /var/lib/samba/bind-dns/named.conf: Samba legt
+// das Verzeichnis mit 0770 root:bind an, der Benutzer der Oberfläche darf
+// dort nicht hinein -- ohne diesen Umweg meldete dcpromo die Datei als
+// "nicht gefunden", obwohl die Provisionierung sie geschrieben hatte.
+static std::string readFile(const FXString& path) {
 	std::ifstream in(path.text());
-	if (!in.is_open()) return "";
-	return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	if (in.is_open()) return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	std::string out;
+	if (runAsRootCaptured({ FXString("cat"), path }, out) != 0) return "";
+	return out;
+}
+
+// Gibt es die Datei (als root geprüft)?
+static bool fileExistsAsRoot(const FXString& path) {
+	return runAsRoot({ FXString("test"), FXString("-f"), path }) == 0;
 }
 
 // ---------------------------------------------------------------------
@@ -266,7 +278,7 @@ static FXString smbConfValue(const std::string& conf, const char* key) {
 
 static DomainState detectDomainState() {
 	DomainState st;
-	std::string conf = readFileUnprivileged(SMB_CONF);
+	std::string conf = readFile(SMB_CONF);
 	if (conf.empty()) return st;
 	FXString role = smbConfValue(conf, "server role");
 	if (role.find("domain controller") < 0) return st;
@@ -369,7 +381,7 @@ static FXString detectUpstreamResolver() {
 	// Resolver, waehrend die aktive Datei schon auf 127.0.0.1 zeigt.
 	FXString sources[] = { FXString(RESOLV_CONF_EARLY) + BACKUP_SUFFIX, FXString(RESOLV_CONF_EARLY) };
 	for (int i = 0; i < 2; i++) {
-		std::istringstream iss(readFileUnprivileged(sources[i]));
+		std::istringstream iss(readFile(sources[i]));
 		std::string line;
 		while (std::getline(iss, line)) {
 			FXString l = line.c_str();
@@ -412,7 +424,7 @@ static void bindOptionsSetForwarder(std::string& opts, const FXString& resolver,
 static bool configureBindForWin2k(FXString& errorMsg) {
 	backupFileOnce(BIND_LOCAL);
 	backupFileOnce(BIND_OPTIONS);
-	std::string opts = readFileUnprivileged(BIND_OPTIONS);
+	std::string opts = readFile(BIND_OPTIONS);
 	if (opts.empty()) { errorMsg = "named.conf.options nicht gefunden."; return false; }
 
 	bindOptionsRemoveLineContaining(opts, "listen-on port");
@@ -459,8 +471,16 @@ static bool configureBindForModernAd(const FXString& realm, FXString& errorMsg) 
 	backupFileOnce(BIND_LOCAL);
 	backupFileOnce(BIND_OPTIONS);
 	FXString bindDnsConf = "/var/lib/samba/bind-dns/named.conf";
-	std::string snippet = readFileUnprivileged(bindDnsConf);
-	if (snippet.empty()) { errorMsg = "Von Samba erzeugte BIND-Konfiguration nicht gefunden (" + bindDnsConf + ")."; return false; }
+	std::string snippet = readFile(bindDnsConf);
+	if (snippet.empty()) {
+		errorMsg = fileExistsAsRoot(bindDnsConf)
+			? "Von Samba erzeugte BIND-Konfiguration konnte nicht gelesen werden (" + bindDnsConf + ")."
+			: "Von Samba erzeugte BIND-Konfiguration nicht gefunden (" + bindDnsConf + ").\n\n"
+			  "Die Provisionierung hat sie nicht angelegt; sie lässt sich mit\n"
+			  "    samba_upgradedns --dns-backend=BIND9_DLZ\n"
+			  "nachträglich erzeugen.";
+		return false;
+	}
 
 	FXString moduleName = detectDlzModuleName();
 	std::string commentedLine = "# database \"dlopen /usr/lib/x86_64-linux-gnu/samba/bind9/" + std::string(moduleName.text()) + "\";";
@@ -478,7 +498,7 @@ static bool configureBindForModernAd(const FXString& realm, FXString& errorMsg) 
 	                     "include \"/var/lib/samba/bind-dns/named.conf\";\n";
 	if (!writeFileAsRoot(BIND_LOCAL, local)) { errorMsg = "Konnte named.conf.local nicht schreiben."; return false; }
 
-	std::string opts = readFileUnprivileged(BIND_OPTIONS);
+	std::string opts = readFile(BIND_OPTIONS);
 	if (opts.empty()) { errorMsg = "named.conf.options nicht gefunden."; return false; }
 	bindOptionsRemoveLineContaining(opts, "listen-on port");
 	bindOptionsAddLine(opts, "dnssec-validation auto;", "tkey-gssapi-keytab \"/var/lib/samba/bind-dns/dns.keytab\";");
@@ -621,7 +641,7 @@ static bool provisionDomain(const FXString& dnsName, const FXString& netbios, co
 	     ? "Aktiviere SMB1/NTLMv1 und die Netlogon-Ausnahmen für echte\nWindows-2000-Clients...\n"
 	     : "Entferne die Legacy-Ausnahmen für Windows 2000 (moderne AD-Integration)...\n";
 	{
-		std::string conf = readFileUnprivileged(SMB_CONF);
+		std::string conf = readFile(SMB_CONF);
 		const std::string legacy = win2kCompatible ? "no" : "";  // leer = Zeile entfernen
 		conf = smbConfSetOrRemove(conf, "server min protocol", win2kCompatible ? "NT1" : "");
 		conf = smbConfSetOrRemove(conf, "ntlm auth", win2kCompatible ? "ntlmv1-permitted" : "");
@@ -739,7 +759,7 @@ std::string ntpConfWithSigning(const std::string& conf) {
 static bool configureNtpForWindows(std::string& log, FXString& errorMsg) {
 	log += "Richte Zeitdienst für Windows-Clients ein (signiertes NTP)...\n";
 
-	std::string conf = readFileUnprivileged(NTP_CONF);
+	std::string conf = readFile(NTP_CONF);
 	if (conf.empty()) {
 		log += "Achtung: " + std::string(NTP_CONF) + " nicht gefunden -- Zeitdienst bitte von Hand einrichten.\n";
 		return true; // kein Abbruchgrund fuer die Heraufstufung
@@ -790,7 +810,7 @@ static bool migrateToModernAd(const FXString& dnsName, std::string& log, FXStrin
 
 	log += "Passe smb.conf an (Sambas eigenen DNS-Dienst abschalten, Legacy-\n"
 	       "Ausnahmen für Windows 2000 entfernen)...\n";
-	std::string conf = readFileUnprivileged(SMB_CONF);
+	std::string conf = readFile(SMB_CONF);
 	conf = smbConfSetOrRemove(conf, "dns forwarder", "");
 
 	// Mit dem Heraufstufen entfaellt die Windows-2000-Unterstuetzung --

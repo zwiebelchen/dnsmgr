@@ -1216,8 +1216,12 @@ static std::string utf8ToUtf16leWithBom(const std::string& utf8) {
 // noch keine Skripte konfiguriert).
 static std::map<std::string, std::vector<ScriptEntry>> parseScriptsIni(const std::string& path) {
 	std::map<std::string, std::vector<ScriptEntry>> out;
+	// SYSVOL ist 0770 (root und Administratoren) -- der Benutzer der
+	// Oberfläche darf dort nicht lesen. Ohne root blieb die Liste
+	// stillschweigend leer.
 	std::string raw = readFileUnprivileged(path.c_str());
-	if (raw.empty()) return out;
+	if (raw.empty()) runAsRootCaptured({ FXString("cat"), FXString(path.c_str()) }, raw);
+	if (raw.empty() || raw.rfind("cat:", 0) == 0) return out;
 	std::string utf8 = utf16leToUtf8(raw);
 	std::string curSection;
 	std::map<int, ScriptEntry> curEntries;
